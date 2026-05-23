@@ -395,6 +395,81 @@ class TestFetchMessages:
 
 
 # ---------------------------------------------------------------------------
+# Action: search_messages
+# ---------------------------------------------------------------------------
+
+class TestSearchMessages:
+    @patch("tools.discord_tool._discord_request")
+    def test_search_messages_uses_guild_search_endpoint(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {
+            "total_results": 1,
+            "messages": [[
+                {
+                    "id": "2001",
+                    "content": "memory hierarchy cache miss write back",
+                    "channel_id": "11",
+                    "guild_id": "111",
+                    "hit": True,
+                    "author": {"id": "42", "username": "jake", "global_name": "Jake", "bot": False},
+                    "timestamp": "2026-05-06T12:00:00Z",
+                    "edited_timestamp": None,
+                    "attachments": [],
+                    "pinned": False,
+                },
+            ]],
+        }
+
+        result = json.loads(discord_core(
+            action="search_messages",
+            guild_id="111",
+            query="memory hierarchy",
+            author_id="42",
+            limit=100,
+        ))
+
+        assert result["count"] == 1
+        assert result["total_results"] == 1
+        assert result["messages"][0]["id"] == "2001"
+        assert result["messages"][0]["hit"] is True
+        assert result["messages"][0]["author"]["username"] == "jake"
+        mock_req.assert_called_once_with(
+            "GET", "/guilds/111/messages/search", "test-token",
+            params={"content": "memory hierarchy", "author_id": "42", "limit": "25"},
+        )
+
+    @patch("tools.discord_tool._discord_request")
+    def test_search_messages_accepts_content_alias_and_plural_filters(self, mock_req, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+        mock_req.return_value = {"messages": [], "total_results": 0}
+
+        discord_core(
+            action="search_messages",
+            guild_id="111",
+            content="OpenClaw migration",
+            channel_ids=["11", "12"],
+            author_ids=["42", "43"],
+            limit=10,
+        )
+
+        call_params = mock_req.call_args[1]["params"]
+        assert call_params == {
+            "content": "OpenClaw migration",
+            "channel_id": ["11", "12"],
+            "author_id": ["42", "43"],
+            "limit": "10",
+        }
+
+    def test_search_messages_requires_query_or_content(self, monkeypatch):
+        monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+
+        result = json.loads(discord_core(action="search_messages", guild_id="111"))
+
+        assert "error" in result
+        assert "query or content" in result["error"]
+
+
+# ---------------------------------------------------------------------------
 # Action: list_pins
 # ---------------------------------------------------------------------------
 
@@ -558,14 +633,14 @@ class TestRegistration:
         from tools.registry import registry
         entry = registry._tools["discord"]
         actions = set(entry.schema["parameters"]["properties"]["action"]["enum"])
-        assert actions == {"fetch_messages", "search_members", "create_thread"}
+        assert actions == {"fetch_messages", "search_messages", "search_members", "create_thread"}
 
     def test_admin_schema_actions(self):
         """Admin static schema should list only admin actions."""
         from tools.registry import registry
         entry = registry._tools["discord_admin"]
         actions = set(entry.schema["parameters"]["properties"]["action"]["enum"])
-        expected_admin = set(_ACTIONS.keys()) - {"fetch_messages", "search_members", "create_thread"}
+        expected_admin = set(_ACTIONS.keys()) - {"fetch_messages", "search_messages", "search_members", "create_thread"}
         assert actions == expected_admin
 
     def test_all_actions_covered(self):
@@ -587,6 +662,7 @@ class TestRegistration:
         entry = registry._tools["discord"]
         desc = entry.schema["description"]
         assert "fetch_messages(channel_id)" in desc
+        assert "search_messages(guild_id, query)" in desc
         assert "search_members(guild_id, query)" in desc
         assert "create_thread(channel_id, name)" in desc
         # Admin actions should NOT be in core description
@@ -603,6 +679,7 @@ class TestRegistration:
         assert "delete_message(channel_id, message_id)" in desc
         # Core actions should NOT be in admin description
         assert "fetch_messages(" not in desc
+        assert "search_messages(" not in desc
         assert "create_thread(" not in desc
 
     def test_handler_callable(self):

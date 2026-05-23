@@ -160,7 +160,14 @@ MEMORY_GUIDANCE = (
 SESSION_SEARCH_GUIDANCE = (
     "When the user references something from a past conversation or you suspect "
     "relevant cross-session context exists, use session_search to recall it before "
-    "asking them to repeat themselves."
+    "asking them to repeat themselves. Use memory_search as the fast cache tier "
+    "for durable project/user context stored in ChatWorkspace or Hermes memory files. "
+    "Think of current session context as RAM, memory_search/web/search_files as cache, "
+    "and heavier Discord/session archive retrieval as disk. When memory_search or the "
+    "heavier disk tier recovers durable context that should have been saved already, "
+    "treat that as a cache miss and write back a tight summary to the relevant "
+    "ChatWorkspace context file or Hermes memory pointer so future sessions find it "
+    "at the cache tier."
 )
 
 SKILLS_GUIDANCE = (

@@ -31,7 +31,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from tools.registry import registry
 
@@ -59,14 +59,14 @@ def _discord_request(
     method: str,
     path: str,
     token: str,
-    params: Optional[Dict[str, str]] = None,
+    params: Optional[Dict[str, Any]] = None,
     body: Optional[Dict[str, Any]] = None,
     timeout: int = 15,
 ) -> Any:
     """Make a request to the Discord REST API."""
     url = f"{DISCORD_API_BASE}{path}"
     if params:
-        url += "?" + urllib.parse.urlencode(params)
+        url += "?" + urllib.parse.urlencode(params, doseq=True)
 
     data = None
     if body is not None:
@@ -391,6 +391,103 @@ def _fetch_messages(
     return json.dumps({"messages": result, "count": len(result)})
 
 
+def _coerce_id_list(value: Any) -> List[str]:
+    """Normalize a scalar/list/comma-separated Discord ID argument."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        parts = value.split(",")
+    elif isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+        parts = value
+    else:
+        parts = [value]
+    return [str(part).strip() for part in parts if str(part).strip()]
+
+
+def _format_message(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the compact message shape shared by fetch/search actions."""
+    author = msg.get("author", {}) or {}
+    return {
+        "id": msg["id"],
+        "content": msg.get("content", ""),
+        "author": {
+            "id": author.get("id"),
+            "username": author.get("username"),
+            "display_name": author.get("global_name"),
+            "bot": author.get("bot", False),
+        },
+        "timestamp": msg.get("timestamp"),
+        "edited_timestamp": msg.get("edited_timestamp"),
+        "channel_id": msg.get("channel_id"),
+        "guild_id": msg.get("guild_id"),
+        "attachments": [
+            {"filename": a.get("filename"), "url": a.get("url"), "size": a.get("size")}
+            for a in msg.get("attachments", [])
+        ],
+        "reactions": [
+            {"emoji": r.get("emoji", {}).get("name"), "count": r.get("count", 0)}
+            for r in msg.get("reactions", [])
+        ] if msg.get("reactions") else [],
+        "pinned": msg.get("pinned", False),
+        "hit": msg.get("hit", False),
+    }
+
+
+def _search_messages(
+    token: str,
+    guild_id: str,
+    query: str = "",
+    content: str = "",
+    channel_id: str = "",
+    channel_ids: Any = None,
+    author_id: str = "",
+    author_ids: Any = None,
+    limit: int = 25,
+    **_kwargs: Any,
+) -> str:
+    """Search messages across a guild via Discord's guild search endpoint."""
+    search_content = (content or query or "").strip()
+    if not search_content:
+        return json.dumps({"error": "Missing required parameters for 'search_messages': query or content"})
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 25
+
+    params: Dict[str, Any] = {
+        "content": search_content,
+        "limit": str(min(max(limit, 1), 25)),
+    }
+    channels = _coerce_id_list(channel_ids) or _coerce_id_list(channel_id)
+    authors = _coerce_id_list(author_ids) or _coerce_id_list(author_id)
+    if channels:
+        params["channel_id"] = channels if len(channels) > 1 else channels[0]
+    if authors:
+        params["author_id"] = authors if len(authors) > 1 else authors[0]
+
+    data = _discord_request("GET", f"/guilds/{guild_id}/messages/search", token, params=params)
+    raw_groups = data.get("messages", []) if isinstance(data, dict) else []
+    messages: List[Dict[str, Any]] = []
+    for group_index, group in enumerate(raw_groups):
+        if isinstance(group, dict):
+            group_messages = [group]
+        else:
+            group_messages = group or []
+        for msg in group_messages:
+            if not isinstance(msg, dict) or "id" not in msg:
+                continue
+            entry = _format_message(msg)
+            entry["search_group"] = group_index
+            messages.append(entry)
+
+    return json.dumps({
+        "messages": messages,
+        "count": len(messages),
+        "total_results": data.get("total_results") if isinstance(data, dict) else None,
+    })
+
+
 def _list_pins(token: str, channel_id: str, **_kwargs: Any) -> str:
     """List pinned messages in a channel."""
     messages = _discord_request("GET", f"/channels/{channel_id}/pins", token)
@@ -479,6 +576,7 @@ _ACTIONS = {
     "member_info": _member_info,
     "search_members": _search_members,
     "fetch_messages": _fetch_messages,
+    "search_messages": _search_messages,
     "list_pins": _list_pins,
     "pin_message": _pin_message,
     "unpin_message": _unpin_message,
@@ -488,7 +586,7 @@ _ACTIONS = {
     "remove_role": _remove_role,
 }
 
-_CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_members", "create_thread"})
+_CORE_ACTION_NAMES = frozenset({"fetch_messages", "search_messages", "search_members", "create_thread"})
 _ADMIN_ACTION_NAMES = frozenset(_ACTIONS.keys()) - _CORE_ACTION_NAMES
 
 _CORE_ACTIONS = {k: v for k, v in _ACTIONS.items() if k in _CORE_ACTION_NAMES}
@@ -506,6 +604,7 @@ _ACTION_MANIFEST: List[Tuple[str, str, str]] = [
     ("member_info", "(guild_id, user_id)", "lookup a specific member"),
     ("search_members", "(guild_id, query)", "find members by name prefix"),
     ("fetch_messages", "(channel_id)", "recent messages; optional before/after snowflakes"),
+    ("search_messages", "(guild_id, query)", "guild message search; optional channel_id/author_id filters"),
     ("list_pins", "(channel_id)", "pinned messages in a channel"),
     ("pin_message", "(channel_id, message_id)", "pin a message"),
     ("unpin_message", "(channel_id, message_id)", "unpin a message"),
@@ -527,6 +626,7 @@ _REQUIRED_PARAMS: Dict[str, List[str]] = {
     "search_members": ["guild_id", "query"],
     "channel_info": ["channel_id"],
     "fetch_messages": ["channel_id"],
+    "search_messages": ["guild_id"],
     "list_pins": ["channel_id"],
     "pin_message": ["channel_id", "message_id"],
     "unpin_message": ["channel_id", "message_id"],
@@ -629,7 +729,7 @@ def _build_schema(
     manifest_block = "\n".join(manifest_lines)
 
     content_note = ""
-    affected_actions = {"fetch_messages", "list_pins"} & set(actions)
+    affected_actions = {"fetch_messages", "search_messages", "list_pins"} & set(actions)
     if affected_actions and caps.get("detected") and caps.get("has_message_content") is False:
         names = " and ".join(sorted(affected_actions))
         content_note = (
@@ -656,6 +756,7 @@ def _build_schema(
             "Available actions:\n"
             f"{manifest_block}\n\n"
             "Use the channel_id from the current conversation context. "
+            "Use search_messages with guild_id + author_id to search a server's history. "
             "Use search_members to look up user IDs by name prefix."
             f"{content_note}"
         )
@@ -687,7 +788,25 @@ def _build_schema(
         },
         "query": {
             "type": "string",
-            "description": "Member name prefix to search for (search_members).",
+            "description": "Member name prefix (search_members) or message text (search_messages).",
+        },
+        "content": {
+            "type": "string",
+            "description": "Message text to search for (search_messages). Alias for query.",
+        },
+        "channel_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Discord channel IDs to restrict search_messages.",
+        },
+        "author_id": {
+            "type": "string",
+            "description": "Discord user ID to restrict search_messages.",
+        },
+        "author_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Discord user IDs to restrict search_messages.",
         },
         "name": {
             "type": "string",
@@ -697,7 +816,7 @@ def _build_schema(
             "type": "integer",
             "minimum": 1,
             "maximum": 100,
-            "description": "Max results (default 50). Applies to fetch_messages, search_members.",
+            "description": "Max results (default 50). fetch_messages caps at 100, search_members caps at 100, search_messages caps at 25.",
         },
         "before": {
             "type": "string",
@@ -785,6 +904,10 @@ _ACTION_403_HINT = {
     "fetch_messages": (
         "Bot cannot view this channel (missing VIEW_CHANNEL or READ_MESSAGE_HISTORY)."
     ),
+    "search_messages": (
+        "Bot cannot search this guild (missing VIEW_CHANNEL/READ_MESSAGE_HISTORY in relevant channels, "
+        "not in the guild, or Message Content Intent is disabled)."
+    ),
     "list_pins": (
         "Bot cannot view this channel (missing VIEW_CHANNEL or READ_MESSAGE_HISTORY)."
     ),
@@ -834,11 +957,15 @@ def _run_discord_action(
     role_id: str = "",
     message_id: str = "",
     query: str = "",
+    content: str = "",
     name: str = "",
     limit: int = 50,
     before: str = "",
     after: str = "",
     auto_archive_duration: int = 1440,
+    author_id: str = "",
+    author_ids: Any = None,
+    channel_ids: Any = None,
 ) -> str:
     """Shared handler logic for both discord tools."""
     token = _get_bot_token()
@@ -871,6 +998,7 @@ def _run_discord_action(
         "role_id": role_id,
         "message_id": message_id,
         "query": query,
+        "content": content,
         "name": name,
     }
 
@@ -889,11 +1017,15 @@ def _run_discord_action(
             role_id=role_id,
             message_id=message_id,
             query=query,
+            content=content,
             name=name,
             limit=limit,
             before=before,
             after=after,
             auto_archive_duration=auto_archive_duration,
+            author_id=author_id,
+            author_ids=author_ids,
+            channel_ids=channel_ids,
         )
     except DiscordAPIError as e:
         logger.warning("Discord API error in %s action '%s': %s", tool_label, action, e)
@@ -906,7 +1038,7 @@ def _run_discord_action(
 
 
 def discord_core(action: str, **kwargs) -> str:
-    """Execute a core Discord action (fetch_messages, search_members, create_thread)."""
+    """Execute a core Discord action (fetch/search messages, search members, create threads)."""
     return _run_discord_action(action, _CORE_ACTIONS, "discord", **kwargs)
 
 
@@ -921,8 +1053,9 @@ def discord_admin_handler(action: str, **kwargs) -> str:
 
 _HANDLER_DEFAULTS = {
     "action": "", "guild_id": "", "channel_id": "", "user_id": "",
-    "role_id": "", "message_id": "", "query": "", "name": "",
+    "role_id": "", "message_id": "", "query": "", "content": "", "name": "",
     "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440,
+    "author_id": "", "author_ids": None, "channel_ids": None,
 }
 
 

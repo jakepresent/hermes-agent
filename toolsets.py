@@ -47,7 +47,7 @@ _HERMES_CORE_TOOLS = [
     # Text-to-speech
     "text_to_speech",
     # Planning & memory
-    "todo", "memory",
+    "todo", "memory", "memory_search",
     # Session history search
     "session_search",
     # Clarifying questions
@@ -202,7 +202,13 @@ TOOLSETS = {
     
     "memory": {
         "description": "Persistent memory across sessions (personal notes + user profile)",
-        "tools": ["memory"],
+        "tools": ["memory", "memory_search"],
+        "includes": []
+    },
+
+    "memory_search": {
+        "description": "Search durable memory files and ChatWorkspace through a local SQLite FTS cache",
+        "tools": ["memory_search"],
         "includes": []
     },
     

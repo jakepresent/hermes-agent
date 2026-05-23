@@ -48,6 +48,8 @@ class TestGuidanceConstants:
     def test_session_search_guidance_is_simple_cross_session_recall(self):
         assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+        assert "memory_search as the fast cache tier" in SESSION_SEARCH_GUIDANCE
+        assert "cache miss" in SESSION_SEARCH_GUIDANCE
 
 
 # =========================================================================

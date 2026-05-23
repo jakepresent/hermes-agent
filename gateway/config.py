@@ -527,6 +527,8 @@ class GatewayConfig:
 
     # STT settings
     stt_enabled: bool = True  # Whether to auto-transcribe inbound voice messages
+    persist_voice_transcripts: bool = False  # Whether to save inbound voice transcripts to searchable daily logs
+    voice_transcripts_dir: str = ""  # Optional override; defaults to ~/.hermes/memories/memory-media/transcripts
 
     # Session isolation in shared chats
     group_sessions_per_user: bool = True  # Isolate group/channel sessions per participant when user IDs are available
@@ -635,6 +637,8 @@ class GatewayConfig:
             "always_log_local": self.always_log_local,
             "filter_silence_narration": self.filter_silence_narration,
             "stt_enabled": self.stt_enabled,
+            "persist_voice_transcripts": self.persist_voice_transcripts,
+            "voice_transcripts_dir": self.voice_transcripts_dir,
             "group_sessions_per_user": self.group_sessions_per_user,
             "thread_sessions_per_user": self.thread_sessions_per_user,
             "max_concurrent_sessions": self.max_concurrent_sessions,
@@ -681,6 +685,13 @@ class GatewayConfig:
         if stt_enabled is None:
             stt_enabled = data.get("stt", {}).get("enabled") if isinstance(data.get("stt"), dict) else None
 
+        persist_voice_transcripts = data.get("persist_voice_transcripts")
+        if persist_voice_transcripts is None and isinstance(data.get("stt"), dict):
+            persist_voice_transcripts = data.get("stt", {}).get("persist_voice_transcripts")
+        voice_transcripts_dir = data.get("voice_transcripts_dir")
+        if voice_transcripts_dir is None and isinstance(data.get("stt"), dict):
+            voice_transcripts_dir = data.get("stt", {}).get("voice_transcripts_dir", "")
+
         group_sessions_per_user = data.get("group_sessions_per_user")
         thread_sessions_per_user = data.get("thread_sessions_per_user")
         nested_gateway = data.get("gateway") if isinstance(data.get("gateway"), dict) else {}
@@ -718,6 +729,8 @@ class GatewayConfig:
                 data.get("filter_silence_narration"), True
             ),
             stt_enabled=_coerce_bool(stt_enabled, True),
+            persist_voice_transcripts=_coerce_bool(persist_voice_transcripts, False),
+            voice_transcripts_dir=str(voice_transcripts_dir or ""),
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             max_concurrent_sessions=max_concurrent_sessions,
@@ -804,6 +817,10 @@ def load_gateway_config() -> GatewayConfig:
             stt_cfg = yaml_cfg.get("stt")
             if isinstance(stt_cfg, dict):
                 gw_data["stt"] = stt_cfg
+                if "persist_voice_transcripts" in stt_cfg:
+                    gw_data["persist_voice_transcripts"] = stt_cfg["persist_voice_transcripts"]
+                if "voice_transcripts_dir" in stt_cfg:
+                    gw_data["voice_transcripts_dir"] = stt_cfg["voice_transcripts_dir"]
 
             if "group_sessions_per_user" in yaml_cfg:
                 gw_data["group_sessions_per_user"] = yaml_cfg["group_sessions_per_user"]

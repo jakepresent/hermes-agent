@@ -4164,8 +4164,7 @@ class BasePlatformAdapter(ABC):
 
         When a split falls inside a triple-backtick code block, the fence is
         closed at the end of the current chunk and reopened (with the original
-        language tag) at the start of the next chunk.  Multi-chunk responses
-        receive indicators like ``(1/3)``.
+        language tag) at the start of the next chunk.
 
         Args:
             content: The full message content
@@ -4276,11 +4275,8 @@ class BasePlatformAdapter(ABC):
 
             chunks.append(full_chunk)
 
-        # Append chunk indicators when the response spans multiple messages
-        if len(chunks) > 1:
-            total = len(chunks)
-            chunks = [
-                f"{chunk} ({i + 1}/{total})" for i, chunk in enumerate(chunks)
-            ]
-
+        # Historically Hermes appended raw " (1/3)" suffixes here, but they
+        # are visually noisy in chat clients and can appear as orphaned lines
+        # between Discord chunks. Platform adapters that still want indicators
+        # should add them explicitly after splitting.
         return chunks

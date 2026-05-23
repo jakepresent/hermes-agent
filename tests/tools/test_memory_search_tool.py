@@ -13,6 +13,7 @@ from tools.memory_search_tool import (
     MEMORY_SEARCH_SCHEMA,
     build_index,
     import_openclaw_legacy_memory,
+    import_openclaw_legacy_sessions,
     memory_search_tool,
 )
 
@@ -93,6 +94,7 @@ def test_schema_lists_all_default_indexed_sources():
     source_schema = MEMORY_SEARCH_SCHEMA["parameters"]["properties"]["source"]
 
     assert "localops" in source_schema["enum"]
+    assert "legacy_sessions" in source_schema["enum"]
 
 
 def test_default_roots_include_localops_operator_notes():
@@ -163,3 +165,55 @@ def test_import_openclaw_legacy_memory_chunks(tmp_path):
     assert hit["source"] == "openclaw_legacy"
     assert hit["path"] == "openclaw://memory/old.md"
     assert "Mamiya" in hit["snippet"]
+
+
+def test_import_openclaw_legacy_sessions_indexes_jsonl_messages(tmp_path):
+    sessions_root = tmp_path / "agents"
+    session_dir = sessions_root / "main" / "sessions"
+    session_dir.mkdir(parents=True)
+    session_file = session_dir / "session-123.jsonl"
+    session_file.write_text(
+        '\n'.join([
+            json.dumps({"type": "session", "id": "session-123", "timestamp": "2026-05-23T15:03:26Z"}),
+            json.dumps({
+                "type": "message",
+                "id": "m1",
+                "timestamp": "2026-05-23T15:03:27Z",
+                "message": {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "Please compare Granola to Aside for meeting notes."}],
+                },
+            }),
+            json.dumps({
+                "type": "message",
+                "id": "m2",
+                "timestamp": "2026-05-23T15:03:28Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Aside is local-first and Granola is a hosted AI notepad."}],
+                },
+            }),
+        ]) + '\n',
+        encoding="utf-8",
+    )
+    # Trajectory files are noisier tool traces and should not be indexed by this importer.
+    (session_dir / "session-123.trajectory.jsonl").write_text(
+        json.dumps({"type": "message", "message": {"role": "tool", "content": "SHOULD_NOT_APPEAR"}}) + "\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+
+    imported = import_openclaw_legacy_sessions(sessions_root=sessions_root, index_path=index_path)
+
+    assert imported["success"] is True
+    assert imported["imported_files"] == 1
+    assert imported["imported_chunks"] == 1
+
+    payload = json.loads(memory_search_tool("Granola Aside", source="legacy_sessions", index_path=index_path, freshness_seconds=9999))
+    assert payload["success"] is True
+    assert payload["results"]
+    hit = payload["results"][0]
+    assert hit["source"] == "legacy_sessions"
+    assert hit["path"] == "openclaw-session://main/session-123"
+    assert "Granola" in hit["snippet"]
+    assert "SHOULD_NOT_APPEAR" not in hit["snippet"]

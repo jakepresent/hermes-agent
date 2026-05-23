@@ -54,21 +54,21 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
 _TIER_HIGH = {
     "tool_progress": "all",
     "show_reasoning": False,
-    "tool_preview_length": 40,
+    "tool_preview_length": 80,
     "streaming": None,  # follow global
 }
 
 _TIER_MEDIUM = {
     "tool_progress": "new",
     "show_reasoning": False,
-    "tool_preview_length": 40,
+    "tool_preview_length": 80,
     "streaming": None,
 }
 
 _TIER_LOW = {
     "tool_progress": "off",
     "show_reasoning": False,
-    "tool_preview_length": 40,
+    "tool_preview_length": 80,
     "streaming": False,
 }
 

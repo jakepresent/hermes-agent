@@ -229,6 +229,13 @@ class TestPlatformDefaults:
 
         assert resolve_display_setting({}, "telegram", "streaming") is None
 
+    def test_default_tool_preview_length_is_longer_for_editable_platforms(self):
+        """Editable chat surfaces can afford more useful tool previews."""
+        from gateway.display_config import resolve_display_setting
+
+        assert resolve_display_setting({}, "discord", "tool_preview_length") == 80
+        assert resolve_display_setting({}, "telegram", "tool_preview_length") == 80
+
 
 # ---------------------------------------------------------------------------
 # Config migration: tool_progress_overrides → display.platforms

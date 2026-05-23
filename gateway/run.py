@@ -15680,8 +15680,9 @@ class GatewayRunner:
             last_tool[0] = tool_name
             
             # Build progress message with primary argument preview
-            from agent.display import get_tool_emoji
+            from agent.display import get_tool_display_label, get_tool_emoji
             emoji = get_tool_emoji(tool_name, default="⚙️")
+            label = get_tool_display_label(tool_name, args)
             
             # Verbose mode: show detailed arguments, respects tool_preview_length
             if progress_mode == "verbose":
@@ -15694,11 +15695,11 @@ class GatewayRunner:
                     # detail.  Platform message-length limits handle the rest.
                     if _pl > 0 and len(args_str) > _pl:
                         args_str = args_str[:_pl - 3] + "..."
-                    msg = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
+                    msg = f"{emoji} {label}({list(args.keys())})\n{args_str}"
                 elif preview:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    msg = f"{emoji} {label}: \"{preview}\""
                 else:
-                    msg = f"{emoji} {tool_name}..."
+                    msg = f"{emoji} {label}..."
                 progress_queue.put(msg)
                 return
             
@@ -15711,9 +15712,9 @@ class GatewayRunner:
                 _cap = _pl if _pl > 0 else 40
                 if len(preview) > _cap:
                     preview = preview[:_cap - 3] + "..."
-                msg = f"{emoji} {tool_name}: \"{preview}\""
+                msg = f"{emoji} {label}: \"{preview}\""
             else:
-                msg = f"{emoji} {tool_name}..."
+                msg = f"{emoji} {label}..."
             
             # Dedup: collapse consecutive identical progress messages.
             # Common with execute_code where models iterate with the same

@@ -1,6 +1,7 @@
 """Tests for gateway/platforms/base.py — MessageEvent, media extraction, message truncation."""
 
 import os
+import re
 import time
 from unittest.mock import patch
 
@@ -776,12 +777,12 @@ class TestTruncateMessage:
         for word in msg.strip().split():
             assert word in reassembled, f"Word '{word}' lost during truncation"
 
-    def test_chunks_have_indicators(self):
+    def test_chunks_do_not_have_pagination_indicators(self):
         adapter = self._adapter()
         msg = "word " * 200
         chunks = adapter.truncate_message(msg, max_length=200)
-        assert "(1/" in chunks[0]
-        assert f"({len(chunks)}/{len(chunks)})" in chunks[-1]
+        assert len(chunks) > 1
+        assert not any(re.search(r"\(\d+/\d+\)$", chunk) for chunk in chunks)
 
     def test_code_block_first_chunk_closed(self):
         adapter = self._adapter()

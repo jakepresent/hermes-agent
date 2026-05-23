@@ -542,6 +542,178 @@ def import_openclaw_legacy_memory(
     }
 
 
+def _extract_openclaw_content(content: Any) -> str:
+    """Extract text from OpenClaw message content shapes."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                text = part.get("text")
+                if text:
+                    parts.append(str(text))
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _strip_openclaw_gateway_metadata(text: str) -> str:
+    """Remove gateway metadata wrappers so search emphasizes the actual turn."""
+    text = re.sub(
+        r"\AConversation info \(untrusted metadata\):\n```json\n[\s\S]*?\n```\n\n"
+        r"Sender \(untrusted metadata\):\n```json\n[\s\S]*?\n```\n\n",
+        "",
+        text,
+    )
+    return text.strip()
+
+
+def _iter_openclaw_session_files(sessions_root: Path) -> Iterable[Path]:
+    """Yield canonical OpenClaw session JSONL files, excluding noisy traces/checkpoints."""
+    if not sessions_root.exists():
+        return
+    patterns = ["*/sessions/*.jsonl"] if sessions_root.name == "agents" else ["*.jsonl", "*/sessions/*.jsonl"]
+    seen: set[Path] = set()
+    for pattern in patterns:
+        for path in sessions_root.glob(pattern):
+            if path in seen:
+                continue
+            seen.add(path)
+            name = path.name
+            if name.endswith(".trajectory.jsonl") or ".checkpoint." in name:
+                continue
+            yield path
+
+
+def import_openclaw_legacy_sessions(
+    *,
+    sessions_root: Path | str = Path.home() / ".openclaw" / "agents",
+    index_path: Path | str = DEFAULT_INDEX_PATH,
+    max_chunk_chars: int = 6000,
+) -> dict[str, Any]:
+    """Import OpenClaw session JSONL turns into the Hermes FTS cache.
+
+    This indexes user/assistant messages only. Tool results and trajectory files
+    are intentionally skipped because they are noisy and more likely to contain
+    raw external payloads or secrets. Paths use ``openclaw-session://`` so hits
+    are clearly legacy references rather than canonical Hermes memory files.
+    """
+    sessions_root = Path(sessions_root).expanduser()
+    index_path = Path(index_path).expanduser()
+    if not sessions_root.exists():
+        return {"success": False, "error": f"OpenClaw sessions root not found: {sessions_root}"}
+
+    imported_files = 0
+    imported_chunks = 0
+    skipped_files = 0
+    now = time.time()
+    with _connect(index_path) as con:
+        _ensure_schema(con)
+        legacy_paths = [
+            r[0]
+            for r in con.execute(
+                "SELECT DISTINCT path FROM chunks WHERE source = 'legacy_sessions'"
+            ).fetchall()
+        ]
+        for path in legacy_paths:
+            _delete_file_chunks(con, path)
+        con.execute("DELETE FROM files WHERE source = 'legacy_sessions'")
+
+        for session_file in _iter_openclaw_session_files(sessions_root) or []:
+            agent_name = "unknown"
+            try:
+                if session_file.parent.name == "sessions":
+                    agent_name = session_file.parent.parent.name
+            except Exception:
+                pass
+            session_id = session_file.stem
+            path_uri = f"openclaw-session://{agent_name}/{session_id}"
+            turns: list[str] = []
+            session_timestamp = ""
+            try:
+                with session_file.open("r", encoding="utf-8", errors="replace") as fh:
+                    for line_no, line in enumerate(fh, start=1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if obj.get("type") == "session":
+                            session_timestamp = str(obj.get("timestamp") or "")
+                            session_id = str(obj.get("id") or session_id)
+                            path_uri = f"openclaw-session://{agent_name}/{session_id}"
+                            continue
+                        if obj.get("type") != "message":
+                            continue
+                        msg = obj.get("message") or {}
+                        role = str(msg.get("role") or "")
+                        if role not in {"user", "assistant"}:
+                            continue
+                        text = _strip_openclaw_gateway_metadata(_extract_openclaw_content(msg.get("content")))
+                        if not text:
+                            continue
+                        timestamp = str(obj.get("timestamp") or "")
+                        turns.append(f"[{timestamp} line {line_no} {role}]\n{text}")
+            except OSError:
+                skipped_files += 1
+                continue
+
+            if not turns:
+                skipped_files += 1
+                continue
+
+            header = f"OpenClaw legacy session {session_id} ({agent_name})"
+            if session_timestamp:
+                header += f"\nStarted: {session_timestamp}"
+            text = header + "\n\n" + "\n\n---\n\n".join(turns)
+            chunks = _chunk_markdown(text, max_chars=max_chunk_chars)
+            if not chunks:
+                skipped_files += 1
+                continue
+            file_hash = _sha256_text(text)
+            for start_line, end_line, chunk_text in chunks:
+                _insert_chunk(
+                    con,
+                    path=path_uri,
+                    source="legacy_sessions",
+                    start_line=start_line,
+                    end_line=end_line,
+                    text=chunk_text,
+                    seed=f"legacy_sessions:{file_hash}:{path_uri}:{start_line}:{end_line}",
+                    updated_at=now,
+                )
+                imported_chunks += 1
+            con.execute(
+                """
+                INSERT INTO files(path, source, hash, mtime, size, indexed_at)
+                VALUES (?, 'legacy_sessions', ?, ?, ?, ?)
+                ON CONFLICT(path) DO UPDATE SET
+                    source=excluded.source,
+                    hash=excluded.hash,
+                    mtime=excluded.mtime,
+                    size=excluded.size,
+                    indexed_at=excluded.indexed_at
+                """,
+                (path_uri, file_hash, session_file.stat().st_mtime, session_file.stat().st_size, now),
+            )
+            imported_files += 1
+        con.commit()
+    return {
+        "success": True,
+        "sessions_root": str(sessions_root),
+        "index_path": str(index_path),
+        "imported_files": imported_files,
+        "imported_chunks": imported_chunks,
+        "skipped_files": skipped_files,
+    }
+
+
 def memory_search_tool(
     query: str,
     source: str = "all",

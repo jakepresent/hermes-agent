@@ -159,6 +159,41 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
     return default
 
 
+def get_tool_display_label(tool_name: str, args: dict | None = None) -> str:
+    """Return a human-facing tool label for gateway/API progress UIs.
+
+    Gateway progress messages are user-visible chat artifacts, so avoid raw
+    internal function names for the high-signal tools Jake sees often.
+    Unknown tools intentionally fall back to their registry name for debugging.
+    """
+    args = args if isinstance(args, dict) else {}
+    if tool_name == "memory_search":
+        return "Memory Search"
+    if tool_name == "memory":
+        action = str(args.get("action") or "").lower()
+        if action == "add":
+            return "Memory Save"
+        if action == "replace":
+            return "Memory Update"
+        if action == "remove":
+            return "Memory Remove"
+        return "Memory"
+    labels = {
+        "session_search": "Session Search",
+        "search_files": "File Search",
+        "read_file": "Read File",
+        "write_file": "Write File",
+        "web_search": "Web Search",
+        "web_extract": "Web Fetch",
+        "skill_view": "Skill View",
+        "skills_list": "Skills List",
+        "execute_code": "Execute Code",
+        "terminal": "Terminal",
+        "todo": "Todo",
+    }
+    return labels.get(tool_name, tool_name)
+
+
 # =========================================================================
 # Tool preview (one-line summary of a tool call's primary argument)
 # =========================================================================
@@ -189,6 +224,7 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         "cronjob": "action",
         "execute_code": "code", "delegate_task": "goal",
         "clarify": "question", "skill_manage": "name",
+        "memory_search": "query",
     }
 
     if tool_name == "process":
@@ -217,20 +253,28 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
 
     if tool_name == "session_search":
         query = _oneline(args.get("query", ""))
-        return f"recall: \"{query[:25]}{'...' if len(query) > 25 else ''}\""
+        if max_len > 0 and len(query) > max_len:
+            query = query[:max_len - 3] + "..."
+        return f"recall: \"{query}\""
 
     if tool_name == "memory":
         action = args.get("action", "")
         target = args.get("target", "")
+
+        def _limit_memory_preview(value: str, fallback_limit: int) -> str:
+            value = _oneline(value)
+            limit = max_len if max_len and max_len > 0 else fallback_limit
+            return value[:limit - 3] + "..." if len(value) > limit else value
+
         if action == "add":
-            content = _oneline(args.get("content", ""))
-            return f"+{target}: \"{content[:25]}{'...' if len(content) > 25 else ''}\""
+            content = _limit_memory_preview(args.get("content", ""), 25)
+            return f"+{target}: \"{content}\""
         elif action == "replace":
-            old = _oneline(args.get("old_text") or "") or "<missing old_text>"
-            return f"~{target}: \"{old[:20]}\""
+            old = _limit_memory_preview(args.get("old_text") or "", 20) or "<missing old_text>"
+            return f"~{target}: \"{old}\""
         elif action == "remove":
-            old = _oneline(args.get("old_text") or "") or "<missing old_text>"
-            return f"-{target}: \"{old[:20]}\""
+            old = _limit_memory_preview(args.get("old_text") or "", 20) or "<missing old_text>"
+            return f"-{target}: \"{old}\""
         return action
 
     if tool_name == "send_message":
@@ -991,6 +1035,8 @@ def get_cute_tool_message(
             return _wrap(f"┊ 📋 plan      {len(todos_arg)} task(s)  {dur}")
     if tool_name == "session_search":
         return _wrap(f"┊ 🔍 recall    \"{_trunc(args.get('query', ''), 35)}\"  {dur}")
+    if tool_name == "memory_search":
+        return _wrap(f"┊ 🧠 mem srch  \"{_trunc(args.get('query', ''), 42)}\"  {dur}")
     if tool_name == "memory":
         action = args.get("action", "?")
         target = args.get("target", "")

@@ -9,6 +9,7 @@ from agent.display import (
     capture_local_edit_snapshot,
     extract_edit_diff,
     get_cute_tool_message,
+    get_tool_display_label,
     set_tool_preview_max_len,
     _render_inline_unified_diff,
     _summarize_rendered_diff_sections,
@@ -92,6 +93,27 @@ class TestBuildToolPreview:
         result = build_tool_preview("memory", {"action": "add", "target": "user", "content": "test note"})
         assert result is not None
         assert "user" in result
+
+    def test_memory_search_preview(self):
+        result = build_tool_preview("memory_search", {"query": "memory hierarchy cache disk writeback"})
+        assert result == "memory hierarchy cache disk writeback"
+
+    def test_memory_preview_respects_configured_limit(self):
+        result = build_tool_preview(
+            "memory",
+            {"action": "add", "target": "memory", "content": "x" * 100},
+            max_len=80,
+        )
+        assert result is not None
+        assert "x" * 77 in result
+        assert result.endswith('..."')
+
+    def test_tool_display_labels_for_memory_tools(self):
+        assert get_tool_display_label("memory_search", {"query": "x"}) == "Memory Search"
+        assert get_tool_display_label("memory", {"action": "add"}) == "Memory Save"
+        assert get_tool_display_label("memory", {"action": "replace"}) == "Memory Update"
+        assert get_tool_display_label("memory", {"action": "remove"}) == "Memory Remove"
+        assert get_tool_display_label("search_files", {}) == "File Search"
 
     def test_memory_replace_missing_old_text_marked(self):
         # Avoid empty quotes "" in the preview when old_text is missing/None.

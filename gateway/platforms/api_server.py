@@ -1875,12 +1875,13 @@ class APIServerAdapter(BasePlatformAdapter):
                 if not tool_call_id or function_name.startswith("_"):
                     return
                 _started_tool_call_ids.add(tool_call_id)
-                from agent.display import build_tool_preview, get_tool_emoji
+                from agent.display import build_tool_preview, get_tool_display_label, get_tool_emoji
                 label = build_tool_preview(function_name, function_args) or function_name
                 _stream_q.put(("__tool_progress__", {
                     "tool": function_name,
                     "emoji": get_tool_emoji(function_name),
                     "label": label,
+                    "displayLabel": get_tool_display_label(function_name, function_args),
                     "toolCallId": tool_call_id,
                     "status": "running",
                 }))

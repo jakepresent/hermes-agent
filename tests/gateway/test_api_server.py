@@ -337,6 +337,42 @@ class TestAdapterInit:
         assert isinstance(agent, FakeAgent)
         assert captured["reasoning_config"] == {"enabled": True, "effort": "xhigh"}
 
+    def test_create_agent_prefers_request_reasoning_override(self, monkeypatch):
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr("gateway.run._resolve_runtime_agent_kwargs", lambda: {})
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-5.5")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr(
+            "gateway.run.GatewayRunner._load_reasoning_config",
+            staticmethod(lambda: {"enabled": True, "effort": "high"}),
+        )
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        adapter._create_agent(
+            session_id="api-session",
+            reasoning_config_override={"enabled": False},
+        )
+
+        assert captured["reasoning_config"] == {"enabled": False}
+
+    def test_reasoning_config_from_chat_body_accepts_common_openai_shapes(self):
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+
+        assert adapter._reasoning_config_from_chat_body({"reasoning_effort": "low"}) == {"enabled": True, "effort": "low"}
+        assert adapter._reasoning_config_from_chat_body({"reasoning": {"effort": "xhigh"}}) == {"enabled": True, "effort": "xhigh"}
+        assert adapter._reasoning_config_from_chat_body({"extra_body": {"reasoning": {"enabled": False}}}) == {"enabled": False}
+        assert adapter._reasoning_config_from_chat_body({}) is None
+
 
 # ---------------------------------------------------------------------------
 # Auth checking
@@ -464,6 +500,24 @@ class TestAgentExecution:
             conversation_history=[],
             task_id="session-123",
         )
+
+    @pytest.mark.asyncio
+    async def test_run_agent_forwards_reasoning_override(self, adapter):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "ok"}
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent) as create_agent:
+            await adapter._run_agent(
+                user_message="hello",
+                conversation_history=[],
+                session_id="session-123",
+                reasoning_config_override={"enabled": True, "effort": "low"},
+            )
+
+        assert create_agent.call_args.kwargs["reasoning_config_override"] == {"enabled": True, "effort": "low"}
 
 
 # ---------------------------------------------------------------------------

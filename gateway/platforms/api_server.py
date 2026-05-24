@@ -565,7 +565,28 @@ else:
     cors_middleware = None  # type: ignore[assignment]
 
 
-def _openai_error(message: str, err_type: str = "invalid_request_error", param: str = None, code: str = None) -> Dict[str, Any]:
+def _parse_api_reasoning_effort(value: str) -> Dict[str, Any]:
+    """Normalize API-level reasoning effort names into Hermes reasoning config."""
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "off": "none",
+        "false": "none",
+        "disabled": "none",
+        "no": "none",
+        "min": "minimal",
+        "med": "medium",
+        "extra-high": "xhigh",
+        "extra_high": "xhigh",
+    }
+    effort = aliases.get(normalized, normalized)
+    if effort == "none":
+        return {"enabled": False}
+    if effort in {"minimal", "low", "medium", "high", "xhigh"}:
+        return {"enabled": True, "effort": effort}
+    raise ValueError(f"invalid_reasoning_effort:Unsupported reasoning effort: {value}")
+
+
+def _openai_error(message: str, err_type: str = "invalid_request_error", param: Optional[str] = None, code: Optional[str] = None) -> Dict[str, Any]:
     """OpenAI-style error envelope."""
     return {
         "error": {
@@ -1001,6 +1022,31 @@ class APIServerAdapter(BasePlatformAdapter):
     # Agent creation helper
     # ------------------------------------------------------------------
 
+    def _reasoning_config_from_chat_body(self, body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return a per-request reasoning override from OpenAI-compatible fields."""
+        raw_reasoning = body.get("reasoning")
+        if isinstance(raw_reasoning, dict):
+            if raw_reasoning.get("enabled") is False:
+                return {"enabled": False}
+            effort = str(raw_reasoning.get("effort") or raw_reasoning.get("reasoning_effort") or "").strip().lower()
+            if effort:
+                return _parse_api_reasoning_effort(effort)
+
+        raw_extra = body.get("extra_body")
+        if isinstance(raw_extra, dict):
+            nested = raw_extra.get("reasoning")
+            if isinstance(nested, dict):
+                if nested.get("enabled") is False:
+                    return {"enabled": False}
+                effort = str(nested.get("effort") or nested.get("reasoning_effort") or "").strip().lower()
+                if effort:
+                    return _parse_api_reasoning_effort(effort)
+
+        effort = body.get("reasoning_effort")
+        if effort is not None:
+            return _parse_api_reasoning_effort(str(effort).strip().lower())
+        return None
+
     def _create_agent(
         self,
         ephemeral_system_prompt: Optional[str] = None,
@@ -1010,6 +1056,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_start_callback=None,
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
+        reasoning_config_override: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1031,7 +1078,7 @@ class APIServerAdapter(BasePlatformAdapter):
         from hermes_cli.tools_config import _get_platform_tools
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
-        reasoning_config = GatewayRunner._load_reasoning_config()
+        reasoning_config = reasoning_config_override if reasoning_config_override is not None else GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
 
         user_config = _load_gateway_config()
@@ -1837,6 +1884,15 @@ class APIServerAdapter(BasePlatformAdapter):
         completion_id = f"chatcmpl-{uuid.uuid4().hex[:29]}"
         model_name = body.get("model", self._model_name)
         created = int(time.time())
+        try:
+            reasoning_config_override = self._reasoning_config_from_chat_body(body)
+        except ValueError as exc:
+            raw = str(exc)
+            code, _, message = raw.partition(":")
+            return web.json_response(
+                _openai_error(message or raw, param="reasoning_effort", code=code or "invalid_reasoning_effort"),
+                status=400,
+            )
 
         if stream:
             import queue as _q
@@ -1921,6 +1977,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=_on_tool_complete,
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
+                reasoning_config_override=reasoning_config_override,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -1940,6 +1997,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 ephemeral_system_prompt=system_prompt,
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
+                reasoning_config_override=reasoning_config_override,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3496,6 +3554,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
+        reasoning_config_override: Optional[Dict[str, Any]] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3528,6 +3587,7 @@ class APIServerAdapter(BasePlatformAdapter):
                     tool_start_callback=tool_start_callback,
                     tool_complete_callback=tool_complete_callback,
                     gateway_session_key=gateway_session_key,
+                    reasoning_config_override=reasoning_config_override,
                 )
                 if agent_ref is not None:
                     agent_ref[0] = agent

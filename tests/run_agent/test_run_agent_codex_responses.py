@@ -1167,6 +1167,36 @@ def test_chat_messages_to_responses_input_accepts_call_pipe_fc_ids(monkeypatch):
     assert function_output["call_id"] == "call_pair123"
 
 
+def test_chat_messages_to_responses_input_skips_message_item_id_replay_for_github(monkeypatch):
+    agent = _build_agent(monkeypatch)
+    from agent.codex_responses_adapter import _chat_messages_to_responses_input
+
+    items = _chat_messages_to_responses_input(
+        [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "content": "cached assistant text",
+                "codex_message_items": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "msg_bound_to_old_connection",
+                        "phase": "final_answer",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "cached assistant text"}],
+                    }
+                ],
+            },
+        ],
+        is_github_responses=True,
+    )
+
+    assistant_items = [item for item in items if item.get("role") == "assistant"]
+    assert assistant_items == [{"role": "assistant", "content": "cached assistant text"}]
+    assert "msg_bound_to_old_connection" not in repr(items)
+
+
 def test_preflight_codex_api_kwargs_strips_optional_function_call_id(monkeypatch):
     agent = _build_agent(monkeypatch)
     from agent.codex_responses_adapter import _preflight_codex_api_kwargs

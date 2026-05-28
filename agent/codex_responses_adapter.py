@@ -248,6 +248,7 @@ def _chat_messages_to_responses_input(
     messages: List[Dict[str, Any]],
     *,
     is_xai_responses: bool = False,
+    is_github_responses: bool = False,
 ) -> List[Dict[str, Any]]:
     """Convert internal chat-style messages to Responses input items.
 
@@ -312,9 +313,18 @@ def _chat_messages_to_responses_input(
                 # previous turns so the API can maintain prefix-cache hits.
                 # OpenAI docs: "preserve and resend phase on all assistant
                 # messages — dropping it can degrade performance."
+                #
+                # GitHub Copilot's Responses surface binds returned item IDs
+                # to an opaque backend "connection".  Replaying IDs minted
+                # under a different connection returns HTTP 401
+                # "input item ID does not belong to this connection".  This
+                # happens after credential swaps, model changes, or just
+                # backend rotations on GitHub's side, so for GitHub we
+                # deliberately do not replay exact message items; we fall
+                # back to plain assistant content below.
                 codex_message_items = msg.get("codex_message_items")
                 replayed_message_items = 0
-                if isinstance(codex_message_items, list):
+                if isinstance(codex_message_items, list) and not is_github_responses:
                     for raw_item in codex_message_items:
                         if not isinstance(raw_item, dict):
                             continue

@@ -18,6 +18,9 @@ payload rewriter.
 from __future__ import annotations
 
 import base64
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 
 from agent.error_classifier import FailoverReason, classify_api_error
@@ -321,3 +324,148 @@ class TestShrinkImagePartsHelper:
         assert msgs[0]["content"][0]["image_url"]["url"] == small
         # The unshrinkable one is left as-is (caller surfaces original error).
         assert msgs[0]["content"][1]["image_url"]["url"] == unshrinkable
+
+    def test_payload_budget_accounts_for_multiple_inline_images(self, monkeypatch):
+        """A multi-image request can 413 even when each image is under the per-image cap."""
+        agent = _make_agent()
+        one_mb_url = _big_png_data_url(900)
+        shrunk = "data:image/jpeg;base64," + "S" * 1000
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            lambda *a, **kw: shrunk,
+            raising=False,
+        )
+
+        msgs = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": one_mb_url}},
+                {"type": "image_url", "image_url": {"url": one_mb_url}},
+                {"type": "image_url", "image_url": {"url": one_mb_url}},
+            ],
+        }]
+
+        changed = agent._try_shrink_image_parts_in_messages(
+            msgs,
+            target_total_base64_bytes=2 * 1024 * 1024,
+        )
+
+        assert changed is True
+        for part in msgs[0]["content"][1:]:
+            assert part["image_url"]["url"] == shrunk
+
+
+class TestPayloadTooLargeWithImages:
+    def test_413_payload_with_native_image_parts_prefers_image_shrink_before_context_compression(self, monkeypatch):
+        """A 413 on a request containing inline image data should shrink images before compressing history."""
+        from agent.error_classifier import FailoverReason, classify_api_error
+        from run_agent import AIAgent
+
+        oversized_url = _big_png_data_url(5000)
+        shrunk = "data:image/jpeg;base64," + "S" * 1000
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": oversized_url}},
+            ],
+        }]
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            lambda *a, **kw: shrunk,
+            raising=False,
+        )
+
+        err = _FakeApiError(status_code=413, message="failed to parse request")
+        classified = classify_api_error(
+            err,
+            provider="copilot",
+            model="gpt-5.5",
+            approx_tokens=100_000,
+            context_length=1_000_000,
+            num_messages=len(messages),
+        )
+        assert classified.reason == FailoverReason.payload_too_large
+
+        agent = _make_agent()
+        assert agent._try_shrink_image_parts_in_messages(messages) is True
+        assert messages[0]["content"][1]["image_url"]["url"] == shrunk
+
+    def test_413_payload_with_native_image_parts_shrinks_and_retries_before_compression(self, monkeypatch):
+        """run_conversation should try image shrink on 413 with native image data before context compression."""
+        from run_agent import AIAgent
+        from openai import APIStatusError
+        import httpx
+
+        oversized_url = _big_png_data_url(5000)
+        shrunk = "data:image/jpeg;base64," + "S" * 1000
+
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            agent = AIAgent(
+                api_key="test-key",
+                provider="copilot",
+                model="gpt-5.5",
+                base_url="https://api.githubcopilot.com",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                max_iterations=1,
+            )
+        agent.tools = []
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.compression_enabled = True
+        agent._api_max_retries = 3
+        agent._persist_session = lambda *a, **kw: None
+
+        compress_calls = {"count": 0}
+        def _fake_compress(*args, **kwargs):
+            compress_calls["count"] += 1
+            return args[0], args[1]
+        agent._compress_context = _fake_compress
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            lambda *a, **kw: shrunk,
+            raising=False,
+        )
+
+        calls = {"count": 0}
+        def _create(**kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                request = httpx.Request("POST", "https://api.githubcopilot.com/responses")
+                response = httpx.Response(413, request=request, json={"error": {"message": "failed to parse request"}})
+                raise APIStatusError("failed to parse request", response=response, body={"error": {"message": "failed to parse request"}})
+            assert shrunk in repr(kwargs["messages"])
+            return SimpleNamespace(
+                status="completed",
+                output=[SimpleNamespace(type="message", content=[SimpleNamespace(type="output_text", text="ok")])],
+                output_text="ok",
+                usage=None,
+            )
+
+        agent.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=_create)))
+        agent._interruptible_streaming_api_call = lambda api_kwargs, on_first_delta=None: _create(messages=api_kwargs["input"])
+        agent._interruptible_api_call = lambda api_kwargs: _create(messages=api_kwargs["input"])
+        result = agent.run_conversation(
+            "look",
+            conversation_history=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url", "image_url": {"url": oversized_url}},
+                ],
+            }],
+        )
+
+        assert result["final_response"] == "ok"
+        assert calls["count"] == 2
+        assert compress_calls["count"] == 0

@@ -34,7 +34,7 @@ import tempfile
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from agent.model_metadata import estimate_request_tokens_rough
 
@@ -614,20 +614,25 @@ def compress_context(
     return compressed, new_system_prompt
 
 
-def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
-    """Re-encode all native image parts at a smaller size to recover from
-    image-too-large errors (Anthropic 5 MB, unknown other providers).
+def try_shrink_image_parts_in_messages(
+    api_messages: list,
+    *,
+    target_total_base64_bytes: Optional[int] = None,
+) -> bool:
+    """Re-encode native image parts at a smaller size to recover from
+    image-too-large errors and whole-request 413s.
 
     Mutates ``api_messages`` in place. Returns True if any image part was
     actually replaced, False if there were no image parts to shrink or
     Pillow couldn't help (caller should surface the original error).
 
     Strategy: look for ``image_url`` / ``input_image`` parts carrying a
-    ``data:image/...;base64,...`` payload.  For each one whose encoded
-    size exceeds 4 MB (a safe target that slides under Anthropic's 5 MB
-    ceiling with header overhead), write the base64 to a tempfile, call
-    ``vision_tools._resize_image_for_vision`` to produce a smaller data
-    URL, and substitute it in place.
+    ``data:image/...;base64,...`` payload.  For per-image rejections, each
+    image whose encoded size exceeds 4 MB or whose dimensions exceed the
+    provider pixel cap is rewritten.  For whole-request 413s, callers can pass
+    ``target_total_base64_bytes`` so we also shrink multi-image batches whose
+    combined inline image bytes exceed a request budget even if no single image
+    crosses the per-image ceiling.
 
     Non-data-URL images (http/https URLs) are not touched — the provider
     fetches those itself and the size limit is different.
@@ -652,41 +657,41 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
     # even when the byte budget is fine.
     max_dimension = 8000
     changed_count = 0
-    # Track parts that are over the target but could NOT be shrunk under it.
-    # If any survive, retrying is pointless — the same oversized payload will
-    # be re-sent and rejected again, wasting the single retry budget.  We only
-    # report success (caller retries) when every over-threshold image was
-    # actually brought under the target.
+    # Track parts that individually exceed byte/dimension limits but could NOT
+    # be shrunk under them. If any survive, retrying is pointless — the same
+    # oversized payload will be re-sent and rejected again, wasting the single
+    # retry budget.
     unshrinkable_oversized = 0
+    image_refs: List[Dict[str, Any]] = []
 
-    def _shrink_data_url(url: str) -> Optional[str]:
+    def _dimension_exceeds(url: str) -> bool:
+        """Best-effort native image pixel-dimension check."""
+        if not isinstance(url, str) or not url.startswith("data:"):
+            return False
+        try:
+            import base64 as _b64_dim
+            import io as _io_dim
+            from PIL import Image as _PILImage
+
+            _, _, data_d = url.partition(",")
+            if not data_d:
+                return False
+            raw_d = _b64_dim.b64decode(data_d)
+            with _PILImage.open(_io_dim.BytesIO(raw_d)) as _img:
+                return max(_img.size) > max_dimension
+        except Exception:
+            # If we can't check dimensions (Pillow unavailable, corrupt image,
+            # etc.), fall back to byte-only checks.
+            return False
+
+    def _shrink_data_url(
+        url: str,
+        *,
+        max_base64_bytes: int = target_bytes,
+    ) -> Optional[str]:
         """Return a smaller data URL, or None if shrink can't help."""
         if not isinstance(url, str) or not url.startswith("data:"):
             return None
-
-        # Check both byte size AND pixel dimensions.
-        needs_shrink = len(url) > target_bytes  # over byte budget
-        if not needs_shrink:
-            # Even if bytes are fine, check pixel dimensions against
-            # Anthropic's 8000px cap.  A tall image can be tiny in bytes
-            # yet huge in pixels.
-            try:
-                import base64 as _b64_dim
-                header_d, _, data_d = url.partition(",")
-                if not data_d:
-                    return None
-                raw_d = _b64_dim.b64decode(data_d)
-                from PIL import Image as _PILImage
-                import io as _io_dim
-                with _PILImage.open(_io_dim.BytesIO(raw_d)) as _img:
-                    if max(_img.size) <= max_dimension:
-                        return None  # both bytes and pixels are fine
-                needs_shrink = True  # pixels exceed limit, force shrink
-            except Exception:
-                # If we can't check dimensions (Pillow unavailable, corrupt
-                # image, etc.), fall back to byte-only check.
-                return None
-
         try:
             header, _, data = url.partition(",")
             mime = "image/jpeg"
@@ -709,7 +714,7 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
                 resized = _resize_image_for_vision(
                     Path(tmp.name),
                     mime_type=mime,
-                    max_base64_bytes=target_bytes,
+                    max_base64_bytes=max_base64_bytes,
                     max_dimension=max_dimension,
                 )
             finally:
@@ -742,26 +747,53 @@ def try_shrink_image_parts_in_messages(api_messages: list) -> bool:
             # OpenAI Responses: {"image_url": "data:..."}
             if isinstance(image_value, dict):
                 url = image_value.get("url", "")
-                resized = _shrink_data_url(url)
-                if resized:
-                    image_value["url"] = resized
-                    changed_count += 1
-                elif isinstance(url, str) and url.startswith("data:") \
-                        and len(url) > target_bytes:
-                    unshrinkable_oversized += 1
-            elif isinstance(image_value, str):
-                resized = _shrink_data_url(image_value)
-                if resized:
-                    part["image_url"] = resized
-                    changed_count += 1
-                elif image_value.startswith("data:") \
-                        and len(image_value) > target_bytes:
-                    unshrinkable_oversized += 1
+                if isinstance(url, str) and url.startswith("data:"):
+                    image_refs.append({
+                        "url": url,
+                        "set": lambda new_url, image_value=image_value: image_value.__setitem__("url", new_url),
+                    })
+            elif isinstance(image_value, str) and image_value.startswith("data:"):
+                image_refs.append({
+                    "url": image_value,
+                    "set": lambda new_url, part=part: part.__setitem__("image_url", new_url),
+                })
+
+    total_image_bytes = sum(len(ref["url"]) for ref in image_refs)
+    budget_bytes = target_total_base64_bytes
+    force_budget_shrink = (
+        budget_bytes is not None
+        and total_image_bytes > budget_bytes
+    )
+    per_image_budget = target_bytes
+    if force_budget_shrink and image_refs and budget_bytes is not None:
+        # For whole-request 413s, a batch can be too large even when each
+        # individual image is under the normal 4 MB per-image recovery target.
+        # Aim below an even per-image share of the budget so the retry actually
+        # reduces the aggregate request body instead of re-encoding at the same
+        # size.
+        per_image_budget = max(
+            256 * 1024,
+            min(target_bytes, budget_bytes // len(image_refs)),
+        )
+
+    for ref in image_refs:
+        url = ref["url"]
+        individual_oversized = len(url) > target_bytes
+        dimension_oversized = _dimension_exceeds(url)
+        if not force_budget_shrink and not individual_oversized and not dimension_oversized:
+            continue
+        resized = _shrink_data_url(url, max_base64_bytes=per_image_budget)
+        if resized:
+            ref["set"](resized)
+            changed_count += 1
+        elif individual_oversized or dimension_oversized:
+            unshrinkable_oversized += 1
 
     if changed_count:
         logger.info(
-            "image-shrink recovery: re-encoded %d image part(s) to fit under %.0f MB",
+            "image-shrink recovery: re-encoded %d image part(s) to fit under %.0f MB (total inline image bytes %.1f MB)",
             changed_count, target_bytes / (1024 * 1024),
+            total_image_bytes / (1024 * 1024),
         )
     if unshrinkable_oversized:
         # At least one oversized image could not be shrunk under the target.

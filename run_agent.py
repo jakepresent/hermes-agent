@@ -3761,10 +3761,18 @@ class AIAgent:
         )
         return summary
 
-    def _try_shrink_image_parts_in_messages(self, api_messages: list) -> bool:
+    def _try_shrink_image_parts_in_messages(
+        self,
+        api_messages: list,
+        *,
+        target_total_base64_bytes: int | None = None,
+    ) -> bool:
         """Forwarder — see ``agent.conversation_compression.try_shrink_image_parts_in_messages``."""
         from agent.conversation_compression import try_shrink_image_parts_in_messages
-        return try_shrink_image_parts_in_messages(api_messages)
+        return try_shrink_image_parts_in_messages(
+            api_messages,
+            target_total_base64_bytes=target_total_base64_bytes,
+        )
 
     def _try_strip_image_parts_from_tool_messages(self, api_messages: list) -> bool:
         """Downgrade list-type tool messages to text summaries in-place.

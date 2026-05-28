@@ -333,6 +333,39 @@ class TestAdapterInit:
 
         assert captured["reasoning_config"] == {"enabled": False}
 
+    def test_create_agent_honors_request_model_override(self, monkeypatch):
+        captured = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+        monkeypatch.setattr(
+            "gateway.run._resolve_runtime_agent_kwargs",
+            lambda: {
+                "provider": "copilot",
+                "base_url": "https://api.githubcopilot.com",
+                "api_mode": "codex_responses",
+            },
+        )
+        monkeypatch.setattr("gateway.run._resolve_gateway_model", lambda: "gpt-5.5")
+        monkeypatch.setattr("gateway.run._load_gateway_config", lambda: {})
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_reasoning_config", staticmethod(lambda: None))
+        monkeypatch.setattr("gateway.run.GatewayRunner._load_fallback_model", staticmethod(lambda: None))
+        monkeypatch.setattr("hermes_cli.tools_config._get_platform_tools", lambda *_: set())
+
+        adapter = APIServerAdapter(PlatformConfig(enabled=True))
+        monkeypatch.setattr(adapter, "_ensure_session_db", lambda: None)
+
+        adapter._create_agent(
+            session_id="api-session",
+            model_override="github-copilot/gpt-5-mini",
+        )
+
+        assert captured["model"] == "gpt-5-mini"
+        assert captured["api_mode"] == "chat_completions"
+
     def test_reasoning_config_from_chat_body_accepts_common_openai_shapes(self):
         adapter = APIServerAdapter(PlatformConfig(enabled=True))
 
@@ -484,6 +517,24 @@ class TestAgentExecution:
             )
 
         assert create_agent.call_args.kwargs["reasoning_config_override"] == {"enabled": True, "effort": "low"}
+
+    @pytest.mark.asyncio
+    async def test_run_agent_forwards_model_override(self, adapter):
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "ok"}
+        mock_agent.session_prompt_tokens = 0
+        mock_agent.session_completion_tokens = 0
+        mock_agent.session_total_tokens = 0
+
+        with patch.object(adapter, "_create_agent", return_value=mock_agent) as create_agent:
+            await adapter._run_agent(
+                user_message="hello",
+                conversation_history=[],
+                session_id="session-123",
+                model_override="gpt-5-mini",
+            )
+
+        assert create_agent.call_args.kwargs["model_override"] == "gpt-5-mini"
 
 
 # ---------------------------------------------------------------------------

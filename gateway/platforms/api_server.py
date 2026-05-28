@@ -1021,6 +1021,7 @@ class APIServerAdapter(BasePlatformAdapter):
         tool_complete_callback=None,
         gateway_session_key: Optional[str] = None,
         reasoning_config_override: Optional[Dict[str, Any]] = None,
+        model_override: Optional[str] = None,
     ) -> Any:
         """
         Create an AIAgent instance using the gateway's runtime config.
@@ -1044,6 +1045,23 @@ class APIServerAdapter(BasePlatformAdapter):
         runtime_kwargs = _resolve_runtime_agent_kwargs()
         reasoning_config = reasoning_config_override if reasoning_config_override is not None else GatewayRunner._load_reasoning_config()
         model = _resolve_gateway_model()
+
+        if model_override and str(model_override).strip() and str(model_override).strip() != self._model_name:
+            model = str(model_override).strip()
+            try:
+                from hermes_cli.model_normalize import normalize_model_for_provider
+                from hermes_cli.models import copilot_model_api_mode
+
+                provider = str(runtime_kwargs.get("provider") or "").strip().lower()
+                if provider:
+                    model = normalize_model_for_provider(model, provider)
+                if provider in {"copilot", "github-copilot"}:
+                    runtime_kwargs["api_mode"] = copilot_model_api_mode(
+                        model,
+                        api_key=runtime_kwargs.get("api_key"),
+                    )
+            except Exception as exc:
+                logger.debug("Failed to normalize API model override %r: %s", model_override, exc)
 
         user_config = _load_gateway_config()
         enabled_toolsets = sorted(_get_platform_tools(user_config, "api_server"))
@@ -1938,6 +1956,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 agent_ref=agent_ref,
                 gateway_session_key=gateway_session_key,
                 reasoning_config_override=reasoning_config_override,
+                model_override=model_name,
             ))
             # Ensure SSE drain loops can terminate without relying on polling
             # agent_task.done(), which can race with queue timeout checks.
@@ -1958,6 +1977,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 session_id=session_id,
                 gateway_session_key=gateway_session_key,
                 reasoning_config_override=reasoning_config_override,
+                model_override=model_name,
             )
 
         idempotency_key = request.headers.get("Idempotency-Key")
@@ -3507,6 +3527,7 @@ class APIServerAdapter(BasePlatformAdapter):
         agent_ref: Optional[list] = None,
         gateway_session_key: Optional[str] = None,
         reasoning_config_override: Optional[Dict[str, Any]] = None,
+        model_override: Optional[str] = None,
     ) -> tuple:
         """
         Create an agent and run a conversation in a thread executor.
@@ -3531,6 +3552,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 tool_complete_callback=tool_complete_callback,
                 gateway_session_key=gateway_session_key,
                 reasoning_config_override=reasoning_config_override,
+                model_override=model_override,
             )
             if agent_ref is not None:
                 agent_ref[0] = agent

@@ -6778,6 +6778,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter._pending_messages[_quick_key] = queued_event
                 return "No active agent — /steer queued for the next turn."
 
+            # /busy changes the control-plane behavior for future messages and
+            # is safe while the agent is running. It should not itself be
+            # queued/interrupted by the busy-message path.
+            if _cmd_def_inner and _cmd_def_inner.name == "busy":
+                return await self._handle_busy_command(event)
+
             # /model must not be used while the agent is running.
             if _cmd_def_inner and _cmd_def_inner.name == "model":
                 return "Agent is running — wait or /stop first, then switch models."
@@ -7149,6 +7155,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "fast":
             return await self._handle_fast_command(event)
+
+        if canonical == "busy":
+            return await self._handle_busy_command(event)
 
         if canonical == "verbose":
             return await self._handle_verbose_command(event)

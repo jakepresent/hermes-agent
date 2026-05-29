@@ -56,7 +56,10 @@ class FakeTree:
 
 
 @pytest.fixture
-def adapter():
+def adapter(monkeypatch):
+    # Keep these tests independent from the live gateway/user config. Tests that
+    # exercise the env toggle set DISCORD_REACTIONS explicitly in the test body.
+    monkeypatch.delenv("DISCORD_REACTIONS", raising=False)
     config = PlatformConfig(enabled=True, token="***")
     adapter = DiscordAdapter(config)
     adapter._client = SimpleNamespace(

@@ -397,17 +397,22 @@ def interruptible_api_call(agent, api_kwargs: dict):
                 _elapsed, _ttfb_timeout, api_kwargs.get("model", "unknown"),
             )
             if _silent_hint:
-                agent._buffer_status(
+                _ttfb_status = (
                     f"⚠️ No first byte from provider in {int(_elapsed)}s "
                     f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
                     f"Reconnecting. {_silent_hint}"
                 )
             else:
-                agent._buffer_status(
+                _ttfb_status = (
                     f"⚠️ No first byte from provider in {int(_elapsed)}s "
                     f"(codex stream, model: {api_kwargs.get('model', 'unknown')}). "
                     f"Reconnecting."
                 )
+            _last_ttfb_status_key = getattr(agent, "_last_codex_ttfb_status_key", None)
+            _ttfb_status_key = (api_kwargs.get("model", "unknown"), repr(api_kwargs.get("input")))
+            if _last_ttfb_status_key != _ttfb_status_key:
+                agent._buffer_status(_ttfb_status)
+                agent._last_codex_ttfb_status_key = _ttfb_status_key
             try:
                 _close_request_client_once("codex_ttfb_kill")
             except Exception:

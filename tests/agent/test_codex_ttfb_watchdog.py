@@ -233,6 +233,53 @@ def test_ttfb_high_env_is_capped_for_openai_codex(tmp_path, monkeypatch):
         stop["flag"] = True
 
 
+
+
+def test_ttfb_status_emitted_once_per_api_call(tmp_path, monkeypatch):
+    """A no-first-byte hang should not spam one status line per retry.
+
+    The retry loop can make several attempts, but the user only needs one
+    "no first byte" diagnostic plus the normal retry/backoff lines.
+    """
+    from agent import chat_completion_helpers as h
+
+    agent = _make_codex_agent(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "1")
+
+    statuses: list[str] = []
+    closes: list[str] = []
+    dummy_client = SimpleNamespace()
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **k: dummy_client)
+    monkeypatch.setattr(agent, "_buffer_status", lambda msg: statuses.append(msg))
+    monkeypatch.setattr(
+        agent, "_abort_request_openai_client", lambda c, reason=None: closes.append(reason)
+    )
+    monkeypatch.setattr(
+        agent, "_close_request_openai_client", lambda c, reason=None: closes.append(reason)
+    )
+
+    stop = {"flag": False}
+
+    def fake_hang(api_kwargs, client=None, on_first_delta=None):
+        deadline = time.time() + 30
+        while time.time() < deadline and not stop["flag"] and not agent._interrupt_requested:
+            time.sleep(0.02)
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
+
+    try:
+        for input_text in ("hi", "hi", "new prompt"):
+            with pytest.raises(TimeoutError):
+                h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": input_text})
+    finally:
+        stop["flag"] = True
+
+    ttfb_statuses = [s for s in statuses if "No first byte from provider" in s]
+    assert len(ttfb_statuses) == 2
+    assert ttfb_statuses[0] == ttfb_statuses[1]
+    assert closes.count("codex_ttfb_kill") == 3
+
 def test_ttfb_does_not_kill_when_events_flow(tmp_path, monkeypatch):
     """Once a stream event has arrived, a generation that runs past the TTFB
     cutoff is NOT killed by the watchdog — it completes normally."""

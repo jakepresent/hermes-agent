@@ -1019,6 +1019,7 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
                     content=next_args.get("content"),
                     old_text=next_args.get("old_text"),
                     store=agent._memory_store,
+                    write_origin=getattr(agent, "_memory_write_origin", "assistant_tool"),
                 )
                 # Bridge: notify external memory provider of built-in memory writes
                 if agent._memory_manager and next_args.get("action") in {"add", "replace"}:

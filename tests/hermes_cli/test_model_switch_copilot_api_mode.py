@@ -26,6 +26,7 @@ def _run_copilot_switch(
     current_model: str = "gpt-5.4",
     explicit_provider: str = "",
     runtime_api_mode: str = "codex_responses",
+    custom_providers: list | None = None,
 ):
     """Run switch_model with Copilot mocks and return the result."""
     with (
@@ -52,6 +53,7 @@ def _run_copilot_switch(
             current_provider=current_provider,
             current_model=current_model,
             explicit_provider=explicit_provider,
+            custom_providers=custom_providers,
         )
 
 
@@ -80,7 +82,34 @@ def test_explicit_copilot_switch_uses_selected_model_api_mode():
 
     assert result.success, f"switch_model failed: {result.error_message}"
     assert result.new_model == "claude-opus-4.6"
-    assert result.target_provider == "github-copilot"
+    assert result.target_provider == "copilot"
+    assert result.api_mode == "chat_completions"
+    assert result.base_url == "https://api.githubcopilot.com"
+    assert result.api_key == "ghu_test_token"
+
+
+def test_explicit_copilot_switch_ignores_legacy_custom_github_copilot_entry():
+    """A stale custom provider named github-copilot must not hijack Copilot auth."""
+    result = _run_copilot_switch(
+        raw_input="claude-opus-4.8",
+        current_provider="openrouter",
+        current_model="anthropic/claude-sonnet-4.6",
+        explicit_provider="copilot",
+        custom_providers=[
+            {
+                "name": "github-copilot",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key": "",
+                "api_mode": "chat_completions",
+            }
+        ],
+    )
+
+    assert result.success, f"switch_model failed: {result.error_message}"
+    assert result.new_model == "claude-opus-4.8"
+    assert result.target_provider == "copilot"
+    assert result.base_url == "https://api.githubcopilot.com"
+    assert result.api_key == "ghu_test_token"
     assert result.api_mode == "chat_completions"
 
 

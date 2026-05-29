@@ -1269,6 +1269,8 @@ def resolve_runtime_provider(
     behavior (api_mode derived from config).
     """
     requested_provider = resolve_requested_provider(requested)
+    if requested_provider in {"github", "github-copilot", "github-models", "github-model"}:
+        requested_provider = "copilot"
 
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would

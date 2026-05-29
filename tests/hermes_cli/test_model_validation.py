@@ -291,16 +291,30 @@ class TestFetchApiModels:
 
 
 class TestGithubReasoningEfforts:
-    def test_gpt5_supports_minimal_to_high(self):
+    def test_gpt5_uses_live_catalog_reasoning_efforts(self):
         catalog = [{
-            "id": "gpt-5.4",
-            "capabilities": {"type": "chat", "supports": {"reasoning_effort": ["low", "medium", "high"]}},
+            "id": "gpt-5.5",
+            "capabilities": {
+                "type": "chat",
+                "supports": {"reasoning_effort": ["none", "low", "medium", "high", "xhigh"]},
+            },
             "supported_endpoints": ["/responses"],
         }]
-        assert github_model_reasoning_efforts("gpt-5.4", catalog=catalog) == [
+        assert github_model_reasoning_efforts("gpt-5.5", catalog=catalog) == [
+            "none",
             "low",
             "medium",
             "high",
+            "xhigh",
+        ]
+
+    def test_gpt5_fallback_supports_current_copilot_efforts(self):
+        assert github_model_reasoning_efforts("gpt-5.5") == [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
         ]
 
     def test_legacy_catalog_reasoning_still_supported(self):

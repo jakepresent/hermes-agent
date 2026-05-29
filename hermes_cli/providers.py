@@ -678,6 +678,7 @@ def resolve_provider_full(
     Returns:
         ProviderDef if found, else None.
     """
+    original_name = (name or "").strip().lower()
     canonical = normalize_provider(name)
     raw = name.strip().lower()
 
@@ -694,9 +695,40 @@ def resolve_provider_full(
         if user_pdef is not None:
             return user_pdef
 
+    # ``providers.py`` uses models.dev identifiers internally for some
+    # providers (notably ``github-copilot``), while the rest of Hermes uses the
+    # shorter runtime slug (``copilot``). If a user also has a legacy
+    # ``custom_providers`` entry named ``github-copilot``, returning the
+    # models.dev id lets later runtime resolution hit that stale custom entry
+    # instead of the built-in Copilot auth path. Keep the ProviderDef id on the
+    # Hermes runtime slug at the boundary where /model resolves providers.
+    try:
+        from agent.models_dev import PROVIDER_TO_MODELS_DEV as _HERMES_TO_MDEV
+
+        runtime_canonical = {v: k for k, v in _HERMES_TO_MDEV.items()}.get(
+            canonical, canonical
+        )
+    except Exception:
+        runtime_canonical = canonical
+    if original_name in {"copilot", "github", "github-copilot", "github-models", "github-model"}:
+        runtime_canonical = "copilot"
+
     # 1. Built-in (models.dev + overlays)
     pdef = get_provider(canonical)
     if pdef is not None:
+        if pdef.id != runtime_canonical:
+            return ProviderDef(
+                id=runtime_canonical,
+                name=pdef.name,
+                transport=pdef.transport,
+                api_key_env_vars=pdef.api_key_env_vars,
+                base_url=pdef.base_url,
+                base_url_env_var=pdef.base_url_env_var,
+                is_aggregator=pdef.is_aggregator,
+                auth_type=pdef.auth_type,
+                doc=pdef.doc,
+                source=pdef.source,
+            )
         return pdef
 
     # 2. User-defined providers from config

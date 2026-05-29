@@ -52,6 +52,22 @@ def test_buffer_status_accumulates_then_flushes(capsys):
     assert agent._retry_status_buffer == []
 
 
+
+
+def test_buffer_status_dedupes_identical_retry_lines():
+    agent = _make_bare_agent()
+    emitted = []
+    agent._emit_status = lambda msg: emitted.append(("status", msg))
+
+    agent._buffer_status("⚠️ No first byte from provider in 12s. Reconnecting.")
+    agent._buffer_status("⚠️ No first byte from provider in 12s. Reconnecting.")
+    agent._buffer_status("⏳ Retrying in 2.0s (attempt 1/3)...")
+
+    assert agent._retry_status_buffer == [
+        ("status", "⚠️ No first byte from provider in 12s. Reconnecting."),
+        ("status", "⏳ Retrying in 2.0s (attempt 1/3)..."),
+    ]
+
 def test_clear_drops_buffered_messages_silently():
     agent = _make_bare_agent()
     emitted = []

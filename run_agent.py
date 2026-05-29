@@ -827,7 +827,9 @@ class AIAgent:
             if buf is None:
                 buf = []
                 self._retry_status_buffer = buf
-            buf.append(("status", message))
+            item = ("status", message)
+            if item not in buf:
+                buf.append(item)
         except Exception:
             # Never break the retry loop on a buffer hiccup.
             pass

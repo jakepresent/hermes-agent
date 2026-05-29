@@ -295,7 +295,13 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
-    def add(self, target: str, content: str) -> Dict[str, Any]:
+    def add(
+        self,
+        target: str,
+        content: str,
+        *,
+        write_origin: str = "assistant_tool",
+    ) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
         if not content:
@@ -328,6 +334,19 @@ class MemoryStore:
 
             if new_total > limit:
                 current = self._char_count(target)
+                if write_origin == "background_review":
+                    return {
+                        "success": False,
+                        "error_code": "memory_store_full",
+                        "error": (
+                            f"Built-in {target} memory is at {current:,}/{limit:,} chars. "
+                            "Background self-improvement review should not append new built-in memory entries "
+                            "while the injected store is full. Move details to canonical project/context files "
+                            "or replace an existing long entry with a shorter pointer, then retry if needed."
+                        ),
+                        "usage": f"{current:,}/{limit:,}",
+                        "recommended_action": "compact_or_replace_existing_entry",
+                    }
                 return {
                     "success": False,
                     "error": (
@@ -606,6 +625,7 @@ def memory_tool(
     content: str = None,
     old_text: str = None,
     store: Optional[MemoryStore] = None,
+    write_origin: str = "assistant_tool",
 ) -> str:
     """
     Single entry point for the memory tool. Dispatches to MemoryStore methods.
@@ -621,7 +641,11 @@ def memory_tool(
     if action == "add":
         if not content:
             return tool_error("Content is required for 'add' action.", success=False)
-        result = store.add(target, content)
+        result = store.add(
+            target,
+            content,
+            write_origin=write_origin or "assistant_tool",
+        )
 
     elif action == "replace":
         if not old_text:
@@ -714,7 +738,8 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
-        store=kw.get("store")),
+        store=kw.get("store"),
+        write_origin=kw.get("write_origin", "assistant_tool")),
     check_fn=check_memory_requirements,
     emoji="🧠",
 )

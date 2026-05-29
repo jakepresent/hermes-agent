@@ -647,6 +647,37 @@ class TestRuntimeProviderResolution:
         assert result["api_key"] == "gho_cli_secret"
         assert result["base_url"] == "https://api.githubcopilot.com"
 
+    def test_runtime_github_copilot_alias_ignores_stale_custom_entry(self, monkeypatch):
+        monkeypatch.setattr("hermes_cli.copilot_auth._try_gh_cli_token", lambda: "gho_cli_secret")
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider._get_model_config",
+            lambda: {
+                "provider": "copilot",
+                "default": "claude-opus-4.8",
+            },
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.load_config",
+            lambda: {
+                "model": {"provider": "copilot", "default": "claude-opus-4.8"},
+                "custom_providers": [
+                    {
+                        "name": "github-copilot",
+                        "base_url": "https://api.individual.githubcopilot.com",
+                        "api_key": "",
+                        "api_mode": "chat_completions",
+                    }
+                ],
+            },
+        )
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        result = resolve_runtime_provider(requested="github-copilot")
+
+        assert result["provider"] == "copilot"
+        assert result["api_key"] == "gho_cli_secret"
+        assert result["base_url"] == "https://api.githubcopilot.com"
+
     def test_runtime_copilot_uses_responses_for_gpt_5_4(self, monkeypatch):
         monkeypatch.setattr("hermes_cli.copilot_auth._try_gh_cli_token", lambda: "gho_cli_secret")
         monkeypatch.setattr(

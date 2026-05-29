@@ -4066,16 +4066,22 @@ class AIAgent:
         else:
             requested_effort = "medium"
 
-        if requested_effort == "xhigh" and "high" in supported_efforts:
+        if requested_effort == "minimal" and "low" in supported_efforts:
+            requested_effort = "low"
+        elif (
+            requested_effort == "xhigh"
+            and "xhigh" not in supported_efforts
+            and "high" in supported_efforts
+        ):
             requested_effort = "high"
         elif requested_effort not in supported_efforts:
-            if requested_effort == "minimal" and "low" in supported_efforts:
-                requested_effort = "low"
-            elif "medium" in supported_efforts:
+            if "medium" in supported_efforts:
                 requested_effort = "medium"
             else:
                 requested_effort = supported_efforts[0]
 
+        if requested_effort == "none":
+            return None
         return {"effort": requested_effort}
 
     def _build_assistant_message(self, assistant_message, finish_reason: str) -> dict:

@@ -1706,8 +1706,8 @@ class TestBuildApiKwargs:
         )
         assert kwargs["extra_body"]["reasoning"] == {"effort": "medium"}
 
-    def test_reasoning_xhigh_normalized_for_copilot(self, agent):
-        """xhigh effort should normalize to high for Copilot GitHub Models."""
+    def test_reasoning_xhigh_preserved_for_copilot(self, agent):
+        """xhigh effort should pass through for Copilot models that support it."""
         from agent.transports import get_transport
         from providers import get_provider_profile
 
@@ -1722,7 +1722,7 @@ class TestBuildApiKwargs:
             reasoning_config={"enabled": True, "effort": "xhigh"},
             provider_profile=profile,
         )
-        assert kwargs["extra_body"]["reasoning"] == {"effort": "high"}
+        assert kwargs["extra_body"]["reasoning"] == {"effort": "xhigh"}
 
     def test_reasoning_omitted_for_non_reasoning_copilot_model(self, agent):
         agent.base_url = "https://api.githubcopilot.com"

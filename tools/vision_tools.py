@@ -32,6 +32,8 @@ import base64
 import json
 import logging
 import os
+import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Dict, Optional
@@ -456,8 +458,11 @@ def _supports_media_in_tool_results(provider: str, model: str) -> bool:
     if p in {"anthropic", "claude", "anthropic-direct"}:
         return True
 
-    # OpenAI Chat Completions and Responses
-    if p in {"openai", "openai-chat", "openai-codex", "azure-openai"}:
+    # OpenAI Chat Completions and Responses. GitHub Copilot's GPT-5.x
+    # models route through the same Responses-shaped adapter in Hermes;
+    # live probe 2026-06-02 confirmed it accepts input_image parts inside
+    # function_call_output.output and the model can read them.
+    if p in {"openai", "openai-chat", "openai-codex", "azure-openai", "copilot"}:
         return True
 
     # Gemini — gate on model name; older Gemini variants did not support
@@ -628,6 +633,299 @@ async def _vision_analyze_native(
                     temp_image_path.unlink()
             except Exception:
                 pass
+
+
+def _normalize_ocr_mode(raw: Any) -> str:
+    """Return a supported OCR output mode."""
+    mode = str(raw or "plain").strip().lower()
+    if mode in {"plain", "lines", "markdown"}:
+        return mode
+    return "plain"
+
+
+def _ocr_prompt_for_mode(mode: str, context: str = "") -> str:
+    """Build the OCR-specific instruction used by native fallback."""
+    mode = _normalize_ocr_mode(mode)
+    if mode == "lines":
+        shape = (
+            "Return the exact visible text as separate lines in reading order. "
+            "Preserve numbers, punctuation, capitalization, and line breaks."
+        )
+    elif mode == "markdown":
+        shape = (
+            "Return the exact visible text in clean markdown. Use markdown "
+            "tables only when the image clearly contains a table. Preserve "
+            "numbers, punctuation, capitalization, and labels."
+        )
+    else:
+        shape = (
+            "Return only the exact visible text in reading order. Preserve "
+            "numbers, punctuation, capitalization, and line breaks."
+        )
+    prompt = (
+        "OCR task: extract exact text from this image. Do not summarize, "
+        "interpret, or add facts that are not visibly present. " + shape
+    )
+    if isinstance(context, str) and context.strip():
+        prompt += f"\n\nContext / focus: {context.strip()}"
+    return prompt
+
+
+def _format_local_ocr_text(raw: str, mode: str) -> str:
+    """Normalize local OCR output without inventing structure."""
+    text = str(raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    normalized = "\n".join(lines)
+    if _normalize_ocr_mode(mode) == "lines":
+        return "\n".join(line for line in lines if line.strip())
+    return normalized
+
+
+def _ocr_text_looks_ambiguous(text: str) -> bool:
+    """Heuristic for when local OCR should get a native-vision second pass."""
+    import re
+
+    if not isinstance(text, str) or not text.strip():
+        return True
+    stripped = text.strip()
+    alpha_num = sum(ch.isalnum() for ch in stripped)
+    if alpha_num < 4:
+        return True
+    if "�" in stripped or "□" in stripped:
+        return True
+    if any(ch in stripped for ch in ("“", "”", "‘", "’", "~")):
+        return True
+    if "\n\n" in stripped:
+        return True
+    if re.search(r"\b\d{1,4},\s*(?:\n|$)", stripped):
+        return True
+    if re.search(r"\$\d{1,3},\d{3}(?!\.\d{2})", stripped):
+        return True
+    if re.search(r"\b(?:gain/loss|cost basis|proceeds|realized loss|realized gain)\b", stripped, flags=re.IGNORECASE):
+        if re.search(r"\b[A-Z]{3,5}\s+(?:MICROSOFT|APPLE|ALPHABET|AMAZON|NVIDIA|TESLA|CORP)\b", stripped):
+            return True
+        if re.search(r"(?<![$+\-])\b\d{1,3},\d{3}\.\d{2}\b", stripped):
+            return True
+    if re.search(r"\b\d{3,4}\s*(?:AM|PM|am|pm)\b", stripped) and not re.search(r"\b\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)\b", stripped):
+        return True
+    for line in stripped.splitlines():
+        if re.search(r"\b(?:gate|seat|terminal|flight)\s+[A-Za-z]{1,3}\b", line, flags=re.IGNORECASE):
+            if not re.search(r"\d", line):
+                return True
+    return False
+
+
+def _ocr_second_pass_context(local_text: str, mode: str, context: str = "") -> str:
+    prompt = (
+        "Tesseract OCR output looked ambiguous or malformed. Use the image "
+        "itself as the source of truth, and correct the OCR only when the "
+        "pixels clearly support the correction. Return exact visible text; "
+        "do not summarize or guess."
+        f"\n\nTesseract OCR output:\n{local_text}"
+    )
+    if isinstance(context, str) and context.strip():
+        prompt += f"\n\nOriginal focus/context: {context.strip()}"
+    prompt += f"\n\nRequested OCR mode: {_normalize_ocr_mode(mode)}"
+    return prompt
+
+
+def _prepare_image_for_tesseract(image_path: Path) -> Path:
+    """Create a temporary preprocessed image for more reliable local OCR."""
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+    except Exception:
+        return image_path
+
+    try:
+        img = Image.open(image_path)
+    except Exception as exc:
+        logger.debug("OCR preprocessing skipped; Pillow could not open image: %s", exc)
+        return image_path
+
+    img = ImageOps.grayscale(img)
+    longest = max(img.size) if img.size else 0
+    if 0 < longest < 1800:
+        scale = min(4, max(2, int(1800 / longest)))
+        img = img.resize((img.width * scale, img.height * scale), Image.Resampling.LANCZOS)
+    img = ImageOps.autocontrast(img)
+    img = ImageEnhance.Contrast(img).enhance(2.0)
+    img = img.filter(ImageFilter.SHARPEN)
+
+    def _threshold(pixel: int) -> int:
+        return 255 if pixel > 170 else 0
+
+    img = img.point(_threshold)
+
+    out = get_hermes_dir("cache/ocr", "temp_ocr_images") / f"ocr_{uuid.uuid4()}.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img.save(out)
+    return out
+
+
+def _ocr_extract_local(image_path: Path, mode: str = "plain") -> Optional[Dict[str, str]]:
+    """Try deterministic local OCR. Returns None when no engine is available."""
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return None
+    ocr_path = _prepare_image_for_tesseract(image_path)
+    try:
+        proc = subprocess.run(
+            [tesseract, str(ocr_path), "stdout", "--dpi", "300"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        logger.warning("Local OCR failed to run: %s", exc)
+        return None
+    finally:
+        if ocr_path != image_path:
+            try:
+                ocr_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+    if proc.returncode != 0:
+        logger.warning("Local OCR failed: %s", proc.stderr[:200])
+        return None
+    raw = proc.stdout or ""
+    return {
+        "engine": "tesseract",
+        "text": _format_local_ocr_text(raw, mode),
+        "raw": raw,
+    }
+
+
+async def _ocr_extract_fast_vision(
+    image_url: str,
+    mode: str = "plain",
+    context: str = "",
+) -> Dict[str, Any]:
+    """Use a fast Copilot vision model for primary OCR."""
+    temp_image_path: Optional[Path] = None
+    should_cleanup = False
+    resolved_url = image_url[len("file://"):] if image_url.startswith("file://") else image_url
+    local_path = Path(os.path.expanduser(resolved_url))
+    try:
+        if local_path.is_file():
+            temp_image_path = local_path
+        elif _validate_image_url(image_url):
+            blocked = check_website_access(image_url)
+            if blocked:
+                raise PermissionError(blocked["message"])
+            temp_dir = get_hermes_dir("cache/vision", "temp_vision_images")
+            temp_image_path = temp_dir / f"temp_image_{uuid.uuid4()}.jpg"
+            await _download_image(image_url, temp_image_path)
+            should_cleanup = True
+        else:
+            raise ValueError("Invalid image source. Provide an HTTP/HTTPS URL or a valid local file path.")
+
+        detected_mime_type = _detect_image_mime_type(temp_image_path)
+        if not detected_mime_type:
+            raise ValueError("Only real image files are supported for OCR extraction.")
+        image_data_url = _image_to_base64_data_url(temp_image_path, mime_type=detected_mime_type)
+        if len(image_data_url) > _MAX_BASE64_BYTES:
+            image_data_url = _resize_image_for_vision(temp_image_path, mime_type=detected_mime_type)
+            if len(image_data_url) > _MAX_BASE64_BYTES:
+                raise ValueError("Image too large for OCR vision model even after resizing.")
+
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _ocr_prompt_for_mode(mode, context)},
+                {"type": "image_url", "image_url": {"url": image_data_url}},
+            ],
+        }]
+        response = await async_call_llm(
+            task="vision",
+            provider="copilot",
+            model="gpt-5.4-mini",
+            messages=messages,
+            temperature=0,
+            max_tokens=2000,
+            timeout=60,
+            extra_body={"reasoning": {"enabled": False}},
+        )
+        text = extract_content_or_reasoning(response) or ""
+        return {
+            "success": True,
+            "engine": "copilot:gpt-5.4-mini",
+            "mode": _normalize_ocr_mode(mode),
+            "text": text.strip(),
+        }
+    finally:
+        if should_cleanup and temp_image_path is not None:
+            try:
+                temp_image_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+
+async def _ocr_extract_native(
+    image_url: str,
+    mode: str = "plain",
+    context: str = "",
+) -> Any:
+    """Native multimodal fallback for OCR when local OCR is unavailable."""
+    result = await _vision_analyze_native(
+        image_url,
+        _ocr_prompt_for_mode(mode, context),
+    )
+    if isinstance(result, dict) and result.get("_multimodal") is True:
+        meta = result.setdefault("meta", {})
+        if isinstance(meta, dict):
+            meta["ocr"] = True
+            meta["mode"] = _normalize_ocr_mode(mode)
+        result["text_summary"] = "Image attached natively for OCR extraction."
+    return result
+
+
+async def _handle_ocr_extract(args: Dict[str, Any], **kw: Any) -> Any:
+    """Extract exact visible text from an image."""
+    image_url = args.get("image_url", "")
+    mode = _normalize_ocr_mode(args.get("mode", "plain"))
+    context = args.get("context", "")
+    if not isinstance(image_url, str) or not image_url.strip():
+        return tool_error("image_url is required", success=False)
+
+    try:
+        fast = await _ocr_extract_fast_vision(image_url, mode=mode, context=str(context or ""))
+        return tool_result(fast)
+    except Exception as exc:
+        logger.warning("Fast OCR vision path failed; falling back to local/native OCR: %s", exc)
+
+    resolved_url = image_url[len("file://"):] if image_url.startswith("file://") else image_url
+    local_path = Path(os.path.expanduser(resolved_url))
+    if local_path.is_file():
+        detected_mime_type = _detect_image_mime_type(local_path)
+        if not detected_mime_type:
+            return tool_error(
+                "Only real image files are supported for OCR extraction.",
+                success=False,
+            )
+        local = _ocr_extract_local(local_path, mode=mode)
+        if local is not None:
+            local_text = local.get("text", "")
+            if _ocr_text_looks_ambiguous(local_text):
+                return await _ocr_extract_native(
+                    image_url,
+                    mode=mode,
+                    context=_ocr_second_pass_context(local_text, mode, str(context or "")),
+                )
+            return tool_result(
+                success=True,
+                engine=local.get("engine", "local"),
+                mode=mode,
+                text=local_text,
+                raw=local.get("raw", ""),
+            )
+
+    return await _ocr_extract_native(image_url, mode=mode, context=str(context or ""))
 
 
 async def vision_analyze_tool(
@@ -939,6 +1237,11 @@ def check_vision_requirements() -> bool:
         return False
 
 
+def check_ocr_requirements() -> bool:
+    """OCR is available with local Tesseract OR a configured vision backend."""
+    return shutil.which("tesseract") is not None or check_vision_requirements()
+
+
 
 if __name__ == "__main__":
     """
@@ -995,7 +1298,7 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
-from tools.registry import registry, tool_error
+from tools.registry import registry, tool_error, tool_result
 
 VISION_ANALYZE_SCHEMA = {
     "name": "vision_analyze",
@@ -1070,6 +1373,49 @@ registry.register(
     check_fn=check_vision_requirements,
     is_async=True,
     emoji="👁️",
+)
+
+
+OCR_EXTRACT_SCHEMA = {
+    "name": "ocr_extract",
+    "description": (
+        "Extract exact visible text from an image, screenshot, receipt, itinerary, "
+        "error dialog, table, or UI. Use this when precise text/numbers matter; "
+        "use vision_analyze for general visual understanding. Accepts a URL, "
+        "local file path, or data URL. Returns deterministic local OCR when "
+        "available, otherwise attaches the image natively with OCR-specific "
+        "instructions."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "image_url": {
+                "type": "string",
+                "description": "Image URL (http/https), local file path, or data: URL to OCR."
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["plain", "lines", "markdown"],
+                "description": "Output shape: plain exact text, non-empty lines, or markdown for tables/forms. Defaults to plain."
+            },
+            "context": {
+                "type": "string",
+                "description": "Optional focus hint, e.g. 'flight times only' or 'error text'. Do not use for general image questions."
+            }
+        },
+        "required": ["image_url"]
+    }
+}
+
+
+registry.register(
+    name="ocr_extract",
+    toolset="vision",
+    schema=OCR_EXTRACT_SCHEMA,
+    handler=_handle_ocr_extract,
+    check_fn=check_ocr_requirements,
+    is_async=True,
+    emoji="🔤",
 )
 
 

@@ -49,6 +49,9 @@ class TestSupportsMediaInToolResults:
     def test_openai_codex_yes(self):
         assert _supports_media_in_tool_results("openai-codex", "gpt-5-codex") is True
 
+    def test_copilot_yes(self):
+        assert _supports_media_in_tool_results("copilot", "gpt-5.5") is True
+
     def test_gemini_3_yes(self):
         assert _supports_media_in_tool_results("google", "gemini-3-flash-preview") is True
 
@@ -159,6 +162,27 @@ class TestHandleVisionAnalyzeFastPath:
         try:
             # Mock decide_image_input_mode to always return "native" so the
             # fast path fires regardless of model-catalog state in CI.
+            with patch(
+                "agent.image_routing.decide_image_input_mode",
+                return_value="native",
+            ):
+                coro = _handle_vision_analyze({"image_url": str(img), "question": "?"})
+                result = asyncio.get_event_loop().run_until_complete(coro)
+        finally:
+            clear_runtime_main()
+
+        assert isinstance(result, dict), \
+            f"Expected multimodal envelope, got {type(result).__name__}: {str(result)[:200]}"
+        assert result.get("_multimodal") is True
+
+    def test_copilot_main_model_uses_fast_path(self, tmp_path, monkeypatch):
+        """Copilot Responses accepts image parts in tool results."""
+        img = tmp_path / "x.png"
+        img.write_bytes(_TINY_PNG)
+
+        from agent.auxiliary_client import set_runtime_main, clear_runtime_main
+        set_runtime_main("copilot", "gpt-5.5")
+        try:
             with patch(
                 "agent.image_routing.decide_image_input_mode",
                 return_value="native",

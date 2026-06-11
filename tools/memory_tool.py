@@ -57,6 +57,8 @@ def get_memory_dir() -> Path:
     return get_hermes_home() / "memories"
 
 ENTRY_DELIMITER = "\n§\n"
+BACKGROUND_REVIEW_DURABLE_NOTE_THRESHOLD = 0.90
+DURABLE_NOTES_FILENAME = "DURABLE_NOTES.md"
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +251,151 @@ class MemoryStore:
             return mem_dir / "USER.md"
         return mem_dir / "MEMORY.md"
 
+    @staticmethod
+    def _durable_notes_path() -> Path:
+        """Profile-scoped durable note sink for non-injected background notes."""
+        return get_memory_dir() / DURABLE_NOTES_FILENAME
+
+    def _durable_topic_for_content(self, target: str, content: str) -> str:
+        """Map a background-review note to a coarse durable-note topic."""
+        text = content.lower()
+        topic_rules = [
+            ("autofilmcrop", ("autofilmcrop", "lightroom", "preview cache", "crop bounds")),
+            ("ngng", ("no grain no gain", "ngng", "c-41", "ecn-2", "film chemistry")),
+            ("mamiya", ("mamiya", "mamiyapan", "645 half-frame", "half frame")),
+            ("microsoft", ("microsoft", "coreai", "responsible ai", "teams")),
+            ("hermes", ("hermes", "background review", "durable notes", "memory", "provider", "copilot", "codex")),
+            ("health", ("health", "training", "bloodwork", "hormone", "diet")),
+            ("dating", ("dating", "texting", "hinge", "date")),
+            ("hardware", ("p520", "mac", "smb", "ethernet", "final cut", "fcp")),
+            ("travel", ("travel", "flight", "hotel", "trip")),
+        ]
+        for topic, needles in topic_rules:
+            if any(needle in text for needle in needles):
+                return topic
+        if target == "user":
+            return "user-profile"
+        return "general"
+
+    @staticmethod
+    def _durable_topic_pointer(topic: str) -> str:
+        return (
+            f"Durable notes/{topic} → memories/{DURABLE_NOTES_FILENAME}"
+            f"#topic-{topic} (pending compaction)."
+        )
+
+    @staticmethod
+    def _append_note_to_topic(existing: str, topic: str, preamble: str, entry: str) -> str:
+        """Append ``entry`` under ``## Topic: <topic>`` while preserving groups."""
+        heading = f"## Topic: {topic}"
+        if not existing.strip():
+            return preamble.rstrip() + f"\n\n{heading}" + entry
+        if heading not in existing:
+            return existing.rstrip() + f"\n\n{heading}" + entry
+
+        start = existing.index(heading)
+        next_heading = existing.find("\n## Topic: ", start + len(heading))
+        if next_heading == -1:
+            return existing.rstrip() + entry
+        return existing[:next_heading].rstrip() + entry + "\n" + existing[next_heading:].lstrip("\n")
+
+    def _ensure_durable_topic_pointer(self, target: str, topic: str) -> tuple[bool, str, str]:
+        """Add a short injected-memory pointer for a durable-note topic if safe."""
+        pointer_entry = self._durable_topic_pointer(topic)
+        entries = self._entries_for(target)
+        if any(e == pointer_entry for e in entries):
+            return False, "already_exists", pointer_entry
+
+        limit = self._char_limit(target)
+        candidate_entries = entries + [pointer_entry]
+        new_total = len(ENTRY_DELIMITER.join(candidate_entries))
+        if new_total > limit:
+            return False, "skipped_full", pointer_entry
+
+        entries.append(pointer_entry)
+        self._set_entries(target, entries)
+        self.save_to_disk(target)
+        return True, "added", pointer_entry
+
+    def _durable_note_reason(self, target: str, new_total: int) -> str:
+        limit = self._char_limit(target)
+        if limit <= 0 or new_total > limit:
+            return "over_limit"
+        current = self._char_count(target)
+        if (
+            current / limit >= BACKGROUND_REVIEW_DURABLE_NOTE_THRESHOLD
+            or new_total / limit >= BACKGROUND_REVIEW_DURABLE_NOTE_THRESHOLD
+        ):
+            return "near_limit"
+        return "background_default"
+
+    def _save_background_review_durable_note(
+        self,
+        target: str,
+        content: str,
+        *,
+        new_total: int,
+    ) -> Dict[str, Any]:
+        """Append a background-review note outside injected MEMORY.md/USER.md."""
+        from agent.redact import redact_sensitive_text
+
+        current = self._char_count(target)
+        limit = self._char_limit(target)
+        reason = self._durable_note_reason(target, new_total)
+        topic = self._durable_topic_for_content(target, content)
+        pointer_updated, pointer_status, pointer_entry = self._ensure_durable_topic_pointer(
+            target,
+            topic,
+        )
+        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        safe_content = redact_sensitive_text(content, force=True)
+        safe_content = re.sub(
+            r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{2,}\.\.\.[A-Za-z0-9_-]{2,}(?![A-Za-z0-9_-])",
+            "[REDACTED]",
+            safe_content,
+        )
+        path = self._durable_notes_path()
+        preamble = (
+            "# Durable Notes\n\n"
+            "Background self-improvement review writes here when built-in "
+            "MEMORY.md / USER.md is near its prompt-injected character cap. "
+            "These notes are durable and searchable, but they are not injected "
+            "into every system prompt.\n"
+        )
+        entry = (
+            f"\n\n### {timestamp} — background_review\n"
+            f"- target: {target}\n"
+            f"- reason: {reason.replace('_', ' ')}\n"
+            f"- usage: {current:,}/{limit:,} chars\n"
+            f"- attempted_entry_chars: {len(content):,}\n"
+            f"- pointer_status: {pointer_status}\n"
+            "- injected_memory_updated: false\n\n"
+            f"{safe_content}\n"
+        )
+
+        with self._file_lock(path):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                existing = path.read_text(encoding="utf-8") if path.exists() else ""
+            except (OSError, IOError):
+                existing = ""
+            next_text = self._append_note_to_topic(existing, topic, preamble, entry)
+            self._write_text_file(path, next_text)
+
+        return {
+            "success": True,
+            "target": target,
+            "storage": "durable_notes",
+            "message": "Durable notes updated.",
+            "durable_note_path": str(path),
+            "durable_topic": topic,
+            "pointer_entry": pointer_entry,
+            "pointer_status": pointer_status,
+            "injected_memory_updated": pointer_updated,
+            "usage": f"{current:,}/{limit:,}",
+            "reason": reason,
+        }
+
     def _reload_target(self, target: str) -> Optional[str]:
         """Re-read entries from disk into in-memory state.
 
@@ -330,6 +477,13 @@ class MemoryStore:
             # Calculate what the new total would be
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
+
+            if write_origin == "background_review":
+                return self._save_background_review_durable_note(
+                    target,
+                    content,
+                    new_total=new_total,
+                )
 
             if new_total > limit:
                 current = self._char_count(target)
@@ -616,6 +770,28 @@ class MemoryStore:
                 raise
         except (OSError, IOError) as e:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
+
+    @staticmethod
+    def _write_text_file(path: Path, content: str):
+        """Write a free-form text file using atomic temp-file + rename."""
+        try:
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(path.parent), suffix=".tmp", prefix=".notes_"
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                    f.flush()
+                    os.fsync(f.fileno())
+                atomic_replace(tmp_path, path)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+        except (OSError, IOError) as e:
+            raise RuntimeError(f"Failed to write durable notes file {path}: {e}")
 
 
 def memory_tool(

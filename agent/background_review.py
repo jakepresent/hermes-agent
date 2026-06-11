@@ -281,7 +281,9 @@ def summarize_background_review_actions(
             continue
         message = data.get("message", "")
         target = data.get("target", "")
-        if "created" in message.lower():
+        if data.get("storage") == "durable_notes" and message == "Durable notes updated.":
+            actions.append("Durable notes updated")
+        elif "created" in message.lower():
             actions.append(message)
         elif "updated" in message.lower():
             actions.append(message)

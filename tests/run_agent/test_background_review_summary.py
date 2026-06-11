@@ -128,3 +128,21 @@ def test_removed_or_replaced_relabels_by_target():
 
     assert "User profile updated" in actions
     assert "Memory updated" in actions
+
+
+def test_durable_notes_update_is_surfaced_as_durable_notes_not_memory():
+    review_messages = [
+        _tool_msg(
+            "c1",
+            {
+                "success": True,
+                "target": "memory",
+                "storage": "durable_notes",
+                "message": "Durable notes updated.",
+            },
+        )
+    ]
+
+    actions = _summarize(review_messages, [])
+
+    assert actions == ["Durable notes updated"]

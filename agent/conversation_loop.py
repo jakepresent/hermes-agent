@@ -2687,13 +2687,13 @@ def run_conversation(
                     # 3-image, ~9 MB request so multi-image screenshot batches
                     # get reduced even when individual files are under 4 MB.
                     if (
-                        not image_shrink_retry_attempted
+                        not _retry.image_shrink_retry_attempted
                         and agent._try_shrink_image_parts_in_messages(
                             api_messages,
                             target_total_base64_bytes=4 * 1024 * 1024,
                         )
                     ):
-                        image_shrink_retry_attempted = True
+                        _retry.image_shrink_retry_attempted = True
                         agent._emit_status(
                             "📐 Request payload too large (413) with inline image(s) — "
                             "shrunk image payload and retrying..."

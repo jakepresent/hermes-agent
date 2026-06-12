@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,15 @@ def test_search_rejects_unknown_render_format(tmp_path):
     assert "render_format" in payload["error"]
 
 
+def test_search_rejects_unknown_search_mode(tmp_path):
+    payload = json.loads(
+        memory_search_tool("RA-4", index_path=tmp_path / "idx.sqlite", search_mode="semantic")
+    )
+
+    assert payload["success"] is False
+    assert "search_mode" in payload["error"]
+
+
 def test_search_updates_index_incrementally(tmp_path):
     root = tmp_path / "memories"
     root.mkdir()
@@ -135,6 +145,9 @@ def test_schema_lists_all_default_indexed_sources():
     assert "localops" in source_schema["enum"]
     assert "legacy_sessions" in source_schema["enum"]
 
+    search_mode_schema = MEMORY_SEARCH_SCHEMA["parameters"]["properties"]["search_mode"]
+    assert search_mode_schema["enum"] == ["chunks", "facts", "hybrid"]
+
 
 def test_default_roots_include_localops_operator_notes():
     root_strings = {(str(path), source) for path, source in DEFAULT_ROOTS}
@@ -161,6 +174,235 @@ def test_search_retries_with_or_terms_when_strict_and_query_has_multiple_terms(t
     assert payload["results"]
     assert payload["query_strategy"] == "relaxed_or"
     assert "AutoFilmCrop" in payload["results"][0]["snippet"]
+
+
+def test_schema_creates_memory_fact_tables(tmp_path):
+    index_path = tmp_path / "idx.sqlite"
+    build_index(index_path=index_path, roots=[], force=True)
+
+    with sqlite3.connect(index_path) as con:
+        names = {
+            r[0]
+            for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+            )
+        }
+
+    assert "memory_facts" in names
+    assert "memory_facts_fts" in names
+    assert "memory_fact_chunks" in names
+
+
+def test_build_index_extracts_fact_cards_from_markdown_bullets(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    project = root / "ngng"
+    project.mkdir(parents=True)
+    (project / "context.md").write_text(
+        "# NGNG\n\n"
+        "## Chemistry\n"
+        "- Controlled scan reads outrank AI screenshot impressions.\n"
+        "- Reconcile C-41 hypotheses against canonical formulas.\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    payload = json.loads(
+        memory_search_tool(
+            "controlled scan reads",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["search_mode"] == "facts"
+    assert payload["facts"]
+    fact = payload["facts"][0]
+    assert fact["topic"] == "Chemistry"
+    assert fact["source"] == "chatworkspace"
+    assert fact["path"].endswith("ngng/context.md")
+    assert fact["lines"] == "4-4"
+    assert "Controlled scan reads" in fact["fact"]
+    assert fact["source_hash"]
+    assert fact["extractor_version"]
+
+
+def test_fact_cards_rebuild_when_source_chunk_changes(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    note = root / "context.md"
+    note.write_text("# Project\n\n## Notes\n- Old durable fact about bleach.\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    old_payload = json.loads(
+        memory_search_tool(
+            "bleach",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )
+    assert old_payload["facts"]
+
+    note.write_text("# Project\n\n## Notes\n- New durable fact about fixer.\n", encoding="utf-8")
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")])
+
+    stale_payload = json.loads(
+        memory_search_tool(
+            "bleach",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )
+    fresh_payload = json.loads(
+        memory_search_tool(
+            "fixer",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )
+
+    assert stale_payload["facts"] == []
+    assert fresh_payload["facts"]
+    assert "New durable fact" in fresh_payload["facts"][0]["fact"]
+
+
+def test_fact_search_backfills_relaxed_or_matches(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "context.md").write_text(
+        "# Project\n\n## Notes\n- AutoFilmCrop uses Cloudflare Workers for licensing.\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    with sqlite3.connect(index_path) as con:
+        con.execute("DELETE FROM memory_facts_fts")
+        con.execute("DELETE FROM memory_facts")
+        con.execute("DELETE FROM memory_fact_chunks")
+        con.commit()
+
+    payload = json.loads(
+        memory_search_tool(
+            "AutoFilmCrop SQLite",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["facts"]
+    assert "AutoFilmCrop uses Cloudflare Workers" in payload["facts"][0]["fact"]
+
+
+def test_fact_cards_removed_when_source_file_is_deleted(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    note = root / "context.md"
+    note.write_text("# Project\n\n## Notes\n- Temporary fact about removal.\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    assert json.loads(
+        memory_search_tool(
+            "temporary removal",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )["facts"]
+
+    note.unlink()
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")])
+
+    payload = json.loads(
+        memory_search_tool(
+            "temporary removal",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["facts"] == []
+
+
+def test_fact_search_backfills_missing_fact_cache_from_existing_chunks(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "context.md").write_text(
+        "# Project\n\n## Notes\n- Backfilled fact about archived context.\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    with sqlite3.connect(index_path) as con:
+        con.execute("DELETE FROM memory_facts_fts")
+        con.execute("DELETE FROM memory_facts")
+        con.execute("DELETE FROM memory_fact_chunks")
+        con.commit()
+
+    payload = json.loads(
+        memory_search_tool(
+            "backfilled archived",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="facts",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["facts"]
+    assert "Backfilled fact" in payload["facts"][0]["fact"]
+
+
+def test_hybrid_toon_search_returns_fact_and_chunk_context(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "context.md").write_text(
+        "# Project\n\n"
+        "## Notes\n"
+        "- Hybrid fact about camera scanning.\n\n"
+        "Camera scanning also appears in raw prose for fallback context.\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    payload = json.loads(
+        memory_search_tool(
+            "camera scanning",
+            roots=[(root, "chatworkspace")],
+            index_path=index_path,
+            freshness_seconds=9999,
+            search_mode="hybrid",
+            render_format="toon",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["search_mode"] == "hybrid"
+    assert payload["render_format"] == "toon"
+    assert "results" not in payload
+    assert "facts" not in payload
+    assert "context[" in payload["toon_context"]
+    assert "kind,topic,source,path,lines,score,text,use_when" in payload["toon_context"]
+    assert "fact," in payload["toon_context"]
+    assert "chunk," in payload["toon_context"]
 
 
 def test_import_openclaw_legacy_memory_chunks(tmp_path):

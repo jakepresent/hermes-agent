@@ -41,6 +41,8 @@ _IGNORE_DIRS = {
 }
 _MARKDOWN_EXTS = {".md", ".mdx", ".txt"}
 _MAX_SNIPPET_CHARS = 700
+_FACT_EXTRACTOR_VERSION = "deterministic-markdown-bullets-v1"
+_MIN_FACT_CHARS = 20
 
 
 def _connect(index_path: Path) -> sqlite3.Connection:
@@ -77,6 +79,39 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
             path UNINDEXED,
             source UNINDEXED,
             content='chunks',
+            content_rowid='rowid'
+        );
+        CREATE TABLE IF NOT EXISTS memory_fact_chunks (
+            chunk_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_hash TEXT NOT NULL,
+            extractor_version TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS memory_facts (
+            id TEXT PRIMARY KEY,
+            chunk_id TEXT NOT NULL,
+            source TEXT NOT NULL,
+            path TEXT NOT NULL,
+            start_line INTEGER NOT NULL,
+            end_line INTEGER NOT NULL,
+            source_hash TEXT NOT NULL,
+            topic TEXT NOT NULL,
+            fact TEXT NOT NULL,
+            use_when TEXT NOT NULL DEFAULT '',
+            entities_json TEXT NOT NULL DEFAULT '[]',
+            extractor_version TEXT NOT NULL,
+            extracted_at REAL NOT NULL
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS memory_facts_fts USING fts5(
+            topic,
+            fact,
+            use_when,
+            entities_json,
+            path UNINDEXED,
+            source UNINDEXED,
+            content='memory_facts',
             content_rowid='rowid'
         );
         """
@@ -156,6 +191,233 @@ def _delete_file_chunks(con: sqlite3.Connection, path: str) -> None:
     for rowid in rowids:
         con.execute("DELETE FROM chunks_fts WHERE rowid = ?", (rowid,))
     con.execute("DELETE FROM chunks WHERE path = ?", (path,))
+    _delete_fact_rows_for_path(con, path)
+
+
+def _delete_fact_rows_for_path(con: sqlite3.Connection, path: str) -> None:
+    rowids = [r[0] for r in con.execute("SELECT rowid FROM memory_facts WHERE path = ?", (path,)).fetchall()]
+    for rowid in rowids:
+        con.execute("DELETE FROM memory_facts_fts WHERE rowid = ?", (rowid,))
+    con.execute("DELETE FROM memory_facts WHERE path = ?", (path,))
+    con.execute("DELETE FROM memory_fact_chunks WHERE path = ?", (path,))
+
+
+def _delete_fact_rows_for_chunk(con: sqlite3.Connection, chunk_id: str) -> None:
+    rowids = [r[0] for r in con.execute("SELECT rowid FROM memory_facts WHERE chunk_id = ?", (chunk_id,)).fetchall()]
+    for rowid in rowids:
+        con.execute("DELETE FROM memory_facts_fts WHERE rowid = ?", (rowid,))
+    con.execute("DELETE FROM memory_facts WHERE chunk_id = ?", (chunk_id,))
+    con.execute("DELETE FROM memory_fact_chunks WHERE chunk_id = ?", (chunk_id,))
+
+
+def _backfill_missing_fact_cards(
+    con: sqlite3.Connection,
+    *,
+    fts: str,
+    source: str = "all",
+    path_filter: str = "",
+    max_chunks: int = 500,
+) -> int:
+    """Populate fact cards for query-matching chunks indexed before facts existed."""
+
+    params: list[Any] = [fts, _FACT_EXTRACTOR_VERSION]
+    filters = [
+        "chunks_fts MATCH ?",
+        "(mfc.chunk_id IS NULL OR mfc.source_hash != c.hash OR mfc.extractor_version != ?)",
+    ]
+    if source and source != "all":
+        filters.append("c.source = ?")
+        params.append(source)
+    if path_filter:
+        filters.append("c.path LIKE ?")
+        params.append(f"%{path_filter}%")
+    params.append(max_chunks)
+    rows = con.execute(
+        f"""
+        SELECT c.id, c.path, c.source, c.start_line, c.hash, c.text
+        FROM chunks_fts
+        JOIN chunks c ON c.rowid = chunks_fts.rowid
+        LEFT JOIN memory_fact_chunks mfc ON mfc.chunk_id = c.id
+        WHERE {' AND '.join(filters)}
+        ORDER BY c.path, c.start_line
+        LIMIT ?
+        """,
+        params,
+    ).fetchall()
+    now = time.time()
+    inserted = 0
+    for row in rows:
+        inserted += _refresh_fact_cards_for_chunk(
+            con,
+            chunk_id=row["id"],
+            path=row["path"],
+            source=row["source"],
+            start_line=int(row["start_line"]),
+            hash_value=row["hash"],
+            text=row["text"],
+            now=now,
+        )
+    return inserted
+
+
+def _insert_fact_card(
+    con: sqlite3.Connection,
+    *,
+    chunk_id: str,
+    source: str,
+    path: str,
+    start_line: int,
+    end_line: int,
+    source_hash: str,
+    topic: str,
+    fact: str,
+    use_when: str = "",
+    entities: list[str] | None = None,
+    extractor_version: str = _FACT_EXTRACTOR_VERSION,
+    extracted_at: float | None = None,
+) -> str:
+    entities = entities or []
+    extracted_at = time.time() if extracted_at is None else extracted_at
+    entities_json = json.dumps(entities, ensure_ascii=False, separators=(",", ":"))
+    fact_id = _sha256_text(
+        f"fact:{extractor_version}:{chunk_id}:{start_line}:{end_line}:{topic}:{fact}:{use_when}:{entities_json}"
+    )
+    con.execute(
+        """
+        INSERT OR REPLACE INTO memory_facts(
+            id, chunk_id, source, path, start_line, end_line, source_hash,
+            topic, fact, use_when, entities_json, extractor_version, extracted_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            fact_id,
+            chunk_id,
+            source,
+            path,
+            int(start_line),
+            int(end_line),
+            source_hash,
+            topic,
+            fact,
+            use_when,
+            entities_json,
+            extractor_version,
+            extracted_at,
+        ),
+    )
+    rowid = con.execute("SELECT rowid FROM memory_facts WHERE id = ?", (fact_id,)).fetchone()[0]
+    con.execute(
+        """
+        INSERT INTO memory_facts_fts(rowid, topic, fact, use_when, entities_json, path, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (rowid, topic, fact, use_when, entities_json, path, source),
+    )
+    return fact_id
+
+
+def _strip_fact_bullet(line: str) -> str:
+    return re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+|§\s*)", "", line).strip()
+
+
+def _extract_fact_cards_from_chunk(
+    *,
+    path: str,
+    source: str,
+    chunk_id: str,
+    chunk_hash: str,
+    chunk_text: str,
+    chunk_start_line: int,
+) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    topic = Path(path).stem
+    in_code_block = False
+    for offset, line in enumerate(chunk_text.splitlines()):
+        stripped = line.strip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_code_block = not in_code_block
+            continue
+        if in_code_block:
+            continue
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            if heading:
+                topic = heading
+            continue
+        if not re.match(r"^\s*(?:[-*+]\s+|\d+[.)]\s+|§\s*)", line):
+            continue
+        fact = _strip_fact_bullet(line)
+        if len(fact) < _MIN_FACT_CHARS:
+            continue
+        if re.search(r"(?i)(api[_-]?key|token|password|secret|credential)\s*[:=]", fact):
+            continue
+        line_no = chunk_start_line + offset
+        facts.append(
+            {
+                "chunk_id": chunk_id,
+                "source": source,
+                "path": path,
+                "start_line": line_no,
+                "end_line": line_no,
+                "source_hash": chunk_hash,
+                "topic": topic,
+                "fact": fact,
+                "use_when": topic,
+                "entities": [],
+                "extractor_version": _FACT_EXTRACTOR_VERSION,
+            }
+        )
+    return facts
+
+
+def _refresh_fact_cards_for_chunk(
+    con: sqlite3.Connection,
+    *,
+    chunk_id: str,
+    path: str,
+    source: str,
+    start_line: int,
+    hash_value: str,
+    text: str,
+    now: float,
+) -> int:
+    existing = con.execute(
+        """
+        SELECT source_hash, extractor_version
+        FROM memory_fact_chunks
+        WHERE chunk_id = ?
+        """,
+        (chunk_id,),
+    ).fetchone()
+    if existing and existing["source_hash"] == hash_value and existing["extractor_version"] == _FACT_EXTRACTOR_VERSION:
+        return 0
+
+    _delete_fact_rows_for_chunk(con, chunk_id)
+    inserted = 0
+    for fact in _extract_fact_cards_from_chunk(
+        path=path,
+        source=source,
+        chunk_id=chunk_id,
+        chunk_hash=hash_value,
+        chunk_text=text,
+        chunk_start_line=start_line,
+    ):
+        _insert_fact_card(con, extracted_at=now, **fact)
+        inserted += 1
+    con.execute(
+        """
+        INSERT INTO memory_fact_chunks(chunk_id, path, source, source_hash, extractor_version, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(chunk_id) DO UPDATE SET
+            path=excluded.path,
+            source=excluded.source,
+            source_hash=excluded.source_hash,
+            extractor_version=excluded.extractor_version,
+            updated_at=excluded.updated_at
+        """,
+        (chunk_id, path, source, hash_value, _FACT_EXTRACTOR_VERSION, now),
+    )
+    return inserted
 
 
 def _index_file(con: sqlite3.Connection, path: Path, source: str) -> tuple[int, bool]:
@@ -183,6 +445,16 @@ def _index_file(con: sqlite3.Connection, path: Path, source: str) -> tuple[int, 
             "INSERT INTO chunks_fts(rowid, text, path, source) VALUES (?, ?, ?, ?)",
             (rowid, chunk_text, path_str, source),
         )
+        _refresh_fact_cards_for_chunk(
+            con,
+            chunk_id=chunk_hash,
+            path=path_str,
+            source=source,
+            start_line=start_line,
+            hash_value=chunk_hash,
+            text=chunk_text,
+            now=now,
+        )
         inserted += 1
 
     con.execute(
@@ -203,7 +475,7 @@ def _index_file(con: sqlite3.Connection, path: Path, source: str) -> tuple[int, 
 
 def _normalize_roots(roots: Optional[Sequence[tuple[Path | str, str]]] = None) -> list[tuple[Path, str]]:
     normalized = []
-    for root, source in (roots or DEFAULT_ROOTS):
+    for root, source in (DEFAULT_ROOTS if roots is None else roots):
         normalized.append((Path(root).expanduser(), str(source)))
     return normalized
 
@@ -223,14 +495,19 @@ def build_index(
             con.execute("DELETE FROM chunks_fts")
             con.execute("DELETE FROM chunks")
             con.execute("DELETE FROM files")
+            con.execute("DELETE FROM memory_facts_fts")
+            con.execute("DELETE FROM memory_facts")
+            con.execute("DELETE FROM memory_fact_chunks")
         indexed_files = 0
         indexed_chunks = 0
         scanned_files = 0
+        seen_paths: set[str] = set()
         roots_seen = []
         for root, source in roots_norm:
             roots_seen.append(str(root))
             for path in _iter_indexable_files(root) or []:
                 scanned_files += 1
+                seen_paths.add(str(path))
                 try:
                     inserted, changed = _index_file(con, path, source)
                 except (OSError, UnicodeError):
@@ -238,9 +515,23 @@ def build_index(
                 indexed_chunks += inserted
                 if changed:
                     indexed_files += 1
+        for root, source in roots_norm:
+            root_str = str(root)
+            indexed_paths = [
+                r[0]
+                for r in con.execute(
+                    "SELECT path FROM files WHERE source = ? AND path LIKE ?",
+                    (source, f"{root_str}%"),
+                ).fetchall()
+            ]
+            for indexed_path in indexed_paths:
+                if indexed_path not in seen_paths:
+                    _delete_file_chunks(con, indexed_path)
+                    con.execute("DELETE FROM files WHERE path = ?", (indexed_path,))
         con.commit()
         total_chunks = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         total_files = con.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        total_facts = con.execute("SELECT COUNT(*) FROM memory_facts").fetchone()[0]
     return {
         "success": True,
         "index_path": str(index_path),
@@ -250,6 +541,7 @@ def build_index(
         "indexed_chunks": indexed_chunks,
         "total_files": total_files,
         "total_chunks": total_chunks,
+        "total_facts": total_facts,
     }
 
 
@@ -347,6 +639,36 @@ def _query_chunks(
     return con.execute(sql, params).fetchall()
 
 
+def _query_fact_cards(
+    con: sqlite3.Connection,
+    *,
+    fts: str,
+    limit: int,
+    source: str = "all",
+    path_filter: str = "",
+) -> list[sqlite3.Row]:
+    params: list[Any] = [fts]
+    filters = ["memory_facts_fts MATCH ?"]
+    if source and source != "all":
+        filters.append("mf.source = ?")
+        params.append(source)
+    if path_filter:
+        filters.append("mf.path LIKE ?")
+        params.append(f"%{path_filter}%")
+    params.append(limit)
+    sql = f"""
+        SELECT mf.id, mf.chunk_id, mf.source, mf.path, mf.start_line, mf.end_line,
+               mf.source_hash, mf.topic, mf.fact, mf.use_when, mf.entities_json,
+               mf.extractor_version, bm25(memory_facts_fts) AS score
+        FROM memory_facts_fts
+        JOIN memory_facts mf ON mf.rowid = memory_facts_fts.rowid
+        WHERE {' AND '.join(filters)}
+        ORDER BY score
+        LIMIT ?
+    """
+    return con.execute(sql, params).fetchall()
+
+
 def _snippet(text: str, query: str) -> str:
     compact = re.sub(r"\s+", " ", text).strip()
     lower = compact.lower()
@@ -407,6 +729,7 @@ def search_index(
     path_filter: str = "",
     freshness_seconds: int = 60,
     render_format: str = "json",
+    search_mode: str = "chunks",
 ) -> dict[str, Any]:
     query = (query or "").strip()
     if not query:
@@ -414,6 +737,9 @@ def search_index(
     render_format = (render_format or "json").strip().lower()
     if render_format not in {"json", "toon"}:
         return {"success": False, "error": "render_format must be one of: json, toon"}
+    search_mode = (search_mode or "chunks").strip().lower()
+    if search_mode not in {"chunks", "facts", "hybrid"}:
+        return {"success": False, "error": "search_mode must be one of: chunks, facts, hybrid"}
     index_path = Path(index_path).expanduser()
     roots_norm = _normalize_roots(roots)
     indexed = None
@@ -422,49 +748,108 @@ def search_index(
 
     limit = max(1, min(int(limit or 8), 25))
     query_strategy = "strict_and"
+    chunk_rows: list[sqlite3.Row] = []
+    fact_rows: list[sqlite3.Row] = []
     with _connect(index_path) as con:
         _ensure_schema(con)
-        try:
-            rows = _query_chunks(
-                con,
-                fts=_fts_query(query, operator="AND"),
-                limit=limit,
-                source=source,
-                path_filter=path_filter,
-            )
-            if not rows and len(re.findall(r"\w+", query)) > 1:
-                rows = _query_chunks(
+        fts_and = _fts_query(query, operator="AND")
+        fts_or = _fts_query(query, operator="OR")
+        if search_mode in {"facts", "hybrid"}:
+            try:
+                backfilled = _backfill_missing_fact_cards(con, fts=fts_and, source=source, path_filter=path_filter)
+                if backfilled == 0 and len(re.findall(r"\w+", query)) > 1:
+                    _backfill_missing_fact_cards(con, fts=fts_or, source=source, path_filter=path_filter)
+                con.commit()
+            except sqlite3.OperationalError:
+                if len(re.findall(r"\w+", query)) > 1:
+                    _backfill_missing_fact_cards(con, fts=fts_or, source=source, path_filter=path_filter)
+                    con.commit()
+
+        if search_mode in {"chunks", "hybrid"}:
+            try:
+                chunk_rows = _query_chunks(
                     con,
-                    fts=_fts_query(query, operator="OR"),
+                    fts=fts_and,
                     limit=limit,
                     source=source,
                     path_filter=path_filter,
                 )
-                if rows:
-                    query_strategy = "relaxed_or"
-        except sqlite3.OperationalError:
-            # If FTS parsing still fails for an odd query, fall back to a
-            # simple LIKE over chunks so the tool stays useful.
-            query_strategy = "like_fallback"
-            like = f"%{query}%"
-            like_params: list[Any] = [like]
-            like_filters = ["text LIKE ?"]
-            if source and source != "all":
-                like_filters.append("source = ?")
-                like_params.append(source)
-            if path_filter:
-                like_filters.append("path LIKE ?")
-                like_params.append(f"%{path_filter}%")
-            like_params.append(limit)
-            rows = con.execute(
-                f"""
-                SELECT path, source, start_line, end_line, text, 0.0 AS score
-                FROM chunks
-                WHERE {' AND '.join(like_filters)}
-                LIMIT ?
-                """,
-                like_params,
-            ).fetchall()
+                if not chunk_rows and len(re.findall(r"\w+", query)) > 1:
+                    chunk_rows = _query_chunks(
+                        con,
+                        fts=fts_or,
+                        limit=limit,
+                        source=source,
+                        path_filter=path_filter,
+                    )
+                    if chunk_rows:
+                        query_strategy = "relaxed_or"
+            except sqlite3.OperationalError:
+                # If FTS parsing still fails for an odd query, fall back to a
+                # simple LIKE over chunks so the tool stays useful.
+                query_strategy = "like_fallback"
+                like = f"%{query}%"
+                like_params: list[Any] = [like]
+                like_filters = ["text LIKE ?"]
+                if source and source != "all":
+                    like_filters.append("source = ?")
+                    like_params.append(source)
+                if path_filter:
+                    like_filters.append("path LIKE ?")
+                    like_params.append(f"%{path_filter}%")
+                like_params.append(limit)
+                chunk_rows = con.execute(
+                    f"""
+                    SELECT path, source, start_line, end_line, text, 0.0 AS score
+                    FROM chunks
+                    WHERE {' AND '.join(like_filters)}
+                    LIMIT ?
+                    """,
+                    like_params,
+                ).fetchall()
+
+        if search_mode in {"facts", "hybrid"}:
+            try:
+                fact_rows = _query_fact_cards(
+                    con,
+                    fts=fts_and,
+                    limit=limit,
+                    source=source,
+                    path_filter=path_filter,
+                )
+                if not fact_rows and len(re.findall(r"\w+", query)) > 1:
+                    fact_rows = _query_fact_cards(
+                        con,
+                        fts=fts_or,
+                        limit=limit,
+                        source=source,
+                        path_filter=path_filter,
+                    )
+                    if fact_rows and query_strategy == "strict_and":
+                        query_strategy = "relaxed_or"
+            except sqlite3.OperationalError:
+                query_strategy = "like_fallback"
+                like = f"%{query}%"
+                like_params = [like]
+                like_filters = ["fact LIKE ?"]
+                if source and source != "all":
+                    like_filters.append("source = ?")
+                    like_params.append(source)
+                if path_filter:
+                    like_filters.append("path LIKE ?")
+                    like_params.append(f"%{path_filter}%")
+                like_params.append(limit)
+                fact_rows = con.execute(
+                    f"""
+                    SELECT id, chunk_id, source, path, start_line, end_line,
+                           source_hash, topic, fact, use_when, entities_json,
+                           extractor_version, 0.0 AS score
+                    FROM memory_facts
+                    WHERE {' AND '.join(like_filters)}
+                    LIMIT ?
+                    """,
+                    like_params,
+                ).fetchall()
 
     results = [
         {
@@ -475,8 +860,26 @@ def search_index(
             "score": float(row["score"]),
             "snippet": _snippet(row["text"], query),
         }
-        for row in rows
+        for row in chunk_rows
     ]
+    facts = [
+        {
+            "topic": row["topic"],
+            "source": row["source"],
+            "path": row["path"],
+            "start_line": int(row["start_line"]),
+            "end_line": int(row["end_line"]),
+            "lines": f"{int(row['start_line'])}-{int(row['end_line'])}",
+            "score": float(row["score"]),
+            "fact": row["fact"],
+            "use_when": row["use_when"],
+            "source_hash": row["source_hash"],
+            "extractor_version": row["extractor_version"],
+        }
+        for row in fact_rows
+    ]
+
+    count = len(facts) if search_mode == "facts" else len(results) if search_mode == "chunks" else len(facts) + len(results)
     payload: dict[str, Any] = {
         "success": True,
         "query": query,
@@ -484,31 +887,92 @@ def search_index(
         "query_strategy": query_strategy,
         "index_path": str(index_path),
         "index_updated": indexed,
-        "count": len(results),
+        "count": count,
         "cache_miss_writeback": (
             "If this search recovers durable context that should have been in memory, "
             "write a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer."
         ),
     }
+    if search_mode != "chunks":
+        payload["search_mode"] = search_mode
+
     if render_format == "json":
-        payload["results"] = results
+        if search_mode == "facts":
+            payload["facts"] = facts
+        elif search_mode == "hybrid":
+            payload["facts"] = facts
+            payload["results"] = results
+        else:
+            payload["results"] = results
     elif render_format == "toon":
-        toon_rows = [
-            {
-                "source": hit["source"],
-                "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
-                "lines": f"{hit['start_line']}-{hit['end_line']}",
-                "score": round(float(hit["score"]), 3),
-                "snippet": hit["snippet"],
-            }
-            for hit in results
-        ]
         payload["render_format"] = "toon"
-        payload["toon_context"] = render_toon_rows(
-            "hits",
-            toon_rows,
-            ["source", "path", "lines", "score", "snippet"],
-        )
+        if search_mode == "facts":
+            toon_rows = [
+                {
+                    "topic": fact["topic"],
+                    "source": fact["source"],
+                    "path": _compact_context_path(str(fact["path"]), str(fact["source"])),
+                    "lines": fact["lines"],
+                    "score": round(float(fact["score"]), 3),
+                    "fact": fact["fact"],
+                    "use_when": fact["use_when"],
+                }
+                for fact in facts
+            ]
+            payload["toon_context"] = render_toon_rows(
+                "facts",
+                toon_rows,
+                ["topic", "source", "path", "lines", "score", "fact", "use_when"],
+            )
+        elif search_mode == "hybrid":
+            context_rows: list[dict[str, Any]] = []
+            for fact in facts:
+                context_rows.append(
+                    {
+                        "kind": "fact",
+                        "topic": fact["topic"],
+                        "source": fact["source"],
+                        "path": _compact_context_path(str(fact["path"]), str(fact["source"])),
+                        "lines": fact["lines"],
+                        "score": round(float(fact["score"]), 3),
+                        "text": fact["fact"],
+                        "use_when": fact["use_when"],
+                    }
+                )
+            for hit in results:
+                context_rows.append(
+                    {
+                        "kind": "chunk",
+                        "topic": "",
+                        "source": hit["source"],
+                        "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
+                        "lines": f"{hit['start_line']}-{hit['end_line']}",
+                        "score": round(float(hit["score"]), 3),
+                        "text": hit["snippet"],
+                        "use_when": "",
+                    }
+                )
+            payload["toon_context"] = render_toon_rows(
+                "context",
+                context_rows,
+                ["kind", "topic", "source", "path", "lines", "score", "text", "use_when"],
+            )
+        else:
+            toon_rows = [
+                {
+                    "source": hit["source"],
+                    "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
+                    "lines": f"{hit['start_line']}-{hit['end_line']}",
+                    "score": round(float(hit["score"]), 3),
+                    "snippet": hit["snippet"],
+                }
+                for hit in results
+            ]
+            payload["toon_context"] = render_toon_rows(
+                "hits",
+                toon_rows,
+                ["source", "path", "lines", "score", "snippet"],
+            )
     return payload
 
 
@@ -779,6 +1243,7 @@ def memory_search_tool(
     limit: int = 8,
     freshness_seconds: int = 60,
     render_format: str = "json",
+    search_mode: str = "chunks",
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
     task_id: str | None = None,
@@ -795,6 +1260,7 @@ def memory_search_tool(
                 path_filter=path_filter,
                 freshness_seconds=freshness_seconds,
                 render_format=render_format,
+                search_mode=search_mode,
             ),
             ensure_ascii=False,
         )
@@ -837,6 +1303,11 @@ MEMORY_SEARCH_SCHEMA = {
                 "enum": ["json", "toon"],
                 "description": "Optional model-facing context format. Use 'toon' for compact retrieval context; default 'json' preserves the existing output shape.",
             },
+            "search_mode": {
+                "type": "string",
+                "enum": ["chunks", "facts", "hybrid"],
+                "description": "Optional source within the memory index. 'chunks' searches raw markdown chunks; 'facts' searches derived source-backed fact cards; 'hybrid' returns both.",
+            },
         },
         "required": ["query"],
     },
@@ -853,6 +1324,7 @@ registry.register(
         path_filter=args.get("path_filter", ""),
         limit=args.get("limit", 8),
         render_format=args.get("render_format", "json"),
+        search_mode=args.get("search_mode", "chunks"),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_memory_search_requirements,

@@ -19,6 +19,7 @@ from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
+from tools.toon_renderer import render_toon_rows
 
 DEFAULT_INDEX_PATH = get_hermes_home() / "memory_search.sqlite"
 DEFAULT_ROOTS: list[tuple[Path, str]] = [
@@ -362,6 +363,40 @@ def _snippet(text: str, query: str) -> str:
     return snippet
 
 
+def _path_from_anchor(path: Path, anchor: str) -> str | None:
+    try:
+        idx = path.parts.index(anchor)
+    except ValueError:
+        return None
+    return str(Path(*path.parts[idx:]))
+
+
+def _compact_context_path(path: str, source: str) -> str:
+    """Shorten local absolute paths for model-facing retrieved context."""
+
+    if path.startswith(("openclaw://", "openclaw-session://")):
+        return path
+
+    parsed = Path(path)
+    if source == "chatworkspace":
+        anchored = _path_from_anchor(parsed, "ChatWorkspace")
+        if anchored:
+            return anchored
+    if source == "localops":
+        anchored = _path_from_anchor(parsed, "LocalOps")
+        if anchored:
+            return anchored
+    if source == "memories":
+        anchored = _path_from_anchor(parsed, "memories")
+        if anchored:
+            return anchored
+
+    try:
+        return str(parsed.expanduser().relative_to(Path.home()))
+    except ValueError:
+        return path
+
+
 def search_index(
     query: str,
     *,
@@ -371,10 +406,14 @@ def search_index(
     source: str = "all",
     path_filter: str = "",
     freshness_seconds: int = 60,
+    render_format: str = "json",
 ) -> dict[str, Any]:
     query = (query or "").strip()
     if not query:
         return {"success": False, "error": "query is required"}
+    render_format = (render_format or "json").strip().lower()
+    if render_format not in {"json", "toon"}:
+        return {"success": False, "error": "render_format must be one of: json, toon"}
     index_path = Path(index_path).expanduser()
     roots_norm = _normalize_roots(roots)
     indexed = None
@@ -438,20 +477,39 @@ def search_index(
         }
         for row in rows
     ]
-    return {
+    payload: dict[str, Any] = {
         "success": True,
         "query": query,
         "mode": "keyword",
         "query_strategy": query_strategy,
         "index_path": str(index_path),
         "index_updated": indexed,
-        "results": results,
         "count": len(results),
         "cache_miss_writeback": (
             "If this search recovers durable context that should have been in memory, "
             "write a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer."
         ),
     }
+    if render_format == "json":
+        payload["results"] = results
+    elif render_format == "toon":
+        toon_rows = [
+            {
+                "source": hit["source"],
+                "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
+                "lines": f"{hit['start_line']}-{hit['end_line']}",
+                "score": round(float(hit["score"]), 3),
+                "snippet": hit["snippet"],
+            }
+            for hit in results
+        ]
+        payload["render_format"] = "toon"
+        payload["toon_context"] = render_toon_rows(
+            "hits",
+            toon_rows,
+            ["source", "path", "lines", "score", "snippet"],
+        )
+    return payload
 
 
 def import_openclaw_legacy_memory(
@@ -720,6 +778,7 @@ def memory_search_tool(
     path_filter: str = "",
     limit: int = 8,
     freshness_seconds: int = 60,
+    render_format: str = "json",
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
     task_id: str | None = None,
@@ -735,6 +794,7 @@ def memory_search_tool(
                 source=source,
                 path_filter=path_filter,
                 freshness_seconds=freshness_seconds,
+                render_format=render_format,
             ),
             ensure_ascii=False,
         )
@@ -772,6 +832,11 @@ MEMORY_SEARCH_SCHEMA = {
             },
             "path_filter": {"type": "string", "description": "Optional substring filter for result paths, e.g. 'ngng' or 'microsoft/work_context'."},
             "limit": {"type": "integer", "description": "Maximum results, 1-25. Default 8."},
+            "render_format": {
+                "type": "string",
+                "enum": ["json", "toon"],
+                "description": "Optional model-facing context format. Use 'toon' for compact retrieval context; default 'json' preserves the existing output shape.",
+            },
         },
         "required": ["query"],
     },
@@ -787,6 +852,7 @@ registry.register(
         source=args.get("source", "all"),
         path_filter=args.get("path_filter", ""),
         limit=args.get("limit", 8),
+        render_format=args.get("render_format", "json"),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_memory_search_requirements,

@@ -42,11 +42,50 @@ def test_build_index_and_search_markdown_files(tmp_path):
     payload = json.loads(memory_search_tool("RA-4 printing", limit=5, index_path=index_path))
     assert payload["success"] is True
     assert payload["results"]
+    assert "render_format" not in payload
+    assert "toon_context" not in payload
     hit = payload["results"][0]
     assert hit["source"] == "chatworkspace"
     assert hit["path"].endswith("ngng/context.md")
     assert "RA-4" in hit["snippet"]
     assert hit["start_line"] <= hit["end_line"]
+
+
+def test_search_can_return_toon_context(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    project = root / "ngng"
+    project.mkdir(parents=True)
+    (project / "context.md").write_text(
+        "# NGNG Context\n\n"
+        "## Darkroom\n"
+        "RA-4 printing notes live here.\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    payload = json.loads(
+        memory_search_tool("RA-4", index_path=index_path, render_format="toon")
+    )
+
+    assert payload["success"] is True
+    assert payload["render_format"] == "toon"
+    assert "results" not in payload
+    assert "hits[" in payload["toon_context"]
+    assert "source,path,lines,score,snippet" in payload["toon_context"]
+    assert "chatworkspace" in payload["toon_context"]
+    assert "ChatWorkspace/ngng/context.md" in payload["toon_context"]
+    assert str(root) not in payload["toon_context"]
+    assert "RA-4" in payload["toon_context"]
+
+
+def test_search_rejects_unknown_render_format(tmp_path):
+    payload = json.loads(
+        memory_search_tool("RA-4", index_path=tmp_path / "idx.sqlite", render_format="yaml")
+    )
+
+    assert payload["success"] is False
+    assert "render_format" in payload["error"]
 
 
 def test_search_updates_index_incrementally(tmp_path):

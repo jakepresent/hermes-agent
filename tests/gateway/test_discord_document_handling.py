@@ -318,6 +318,44 @@ class TestIncomingDocumentHandling:
         assert "[Content of" not in (event.text or "")
 
     @pytest.mark.asyncio
+    async def test_srt_content_injected(self, adapter):
+        """.srt subtitle sidecars should be treated as text documents and injected."""
+        file_content = b"1\n00:00:00,000 --> 00:00:02,000\nHello from captions\n"
+
+        with _mock_aiohttp_download(file_content):
+            msg = make_message(
+                attachments=[make_attachment(filename="tutorial.srt", content_type="application/x-subrip")],
+                content="compare this",
+            )
+            await adapter._handle_message(msg)
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.DOCUMENT
+        assert event.media_types == ["text/plain"]
+        assert "[Content of tutorial.srt]:" in event.text
+        assert "00:00:00,000 --> 00:00:02,000" in event.text
+        assert "compare this" in event.text
+
+    @pytest.mark.asyncio
+    async def test_vtt_content_injected(self, adapter):
+        """.vtt subtitle sidecars should be treated as text documents and injected."""
+        file_content = b"WEBVTT\n\n00:00:00.000 --> 00:00:02.000\nHello from captions\n"
+
+        with _mock_aiohttp_download(file_content):
+            msg = make_message(
+                attachments=[make_attachment(filename="tutorial.vtt", content_type="text/vtt")],
+                content="use this",
+            )
+            await adapter._handle_message(msg)
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.DOCUMENT
+        assert event.media_types == ["text/vtt"]
+        assert "[Content of tutorial.vtt]:" in event.text
+        assert "WEBVTT" in event.text
+        assert "use this" in event.text
+
+    @pytest.mark.asyncio
     async def test_multiple_text_files_both_injected(self, adapter):
         """Two text file attachments should both be injected into event.text in order."""
         content1 = b"First file content"

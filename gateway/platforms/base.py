@@ -1131,6 +1131,8 @@ SUPPORTED_DOCUMENT_TYPES = {
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".ts": "text/plain",
+    ".srt": "text/plain",
+    ".vtt": "text/vtt",
     ".py": "text/plain",
     ".sh": "text/plain",
 }
@@ -1191,6 +1193,8 @@ MEDIA_DELIVERY_EXTS: Tuple[str, ...] = (
     ".mp3", ".wav", ".ogg", ".opus", ".m4a", ".flac",
     # Documents (uploaded as file attachments)
     ".pdf", ".docx", ".doc", ".odt", ".rtf", ".txt", ".md", ".epub",
+    # Subtitle / transcript sidecars
+    ".srt", ".vtt",
     # Spreadsheets / data
     ".xlsx", ".xls", ".ods", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml",
     # Presentations

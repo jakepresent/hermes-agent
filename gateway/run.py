@@ -8712,7 +8712,7 @@ class GatewayRunner:
             import mimetypes as _mimetypes
             from tools.credential_files import to_agent_visible_cache_path
 
-            _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".srt", ".vtt"}
+            _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 if mtype in {"", "application/octet-stream"}:

@@ -4971,7 +4971,7 @@ class DiscordAdapter(BasePlatformAdapter):
                             )
                             # Inject text content for plain-text documents (capped at 100 KB)
                             MAX_TEXT_INJECT_BYTES = 100 * 1024
-                            if in_allowlist and ext in {".md", ".txt", ".log", ".srt", ".vtt"} and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                            if in_allowlist and ext in {".md", ".txt", ".log"} and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                                 try:
                                     text_content = raw_bytes.decode("utf-8")
                                     display_name = att.filename or f"document{ext}"

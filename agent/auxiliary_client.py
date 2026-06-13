@@ -3057,7 +3057,10 @@ def _resolve_single_provider(
     )
     return client
 
-def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Optional[OpenAI], Optional[str]]:
+def _resolve_auto(
+    main_runtime: Optional[Dict[str, Any]] = None,
+    model_override: Optional[str] = None,
+) -> Tuple[Optional[Any], Optional[str]]:
     """Full auto-detection chain.
 
     Priority:
@@ -3119,7 +3122,7 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
     # cheap provider-side default.  Explicit per-task overrides set via
     # config.yaml (auxiliary.<task>.provider) still win over this.
     main_provider = str(runtime_provider or _read_main_provider() or "")
-    main_model = str(runtime_model or _read_main_model() or "")
+    main_model = str(model_override or runtime_model or _read_main_model() or "")
     if (main_provider and main_model
             and main_provider not in {"auto", ""}):
         resolved_provider = main_provider
@@ -3339,7 +3342,7 @@ def resolve_provider_client(
     # main_model also empty), the branches still hit their own
     # missing-credentials returns and ``_resolve_auto`` falls through to
     # the Step-2 chain as before.
-    if not model:
+    if provider != "auto" and not model:
         model = _get_aux_model_for_provider(provider) or _read_main_model() or model
 
     def _needs_codex_wrap(client_obj, base_url_str: str, model_str: str) -> bool:
@@ -3393,7 +3396,10 @@ def resolve_provider_client(
 
     # ── Auto: try all providers in priority order ────────────────────
     if provider == "auto":
-        client, resolved = _resolve_auto(main_runtime=main_runtime)
+        client, resolved = _resolve_auto(
+            main_runtime=main_runtime,
+            model_override=model,
+        )
         if client is None:
             return None, None
         # When auto-detection lands on a non-OpenRouter provider (e.g. a
@@ -4249,7 +4255,7 @@ def auxiliary_max_tokens_param(value: int) -> dict:
 # Every auxiliary LLM consumer should use these instead of manually
 # constructing clients and calling .chat.completions.create().
 
-# Client cache: (provider, async_mode, base_url, api_key, api_mode, runtime_key) -> (client, default_model, loop)
+# Client cache: (provider, model, async_mode, base_url, api_key, api_mode, runtime_key) -> (client, default_model, loop)
 # NOTE: loop identity is NOT part of the key.  On async cache hits we check
 # whether the cached loop is the *current* loop; if not, the stale entry is
 # replaced in-place.  This bounds cache growth to one entry per unique
@@ -4263,6 +4269,7 @@ _CLIENT_CACHE_MAX_SIZE = 64  # safety belt — evict oldest when exceeded
 def _client_cache_key(
     provider: str,
     *,
+    model: Optional[str] = None,
     async_mode: bool,
     base_url: Optional[str] = None,
     api_key: Optional[str] = None,
@@ -4271,9 +4278,29 @@ def _client_cache_key(
     is_vision: bool = False,
 ) -> tuple:
     runtime = _normalize_main_runtime(main_runtime)
-    runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if provider == "auto" else ()
+    normalized_provider = _normalize_aux_provider(provider)
+    runtime_key = tuple(runtime.get(field, "") for field in _MAIN_RUNTIME_FIELDS) if normalized_provider == "auto" else ()
     pool_hint = _pool_cache_hint(provider, main_runtime=main_runtime)
-    return (provider, async_mode, base_url or "", api_key or "", api_mode or "", runtime_key, is_vision, pool_hint)
+    # Most OpenAI-compatible providers can reuse the same client for different
+    # model IDs; the request body carries the model.  Keep that cache behavior
+    # so explicit slash-model overrides (e.g. GMI) do not rebuild clients.
+    # Copilot is different: GPT-5.x models need the Responses wrapper while
+    # Claude/Gemini/etc. use chat completions.  Auto mode can likewise choose a
+    # different transport when a task passes an explicit model override.
+    model_key = ""
+    if normalized_provider in {"auto", "copilot"}:
+        model_key = model or ""
+    return (
+        provider,
+        model_key,
+        async_mode,
+        base_url or "",
+        api_key or "",
+        api_mode or "",
+        runtime_key,
+        is_vision,
+        pool_hint,
+    )
 
 
 def _store_cached_client(cache_key: tuple, client: Any, default_model: Optional[str], *, bound_loop: Any = None) -> None:
@@ -4323,6 +4350,7 @@ def _refresh_nous_auxiliary_client(
 
     cache_key = _client_cache_key(
         cache_provider,
+        model=model,
         async_mode=async_mode,
         base_url=base_url,
         api_key=api_key,
@@ -4497,6 +4525,7 @@ def _get_cached_client(
     runtime = _normalize_main_runtime(main_runtime)
     cache_key = _client_cache_key(
         provider,
+        model=model,
         async_mode=async_mode,
         base_url=base_url,
         api_key=api_key,

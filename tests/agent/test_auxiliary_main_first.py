@@ -161,6 +161,59 @@ class TestResolveAutoMainFirst:
         assert mock_resolve.call_args.args[0] == "anthropic"
         assert mock_resolve.call_args.args[1] == "runtime-model"
 
+    def test_auto_copilot_gpt55_override_uses_responses_wrapper(self, monkeypatch):
+        """A Copilot aux model override can need a different transport than the main model.
+
+        Repro: main chat is Copilot Claude/Chat Completions, while
+        auxiliary.compression.model is gpt-5.5.  ``auto`` must still wrap the
+        Copilot client for the Responses API before sending gpt-5.5, otherwise
+        GitHub returns unsupported_api_for_model from /chat/completions.
+        """
+        import agent.auxiliary_client as aux
+        from agent.auxiliary_client import (
+            CodexAuxiliaryClient,
+            _client_cache,
+            _get_cached_client,
+            resolve_provider_client,
+        )
+
+        class DummyOpenAIClient:
+            api_key = "gh-token"
+            base_url = "https://api.githubcopilot.com"
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(aux, "OpenAI", lambda **_kwargs: DummyOpenAIClient())
+        runtime = {
+            "provider": "copilot",
+            "model": "claude-opus-4.8",
+            "base_url": "https://api.githubcopilot.com",
+            "api_key": "gh-token",
+            "api_mode": "chat_completions",
+        }
+
+        client, model = resolve_provider_client(
+            "auto", model="gpt-5.5", main_runtime=runtime,
+        )
+
+        assert model == "gpt-5.5"
+        assert isinstance(client, CodexAuxiliaryClient)
+
+        _client_cache.clear()
+        monkeypatch.setattr(
+            "agent.auxiliary_client._read_main_model", lambda: "gpt-5.5",
+        )
+        cached_client, cached_model = _get_cached_client("auto", main_runtime=runtime)
+        assert cached_model == "claude-opus-4.8"
+        assert not isinstance(cached_client, CodexAuxiliaryClient)
+
+        explicit_client, explicit_model = _get_cached_client(
+            "auto", model="gpt-5.5", main_runtime=runtime,
+        )
+        assert explicit_model == "gpt-5.5"
+        assert isinstance(explicit_client, CodexAuxiliaryClient)
+
 
 # ── Vision — resolve_vision_provider_client ─────────────────────────────────
 

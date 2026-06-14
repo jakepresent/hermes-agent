@@ -442,6 +442,43 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
+    @staticmethod
+    def _entry_summaries(entries: List[str], *, limit: int = 5, preview_chars: int = 120) -> List[Dict[str, Any]]:
+        """Return compact summaries of the largest entries for full-store errors."""
+        summaries: List[Dict[str, Any]] = []
+        for idx, entry in sorted(
+            enumerate(entries), key=lambda item: len(item[1]), reverse=True
+        )[:limit]:
+            preview = entry.replace("\n", " / ")
+            if len(preview) > preview_chars:
+                preview = preview[:preview_chars].rstrip() + "..."
+            summaries.append({"index": idx, "chars": len(entry), "preview": preview})
+        return summaries
+
+    def _full_store_error(
+        self,
+        target: str,
+        content: str,
+        current: int,
+        limit: int,
+        entries: List[str],
+    ) -> Dict[str, Any]:
+        """Build a compact over-limit response without dumping the whole store."""
+        return {
+            "success": False,
+            "target": target,
+            "error_code": "memory_store_full",
+            "error": (
+                f"Memory at {current:,}/{limit:,} chars. "
+                f"Adding this entry ({len(content)} chars) would exceed the limit. "
+                "Replace or remove existing entries first."
+            ),
+            "usage": f"{current}/{limit}",
+            "attempted_entry_chars": len(content),
+            "largest_entries": self._entry_summaries(entries),
+            "recommended_action": "replace_or_remove_existing_entry",
+        }
+
     def add(
         self,
         target: str,
@@ -488,29 +525,7 @@ class MemoryStore:
 
             if new_total > limit:
                 current = self._char_count(target)
-                if write_origin == "background_review":
-                    return {
-                        "success": False,
-                        "error_code": "memory_store_full",
-                        "error": (
-                            f"Built-in {target} memory is at {current:,}/{limit:,} chars. "
-                            "Background self-improvement review should not append new built-in memory entries "
-                            "while the injected store is full. Move details to canonical project/context files "
-                            "or replace an existing long entry with a shorter pointer, then retry if needed."
-                        ),
-                        "usage": f"{current:,}/{limit:,}",
-                        "recommended_action": "compact_or_replace_existing_entry",
-                    }
-                return {
-                    "success": False,
-                    "error": (
-                        f"Memory at {current:,}/{limit:,} chars. "
-                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Replace or remove existing entries first."
-                    ),
-                    "current_entries": entries,
-                    "usage": f"{current:,}/{limit:,}",
-                }
+                return self._full_store_error(target, content, current, limit, entries)
 
             entries.append(content)
             self._set_entries(target, entries)

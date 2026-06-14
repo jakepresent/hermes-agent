@@ -292,7 +292,14 @@ class TestMemoryStoreAdd:
         store.add("memory", "x" * 490)
         result = store.add("memory", "this will exceed the limit")
         assert result["success"] is False
+        assert result["error_code"] == "memory_store_full"
         assert "exceed" in result["error"].lower()
+        assert result["usage"] == "490/500"
+        assert result["attempted_entry_chars"] == len("this will exceed the limit")
+        assert "current_entries" not in result
+        assert result["largest_entries"] == [
+            {"index": 0, "chars": 490, "preview": "x" * 120 + "..."}
+        ]
 
     @pytest.mark.parametrize("fill_chars", [150, 350])
     def test_background_review_add_defaults_to_durable_note_and_topic_pointer(

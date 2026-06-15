@@ -4294,15 +4294,35 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            # Discord embed description limit is 4096; show full command up to that
-            max_desc = 4088
-            cmd_display = command if len(command) <= max_desc else command[: max_desc - 3] + "..."
+            # Discord embed descriptions allow 4096 chars. Put the actual
+            # approval question in the prompt itself (not just in the button
+            # labels) and spend the remaining budget on the requested command.
+            prompt_prefix = (
+                "Do you want Hermes to run this command?\n\n"
+                "**Requested command:**\n```\n"
+            )
+            prompt_suffix = "\n```"
+            truncated_suffix = "\n... [truncated]"
+            max_desc = 4096
+            command_budget = max_desc - len(prompt_prefix) - len(prompt_suffix)
+            cmd_display = command
+            if len(cmd_display) > command_budget:
+                cmd_display = cmd_display[: max(0, command_budget - len(truncated_suffix))] + truncated_suffix
             embed = discord.Embed(
-                title="⚠️ Command Approval Required",
-                description=f"```\n{cmd_display}\n```",
+                title="⚠️ Permission needed",
+                description=f"{prompt_prefix}{cmd_display}{prompt_suffix}",
                 color=discord.Color.orange(),
             )
             embed.add_field(name="Reason", value=description, inline=False)
+            embed.add_field(
+                name="Choices",
+                value=(
+                    "Allow Once runs only this request. Allow Session remembers "
+                    "this kind of command until the session resets. Always Allow "
+                    "saves it permanently. Deny blocks it."
+                ),
+                inline=False,
+            )
 
             view = ExecApprovalView(
                 session_key=session_key,

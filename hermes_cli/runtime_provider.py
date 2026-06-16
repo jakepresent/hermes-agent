@@ -220,11 +220,10 @@ def _provider_supports_explicit_api_mode(provider: Optional[str], configured_pro
 
 
 def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str) -> str:
-    configured_provider = str(model_cfg.get("provider") or "").strip().lower()
-    configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
-    if configured_mode and _provider_supports_explicit_api_mode("copilot", configured_provider):
-        return configured_mode
-
+    # Copilot's API surface is per-model: GPT-5.x routes to Responses, while
+    # Claude/Gemini/older OpenAI models route elsewhere. Never trust a
+    # persisted model.api_mode here, even when model.provider is still copilot;
+    # it may be stale from a previous Copilot model switch.
     model_name = str(model_cfg.get("default") or "").strip()
     if not model_name:
         return "chat_completions"

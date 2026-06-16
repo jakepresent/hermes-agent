@@ -3,6 +3,34 @@ import pytest
 from hermes_cli import runtime_provider as rp
 
 
+def test_copilot_runtime_api_mode_ignores_stale_responses_for_claude():
+    """Copilot serves Claude models off the non-Responses path.
+
+    A stale model.api_mode=codex_responses from GPT-5.x must not leak when
+    model.default is switched to Claude Opus 4.8.
+    """
+    assert rp._copilot_runtime_api_mode(
+        {
+            "provider": "copilot",
+            "default": "claude-opus-4.8",
+            "api_mode": "codex_responses",
+        },
+        api_key="",
+    ) == "chat_completions"
+
+
+def test_copilot_runtime_api_mode_keeps_responses_for_gpt5_with_stale_chat():
+    """Copilot GPT-5.x still derives Responses even if config has stale chat mode."""
+    assert rp._copilot_runtime_api_mode(
+        {
+            "provider": "copilot",
+            "default": "gpt-5.5",
+            "api_mode": "chat_completions",
+        },
+        api_key="",
+    ) == "codex_responses"
+
+
 def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     class _Entry:
         access_token = "pool-token"

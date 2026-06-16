@@ -558,7 +558,7 @@ def _parse_api_reasoning_effort(value: str) -> Dict[str, Any]:
     effort = aliases.get(normalized, normalized)
     if effort == "none":
         return {"enabled": False}
-    if effort in {"minimal", "low", "medium", "high", "xhigh"}:
+    if effort in {"minimal", "low", "medium", "high", "xhigh", "max"}:
         return {"enabled": True, "effort": effort}
     raise ValueError(f"invalid_reasoning_effort:Unsupported reasoning effort: {value}")
 

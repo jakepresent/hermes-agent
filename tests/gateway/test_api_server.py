@@ -403,6 +403,7 @@ class TestAdapterInit:
 
         assert adapter._reasoning_config_from_chat_body({"reasoning_effort": "low"}) == {"enabled": True, "effort": "low"}
         assert adapter._reasoning_config_from_chat_body({"reasoning": {"effort": "xhigh"}}) == {"enabled": True, "effort": "xhigh"}
+        assert adapter._reasoning_config_from_chat_body({"reasoning": {"effort": "max"}}) == {"enabled": True, "effort": "max"}
         assert adapter._reasoning_config_from_chat_body({"extra_body": {"reasoning": {"enabled": False}}}) == {"enabled": False}
         assert adapter._reasoning_config_from_chat_body({}) is None
 

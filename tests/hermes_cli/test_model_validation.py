@@ -317,6 +317,35 @@ class TestGithubReasoningEfforts:
             "xhigh",
         ]
 
+    def test_opus_48_uses_live_catalog_reasoning_efforts(self):
+        catalog = [{
+            "id": "claude-opus-4.8",
+            "capabilities": {
+                "type": "chat",
+                "supports": {"reasoning_effort": ["low", "medium", "high", "xhigh", "max"]},
+            },
+            "supported_endpoints": ["/v1/messages"],
+        }]
+        assert github_model_reasoning_efforts("claude-opus-4.8", catalog=catalog) == [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ]
+
+    def test_opus_48_fallback_supports_max_reasoning(self):
+        assert github_model_reasoning_efforts("claude-opus-4.8") == [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+        ]
+
+    def test_gpt5_fallback_does_not_claim_max_reasoning(self):
+        assert "max" not in github_model_reasoning_efforts("gpt-5.5")
+
     def test_legacy_catalog_reasoning_still_supported(self):
         catalog = [{"id": "openai/o3", "capabilities": ["reasoning"]}]
         assert github_model_reasoning_efforts("openai/o3", catalog=catalog) == [

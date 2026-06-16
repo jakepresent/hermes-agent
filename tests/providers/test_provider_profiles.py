@@ -216,6 +216,27 @@ class TestOpenRouterProfile:
         assert tl["extra_headers"]["x-grok-conv-id"] == "sess-123"
 
 
+
+class TestCopilotProfile:
+    def test_claude_opus_48_max_reasoning_is_preserved(self):
+        p = get_provider_profile("copilot")
+        eb, _ = p.build_api_kwargs_extras(
+            model="claude-opus-4.8",
+            reasoning_config={"enabled": True, "effort": "max"},
+            supports_reasoning=True,
+        )
+        assert eb["reasoning"] == {"effort": "max"}
+
+    def test_gpt5_max_reasoning_clamps_to_xhigh(self):
+        p = get_provider_profile("copilot")
+        eb, _ = p.build_api_kwargs_extras(
+            model="gpt-5.4",
+            reasoning_config={"enabled": True, "effort": "max"},
+            supports_reasoning=True,
+        )
+        assert eb["reasoning"] == {"effort": "xhigh"}
+
+
 class TestNousProfile:
     def test_tags(self):
         from agent.portal_tags import nous_portal_tags

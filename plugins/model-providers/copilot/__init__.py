@@ -43,9 +43,14 @@ class CopilotProfile(ProviderProfile):
                     # xhigh away when it is explicitly supported.
                     if effort == "minimal" and "low" in supported_efforts:
                         effort = "low"
+                    elif effort == "max" and "max" not in supported_efforts:
+                        if "xhigh" in supported_efforts:
+                            effort = "xhigh"
+                        elif "high" in supported_efforts:
+                            effort = "high"
                     elif effort == "xhigh" and "xhigh" not in supported_efforts and "high" in supported_efforts:
                         effort = "high"
-                    elif effort not in supported_efforts:
+                    if effort not in supported_efforts:
                         if "medium" in supported_efforts:
                             effort = "medium"
                         else:

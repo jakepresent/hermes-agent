@@ -23,3 +23,28 @@ def test_reasoning_menu_orders_minimal_before_low(monkeypatch):
         "medium  ← currently in use",
         "high",
     ]
+
+
+def test_reasoning_menu_orders_max_after_xhigh(monkeypatch):
+    captured = {}
+
+    def _fake_radiolist(title, items, *, selected=0, cancel_returns=None, description=None):
+        captured["items"] = items
+        captured["selected"] = selected
+        return selected
+
+    monkeypatch.setattr("hermes_cli.curses_ui.curses_radiolist", _fake_radiolist)
+
+    selected = _prompt_reasoning_effort_selection(
+        ["max", "low", "xhigh", "medium", "high"],
+        current_effort="max",
+    )
+
+    assert selected == "max"
+    assert captured["items"][:5] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max  ← currently in use",
+    ]

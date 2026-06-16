@@ -1724,6 +1724,35 @@ class TestBuildApiKwargs:
         )
         assert kwargs["extra_body"]["reasoning"] == {"effort": "xhigh"}
 
+    def test_reasoning_max_preserved_for_copilot_opus_48(self, agent):
+        """max effort should pass through for Copilot Opus 4.8."""
+        from agent.transports import get_transport
+        from providers import get_provider_profile
+
+        transport = get_transport("chat_completions")
+        profile = get_provider_profile("copilot")
+        msgs = [{"role": "user", "content": "hi"}]
+        kwargs = transport.build_kwargs(
+            model="claude-opus-4.8",
+            messages=msgs,
+            tools=None,
+            supports_reasoning=True,
+            reasoning_config={"enabled": True, "effort": "max"},
+            provider_profile=profile,
+        )
+        assert kwargs["extra_body"]["reasoning"] == {"effort": "max"}
+
+    def test_agent_build_kwargs_sends_max_reasoning_for_copilot_opus_48(self, agent):
+        agent.provider = "copilot"
+        agent.base_url = "https://api.githubcopilot.com"
+        agent._base_url_lower = agent.base_url.lower()
+        agent.model = "claude-opus-4.8"
+        agent.reasoning_config = {"enabled": True, "effort": "max"}
+
+        kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+        assert kwargs["extra_body"]["reasoning"] == {"effort": "max"}
+
     def test_reasoning_omitted_for_non_reasoning_copilot_model(self, agent):
         agent.base_url = "https://api.githubcopilot.com"
         agent.model = "gpt-4.1"

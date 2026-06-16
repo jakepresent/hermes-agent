@@ -27,6 +27,7 @@ COPILOT_MODELS_URL = f"{COPILOT_BASE_URL}/models"
 COPILOT_EDITOR_VERSION = "vscode/1.104.1"
 COPILOT_REASONING_EFFORTS_GPT5 = ["none", "low", "medium", "high", "xhigh"]
 COPILOT_REASONING_EFFORTS_O_SERIES = ["low", "medium", "high"]
+COPILOT_REASONING_EFFORTS_CLAUDE_48 = ["low", "medium", "high", "xhigh", "max"]
 
 
 # Fallback OpenRouter snapshot used when the live catalog is unavailable.
@@ -2996,6 +2997,8 @@ def _github_reasoning_efforts_for_model_id(model_id: str) -> list[str]:
     normalized = normalize_copilot_model_id(model_id).lower()
     if normalized.startswith("gpt-5"):
         return list(COPILOT_REASONING_EFFORTS_GPT5)
+    if "claude-opus-4.8" in normalized or "claude-opus-4-8" in normalized:
+        return list(COPILOT_REASONING_EFFORTS_CLAUDE_48)
     return []
 
 

@@ -384,6 +384,14 @@ def test_build_api_kwargs_copilot_responses_preserves_xhigh(monkeypatch):
 
     assert kwargs["reasoning"] == {"effort": "xhigh"}
 
+def test_build_api_kwargs_copilot_responses_clamps_max_to_xhigh(monkeypatch):
+    agent = _build_copilot_agent(monkeypatch, model="gpt-5.5")
+    agent.reasoning_config = {"enabled": True, "effort": "max"}
+
+    kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+
+    assert kwargs["reasoning"] == {"effort": "xhigh"}
+
 def test_build_api_kwargs_copilot_responses_omits_reasoning_for_non_reasoning_model(monkeypatch):
     agent = _build_copilot_agent(monkeypatch, model="gpt-4.1")
     kwargs = agent._build_api_kwargs([{"role": "user", "content": "hi"}])

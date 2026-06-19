@@ -109,6 +109,45 @@ class ProgressAgent:
         return {"final_response": "done", "messages": [], "api_calls": 1}
 
 
+class LongTurnMentionAgent:
+    """Emits two tool-progress events and returns a normal final response."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        cb = self.tool_progress_callback
+        if cb is not None:
+            cb("tool.started", "terminal", "pwd", {})
+            cb("tool.started", "terminal", "ls", {})
+        return {"final_response": "done", "messages": [], "api_calls": 1}
+
+
+class LongTurnMentionNoProgressAgent:
+    """Returns tool-call-shaped messages without relying on progress display."""
+
+    def __init__(self, **kwargs):
+        self.tool_progress_callback = kwargs.get("tool_progress_callback")
+        self.tools = []
+
+    def run_conversation(self, message, conversation_history=None, task_id=None):
+        return {
+            "final_response": "done",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
+                        {"id": "2", "type": "function", "function": {"name": "terminal", "arguments": "{}"}},
+                    ],
+                }
+            ],
+            "api_calls": 1,
+        }
+
+
 class FailingAgent:
     def __init__(self, **kwargs):
         self.tool_progress_callback = kwargs.get("tool_progress_callback")
@@ -365,3 +404,83 @@ async def test_cleanup_chains_with_existing_callback(monkeypatch, tmp_path):
     # deletes at least one progress bubble.
     assert pre_existing_fired == [True]
     assert len(adapter.deleted) >= 1
+
+
+@pytest.mark.asyncio
+async def test_long_turn_mention_final_response_when_time_rule_matches(monkeypatch, tmp_path):
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, LongTurnMentionAgent, cleanup_on=False)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "display": {
+                "platforms": {
+                    "discord": {
+                        "long_turn_mention": {
+                            "enabled": True,
+                            "rules": [{"elapsed_seconds": 0}],
+                        }
+                    }
+                }
+            }
+        },
+    )
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="555", user_id="123456789")
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key="agent:main:discord:channel:555",
+    )
+
+    assert result["final_response"] == "done"
+    assert result["mention_text"] == "<@123456789>"
+    assert result["gateway_tool_calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_long_turn_mention_counts_tool_calls_even_when_progress_off(monkeypatch, tmp_path):
+    adapter = CleanupCaptureAdapter(platform=Platform.DISCORD)
+    runner = _make_runner(adapter)
+    gateway_run = _install_fakes(monkeypatch, LongTurnMentionNoProgressAgent, cleanup_on=False)
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "off")
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(
+        gateway_run,
+        "_load_gateway_config",
+        lambda: {
+            "display": {
+                "platforms": {
+                    "discord": {
+                        "tool_progress": "off",
+                        "long_turn_mention": {
+                            "enabled": True,
+                            "rules": [{"tool_calls": 2}],
+                        },
+                    }
+                }
+            }
+        },
+    )
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="555", user_id="123456789")
+
+    result = await runner._run_agent(
+        message="hello",
+        context_prompt="",
+        history=[],
+        source=source,
+        session_id="sess-1",
+        session_key="agent:main:discord:channel:555",
+    )
+
+    assert result["final_response"] == "done"
+    assert result["mention_text"] == "<@123456789>"
+    assert result["gateway_tool_calls"] == 2

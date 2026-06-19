@@ -4330,7 +4330,13 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_role_ids=self._allowed_role_ids,
             )
 
-            msg = await channel.send(embed=embed, view=view)
+            send_kwargs = {"embed": embed, "view": view}
+            mention_text = ""
+            if isinstance(metadata, dict):
+                mention_text = str(metadata.get("mention_text") or "").strip()
+            if mention_text:
+                send_kwargs["content"] = mention_text
+            msg = await channel.send(**send_kwargs)
             view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
 

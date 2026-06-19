@@ -1199,6 +1199,11 @@ display:
   platforms: {}           # Per-platform display overrides (see below)
   tool_progress_overrides: {}  # DEPRECATED — use display.platforms instead
   interim_assistant_messages: true  # Gateway: send natural mid-turn assistant updates as separate messages
+  long_turn_mention:      # Gateway: opt-in explicit user mention after long turns
+    enabled: false
+    on_final: true
+    on_approval: true
+    rules: []             # OR of rules; each rule can set elapsed_seconds and/or tool_calls
   skin: default           # Built-in or custom CLI skin (see user-guide/features/skins)
   personality: "kawaii"  # Legacy cosmetic field still surfaced in some summaries
   compact: false          # Compact output mode (less whitespace)
@@ -1230,6 +1235,28 @@ Example footer:
 ```
 
 Set `file_mutation_verifier: false` (or `HERMES_FILE_MUTATION_VERIFIER=0`) to suppress the footer. The verifier only fires when real failures are outstanding at turn end — a model that retries a failed patch and succeeds within the same turn will not trigger it for that file.
+
+### Long-turn mentions (gateway only)
+
+`display.long_turn_mention` lets a gateway mention the requesting user only after a turn crosses configured elapsed-time or tool-call thresholds. It is disabled by default. Each rule is an AND of the thresholds it defines, and the rule list is ORed.
+
+Example Discord policy that keeps progress visible but only pings on long turns:
+
+```yaml
+display:
+  platforms:
+    discord:
+      long_turn_mention:
+        enabled: true
+        on_final: true
+        on_approval: true
+        rules:
+          - elapsed_seconds: 90
+          - elapsed_seconds: 45
+            tool_calls: 6
+```
+
+With `on_approval: true`, a dangerous-command approval prompt also mentions the user if the turn has already crossed one of the thresholds when the approval is requested.
 
 ### UI language for static messages
 

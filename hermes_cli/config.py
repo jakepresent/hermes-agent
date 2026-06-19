@@ -1404,6 +1404,12 @@ DEFAULT_CONFIG = {
             "last_lines": 2,
         },
         "interim_assistant_messages": True,  # Gateway: show natural mid-turn assistant status messages
+        "long_turn_mention": {
+            "enabled": False,  # Gateway: opt-in explicit user mention after long turns
+            "on_final": True,
+            "on_approval": True,
+            "rules": [],  # OR of rules; each rule ANDs elapsed_seconds/tool_calls thresholds
+        },
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
         "tool_progress_overrides": {},  # DEPRECATED — use display.platforms instead
         "tool_preview_length": 0,  # Max chars for tool call previews (0 = no limit, show full paths/commands)

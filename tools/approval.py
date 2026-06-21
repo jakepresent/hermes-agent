@@ -1091,6 +1091,28 @@ def check_dangerous_command(command: str, env_type: str,
 # Combined pre-exec guard (tirith + dangerous command detection)
 # =========================================================================
 
+def _make_invisible_unicode_visible(text: str) -> str:
+    """Replace invisible/format Unicode with visible codepoint markers.
+
+    Security-scan prompts are specifically trying to show suspicious hidden
+    characters. If we render a raw variation selector or zero-width character,
+    Discord displays nothing and the user still cannot see what was flagged.
+    """
+    rendered: list[str] = []
+    for ch in str(text):
+        codepoint = ord(ch)
+        category = unicodedata.category(ch)
+        if (
+            category in {"Cf", "Mn", "Me"}
+            or 0xFE00 <= codepoint <= 0xFE0F
+            or 0xE0100 <= codepoint <= 0xE01EF
+        ):
+            rendered.append(f"[U+{codepoint:04X}]")
+        else:
+            rendered.append(ch)
+    return "".join(rendered)
+
+
 def _snippet_near_byte_offset(text: str, offset, *, radius: int = 40) -> str:
     """Return a short decoded snippet around a byte offset in *text*."""
     if not text:
@@ -1103,6 +1125,7 @@ def _snippet_near_byte_offset(text: str, offset, *, radius: int = 40) -> str:
     start = max(0, pos - radius)
     end = min(len(data), pos + radius)
     snippet = data[start:end].decode("utf-8", errors="ignore")
+    snippet = _make_invisible_unicode_visible(snippet)
     snippet = " ".join(snippet.split())
     if start > 0:
         snippet = "..." + snippet
@@ -1129,6 +1152,7 @@ def _extract_tirith_detected_strings(findings: list, *, command: str = "", max_i
         text = str(value).strip()
         if not text:
             return
+        text = _make_invisible_unicode_visible(text)
         # Keep single-line, compact prompt text.
         text = " ".join(text.split())
         if len(text) > 180:

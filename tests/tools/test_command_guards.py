@@ -302,6 +302,8 @@ class TestGatewayTirithPromptData:
         assert "variation selector-16" in detected[0]
         assert "near:" in detected[0]
         assert "hello" in detected[0]
+        assert "[U+FE0F]" in detected[0]
+        assert "hello️" not in detected[0]
 
 
 # ---------------------------------------------------------------------------

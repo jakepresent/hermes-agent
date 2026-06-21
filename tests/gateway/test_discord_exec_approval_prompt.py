@@ -32,15 +32,9 @@ async def test_exec_approval_prompt_asks_explicit_question_and_shows_request_con
     )
 
     assert result.success is True
-    embed = sent["embed"]
+    assert "embed" not in sent
 
-    prompt_text = "\n".join(
-        [
-            embed.title or "",
-            embed.description or "",
-            *[f"{field['name']}\n{field['value']}" for field in embed.fields],
-        ]
-    )
+    prompt_text = sent["content"]
 
     assert "Do you want Hermes to run this command?" in prompt_text
     assert "Requested command" in prompt_text
@@ -74,5 +68,8 @@ async def test_exec_approval_prompt_can_ping_for_long_turn_attention():
     )
 
     assert result.success is True
-    assert sent["content"] == "<@123456789>"
-    assert sent["embed"].title == "⚠️ Permission needed"
+    assert sent["content"].startswith("<@123456789>\n")
+    assert "Do you want Hermes to run this command?" in sent["content"]
+    assert "rm -rf /tmp/example" in sent["content"]
+    assert "destructive command" in sent["content"]
+    assert "embed" not in sent

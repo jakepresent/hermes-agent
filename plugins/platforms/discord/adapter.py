@@ -4294,35 +4294,35 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            # Discord embed descriptions allow 4096 chars. Put the actual
-            # approval question in the prompt itself (not just in the button
-            # labels) and spend the remaining budget on the requested command.
-            prompt_prefix = (
-                "Do you want Hermes to run this command?\n\n"
-                "**Requested command:**\n```\n"
+            # Keep the approval request self-contained in plain message
+            # content. Discord embeds can be visually easy to miss or feel
+            # detached from the button row when progress/tool messages are
+            # nearby, so the actual question, command, and reason must be
+            # visible in the same content block as the buttons.
+            choices_text = (
+                "Allow Once runs only this request. Allow Session remembers "
+                "this kind of command until the session resets. Always Allow "
+                "saves it permanently. Deny blocks it."
             )
-            prompt_suffix = "\n```"
+            prompt_prefix = (
+                "⚠️ **Permission needed**\n\n"
+                "Do you want Hermes to run this command?\n\n"
+                "**Requested command:**\n```bash\n"
+            )
+            prompt_between = "\n```\n**Reason:** "
+            prompt_suffix = f"\n\n{choices_text}"
             truncated_suffix = "\n... [truncated]"
-            max_desc = 4096
-            command_budget = max_desc - len(prompt_prefix) - len(prompt_suffix)
+            max_content = self.MAX_MESSAGE_LENGTH
+            fixed_budget = len(prompt_prefix) + len(prompt_between) + len(prompt_suffix)
+            reason_budget = 300
+            reason_display = description
+            if len(reason_display) > reason_budget:
+                reason_display = reason_display[: max(0, reason_budget - 15)] + "... [truncated]"
+            command_budget = max_content - fixed_budget - len(reason_display)
             cmd_display = command
             if len(cmd_display) > command_budget:
                 cmd_display = cmd_display[: max(0, command_budget - len(truncated_suffix))] + truncated_suffix
-            embed = discord.Embed(
-                title="⚠️ Permission needed",
-                description=f"{prompt_prefix}{cmd_display}{prompt_suffix}",
-                color=discord.Color.orange(),
-            )
-            embed.add_field(name="Reason", value=description, inline=False)
-            embed.add_field(
-                name="Choices",
-                value=(
-                    "Allow Once runs only this request. Allow Session remembers "
-                    "this kind of command until the session resets. Always Allow "
-                    "saves it permanently. Deny blocks it."
-                ),
-                inline=False,
-            )
+            content = f"{prompt_prefix}{cmd_display}{prompt_between}{reason_display}{prompt_suffix}"
 
             view = ExecApprovalView(
                 session_key=session_key,
@@ -4330,12 +4330,14 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_role_ids=self._allowed_role_ids,
             )
 
-            send_kwargs = {"embed": embed, "view": view}
+            send_kwargs = {"content": content, "view": view}
             mention_text = ""
             if isinstance(metadata, dict):
                 mention_text = str(metadata.get("mention_text") or "").strip()
             if mention_text:
-                send_kwargs["content"] = mention_text
+                mention_prefix = f"{mention_text}\n"
+                remaining = max_content - len(mention_prefix)
+                send_kwargs["content"] = mention_prefix + content[:remaining]
             msg = await channel.send(**send_kwargs)
             view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))

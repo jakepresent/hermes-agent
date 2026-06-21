@@ -18511,30 +18511,26 @@ class GatewayRunner:
                         )
 
                 # Fallback: plain text approval prompt
-                cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
+                cmd_preview = cmd[:220] + "..." if len(cmd) > 220 else cmd
                 prefix = f"{approval_mention} " if approval_mention else ""
                 if detected_strings and not allow_permanent:
                     subject_text = "Security scanner flagged:\n" + "\n".join(
                         f"- `{str(item)[:180]}`" for item in detected_strings[:8]
                     )
+                    command_text = f"Command preview:\n```\n{cmd_preview}\n```"
+                    security_note = "Permanent approval is disabled for security-scan findings."
                 else:
                     subject_text = f"Requested command:\n```\n{cmd_preview}\n```"
-                if allow_permanent:
-                    reply_hint = (
-                        "Reply `/approve` to execute, `/approve session` to approve this pattern "
-                        "for the session, `/approve always` to approve permanently, or `/deny` to cancel."
-                    )
-                else:
-                    reply_hint = (
-                        "Reply `/approve` to execute once, `/approve session` to approve for this session, "
-                        "or `/deny` to cancel. Permanent approval is disabled for security-scan findings."
-                    )
+                    command_text = ""
+                    security_note = ""
                 msg = (
                     f"{prefix}⚠️ **Dangerous command requires approval:**\n"
                     f"{subject_text}\n"
-                    f"Reason: {desc}\n\n"
-                    f"{reply_hint}"
+                    f"{command_text}"
+                    f"Reason: {desc}"
                 )
+                if security_note:
+                    msg += f"\n\n{security_note}"
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(
                         _status_adapter.send(

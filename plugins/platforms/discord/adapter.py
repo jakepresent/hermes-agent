@@ -19,6 +19,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Any, Tuple
 
@@ -122,6 +123,23 @@ def _remove_discord_button_by_label(view: Any, label: str) -> None:
                 children.remove(child)
             except ValueError:
                 pass
+
+
+def _make_invisible_unicode_visible(text: str) -> str:
+    """Render invisible/format Unicode as visible codepoint markers."""
+    rendered: list[str] = []
+    for ch in str(text):
+        codepoint = ord(ch)
+        category = unicodedata.category(ch)
+        if (
+            category in {"Cf", "Mn", "Me"}
+            or 0xFE00 <= codepoint <= 0xFE0F
+            or 0xE0100 <= codepoint <= 0xE01EF
+        ):
+            rendered.append(f"[U+{codepoint:04X}]")
+        else:
+            rendered.append(ch)
+    return "".join(rendered)
 
 
 def check_discord_requirements() -> bool:
@@ -4331,31 +4349,26 @@ class DiscordAdapter(BasePlatformAdapter):
             # detached from the button row when progress/tool messages are
             # nearby, so the actual question, command, and reason must be
             # visible in the same content block as the buttons.
-            if allow_permanent:
-                choices_text = (
-                    "Allow Once runs only this request. Allow Session remembers "
-                    "this kind of command until the session resets. Always Allow "
-                    "saves it permanently. Deny blocks it."
-                )
-            else:
-                choices_text = (
-                    "Allow Once runs only this request. Allow Session remembers "
-                    "this approval until the session resets. Permanent approval "
-                    "is disabled for security-scan findings. Deny blocks it."
-                )
+            visible_command = _make_invisible_unicode_visible(command)
             use_detected_subject = bool(detected_strings) and not allow_permanent
             if use_detected_subject:
                 subject_label = "**Security scanner flagged:**\n```text\n"
-                subject_text = "\n".join(str(item)[:180] for item in detected_strings[:8])
+                subject_text = "\n".join(
+                    _make_invisible_unicode_visible(str(item))[:180]
+                    for item in detected_strings[:8]
+                )
+                command_label = "\n```\n**Command preview:**\n```bash\n"
+                security_note = "\n\nPermanent approval is disabled for security-scan findings."
             else:
                 subject_label = "**Requested command:**\n```bash\n"
-                subject_text = command
+                subject_text = visible_command
+                command_label = "\n```"
+                security_note = ""
             prompt_prefix = (
                 "⚠️ **Permission needed**\n\n"
                 "Do you want Hermes to run this command?\n\n"
                 f"{subject_label}"
             )
-            prompt_between = "\n```"
             reason_label = "\n**Reason:** "
             truncated_suffix = "\n... [truncated]"
             max_content = self.MAX_MESSAGE_LENGTH
@@ -4363,13 +4376,30 @@ class DiscordAdapter(BasePlatformAdapter):
             reason_display = description
             if len(reason_display) > reason_budget:
                 reason_display = reason_display[: max(0, reason_budget - 15)] + "... [truncated]"
-            prompt_tail = f"{reason_label}{reason_display}\n\n{choices_text}"
-            fixed_budget = len(prompt_prefix) + len(prompt_between) + len(prompt_tail)
-            subject_budget = max_content - fixed_budget
-            subject_display = subject_text
-            if len(subject_display) > subject_budget:
-                subject_display = subject_display[: max(0, subject_budget - len(truncated_suffix))] + truncated_suffix
-            content = f"{prompt_prefix}{subject_display}{prompt_between}{prompt_tail}"
+            if use_detected_subject:
+                # Keep the suspicious string primary, but include a concise
+                # command preview so the user still knows what action is being
+                # approved. Split remaining budget between both code blocks.
+                prompt_tail = f"\n```{reason_label}{reason_display}{security_note}"
+                command_preview = visible_command
+                fixed_budget = len(prompt_prefix) + len(command_label) + len(prompt_tail)
+                variable_budget = max(0, max_content - fixed_budget)
+                subject_budget = max(120, min(600, variable_budget // 2))
+                subject_display = subject_text
+                if len(subject_display) > subject_budget:
+                    subject_display = subject_display[: max(0, subject_budget - len(truncated_suffix))] + truncated_suffix
+                command_budget = max(0, variable_budget - len(subject_display))
+                if len(command_preview) > command_budget:
+                    command_preview = command_preview[: max(0, command_budget - len(truncated_suffix))] + truncated_suffix
+                content = f"{prompt_prefix}{subject_display}{command_label}{command_preview}{prompt_tail}"
+            else:
+                prompt_tail = f"{command_label}{reason_label}{reason_display}"
+                fixed_budget = len(prompt_prefix) + len(prompt_tail)
+                subject_budget = max_content - fixed_budget
+                subject_display = subject_text
+                if len(subject_display) > subject_budget:
+                    subject_display = subject_display[: max(0, subject_budget - len(truncated_suffix))] + truncated_suffix
+                content = f"{prompt_prefix}{subject_display}{prompt_tail}"
 
             view = ExecApprovalView(
                 session_key=session_key,

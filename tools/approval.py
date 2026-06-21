@@ -1091,11 +1091,81 @@ def check_dangerous_command(command: str, env_type: str,
 # Combined pre-exec guard (tirith + dangerous command detection)
 # =========================================================================
 
+def _extract_tirith_detected_strings(findings: list, *, max_items: int = 8) -> list[str]:
+    """Extract concrete suspicious strings from Tirith findings.
+
+    Tirith findings carry their human explanation in title/description and
+    the actual observed values in evidence payloads (``raw``, ``matched``,
+    ``raw_host``, etc.). Approval prompts should surface those values directly
+    so the user can see what string triggered the warning instead of only a
+    generic rule name.
+    """
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value) -> None:
+        if value is None:
+            return
+        text = str(value).strip()
+        if not text:
+            return
+        # Keep single-line, compact prompt text.
+        text = " ".join(text.split())
+        if len(text) > 180:
+            text = text[:177] + "..."
+        if text not in seen:
+            seen.add(text)
+            values.append(text)
+
+    def _walk(obj) -> None:
+        if len(values) >= max_items:
+            return
+        if isinstance(obj, dict):
+            for field in (
+                "matched",
+                "raw",
+                "raw_host",
+                "host",
+                "hostname",
+                "domain",
+                "url",
+                "value",
+                "escaped",
+                "similar_to",
+            ):
+                if field in obj:
+                    _add(obj.get(field))
+                    if len(values) >= max_items:
+                        return
+            for char in obj.get("suspicious_chars") or []:
+                if isinstance(char, dict):
+                    character = char.get("character")
+                    codepoint = char.get("codepoint")
+                    description = char.get("description")
+                    parts = [str(x) for x in (character, codepoint, description) if x]
+                    if parts:
+                        _add(" ".join(parts))
+                        if len(values) >= max_items:
+                            return
+            for item in obj.get("evidence") or []:
+                _walk(item)
+                if len(values) >= max_items:
+                    return
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+                if len(values) >= max_items:
+                    return
+
+    _walk(findings or [])
+    return values
+
+
 def _format_tirith_description(tirith_result: dict) -> str:
     """Build a human-readable description from tirith findings.
 
-    Includes severity, title, and description for each finding so users
-    can make an informed approval decision.
+    Includes severity, title, description, and concrete detected strings for
+    each finding so users can make an informed approval decision.
     """
     findings = tirith_result.get("findings") or []
     if not findings:
@@ -1107,10 +1177,20 @@ def _format_tirith_description(tirith_result: dict) -> str:
         severity = f.get("severity", "")
         title = f.get("title", "")
         desc = f.get("description", "")
+        detected = _extract_tirith_detected_strings([f], max_items=3)
+        detected_suffix = ""
+        if detected:
+            detected_suffix = " Detected: " + ", ".join(detected)
         if title and desc:
-            parts.append(f"[{severity}] {title}: {desc}" if severity else f"{title}: {desc}")
+            parts.append(
+                f"[{severity}] {title}: {desc}.{detected_suffix}"
+                if severity else f"{title}: {desc}.{detected_suffix}"
+            )
         elif title:
-            parts.append(f"[{severity}] {title}" if severity else title)
+            parts.append(
+                f"[{severity}] {title}.{detected_suffix}"
+                if severity else f"{title}.{detected_suffix}"
+            )
     if not parts:
         summary = tirith_result.get("summary") or "security issue detected"
         return f"Security scan: {summary}"
@@ -1301,6 +1381,7 @@ def check_all_command_guards(command: str, env_type: str,
 
     # Collect warnings that need approval
     warnings = []  # list of (pattern_key, description, is_tirith)
+    tirith_detected_strings: list[str] = []
 
     session_key = get_current_session_key()
 
@@ -1313,6 +1394,7 @@ def check_all_command_guards(command: str, env_type: str,
         rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
         tirith_key = f"tirith:{rule_id}"
         tirith_desc = _format_tirith_description(tirith_result)
+        tirith_detected_strings = _extract_tirith_detected_strings(findings)
         if not is_approved(session_key, tirith_key):
             warnings.append((tirith_key, tirith_desc, True))
 
@@ -1377,6 +1459,8 @@ def check_all_command_guards(command: str, env_type: str,
                 "pattern_key": primary_key,
                 "pattern_keys": all_keys,
                 "description": combined_desc,
+                "allow_permanent": not has_tirith,
+                "detected_strings": tirith_detected_strings,
             }
             decision = _await_gateway_decision(
                 session_key, notify_cb, approval_data, surface="gateway"
@@ -1443,6 +1527,8 @@ def check_all_command_guards(command: str, env_type: str,
             "pattern_key": primary_key,
             "pattern_keys": all_keys,
             "description": combined_desc,
+            "allow_permanent": not has_tirith,
+            "detected_strings": tirith_detected_strings,
         })
         return {
             "approved": False,

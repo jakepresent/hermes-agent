@@ -105,6 +105,25 @@ def _clean_discord_id(entry: str) -> str:
     return entry.strip()
 
 
+def _remove_discord_button_by_label(view: Any, label: str) -> None:
+    """Best-effort removal of a button from discord.py or the test mock view."""
+    children = getattr(view, "children", None)
+    if not isinstance(children, list):
+        return
+    target = str(label or "").lower()
+    for child in list(children):
+        if str(getattr(child, "label", "")).lower() != target:
+            continue
+        remove_item = getattr(view, "remove_item", None)
+        if callable(remove_item):
+            remove_item(child)
+        else:
+            try:
+                children.remove(child)
+            except ValueError:
+                pass
+
+
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available.
 
@@ -4274,6 +4293,8 @@ class DiscordAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
         metadata: Optional[dict] = None,
+        allow_permanent: bool = True,
+        detected_strings: Optional[List[str]] = None,
     ) -> SendResult:
         """
         Send a button-based exec approval prompt for a dangerous command.
@@ -4294,41 +4315,67 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
+            if isinstance(metadata, dict):
+                if "allow_permanent" in metadata:
+                    allow_permanent = bool(metadata.get("allow_permanent"))
+                if detected_strings is None and metadata.get("detected_strings"):
+                    raw_detected = metadata.get("detected_strings")
+                    if isinstance(raw_detected, (list, tuple)):
+                        detected_strings = [str(item) for item in raw_detected if str(item).strip()]
+                    else:
+                        detected_strings = [str(raw_detected)]
+            detected_strings = detected_strings or []
+
             # Keep the approval request self-contained in plain message
             # content. Discord embeds can be visually easy to miss or feel
             # detached from the button row when progress/tool messages are
             # nearby, so the actual question, command, and reason must be
             # visible in the same content block as the buttons.
-            choices_text = (
-                "Allow Once runs only this request. Allow Session remembers "
-                "this kind of command until the session resets. Always Allow "
-                "saves it permanently. Deny blocks it."
-            )
+            if allow_permanent:
+                choices_text = (
+                    "Allow Once runs only this request. Allow Session remembers "
+                    "this kind of command until the session resets. Always Allow "
+                    "saves it permanently. Deny blocks it."
+                )
+            else:
+                choices_text = (
+                    "Allow Once runs only this request. Allow Session remembers "
+                    "this approval until the session resets. Permanent approval "
+                    "is disabled for security-scan findings. Deny blocks it."
+                )
             prompt_prefix = (
                 "⚠️ **Permission needed**\n\n"
                 "Do you want Hermes to run this command?\n\n"
                 "**Requested command:**\n```bash\n"
             )
-            prompt_between = "\n```\n**Reason:** "
-            prompt_suffix = f"\n\n{choices_text}"
+            prompt_between = "\n```"
+            detected_block = ""
+            if detected_strings:
+                detected_block = "\n**Detected string(s):**\n" + "\n".join(
+                    f"- `{str(item)[:180]}`" for item in detected_strings[:8]
+                )
+            reason_label = "\n**Reason:** "
             truncated_suffix = "\n... [truncated]"
             max_content = self.MAX_MESSAGE_LENGTH
-            fixed_budget = len(prompt_prefix) + len(prompt_between) + len(prompt_suffix)
             reason_budget = 300
             reason_display = description
             if len(reason_display) > reason_budget:
                 reason_display = reason_display[: max(0, reason_budget - 15)] + "... [truncated]"
-            command_budget = max_content - fixed_budget - len(reason_display)
+            prompt_tail = f"{detected_block}{reason_label}{reason_display}\n\n{choices_text}"
+            fixed_budget = len(prompt_prefix) + len(prompt_between) + len(prompt_tail)
+            command_budget = max_content - fixed_budget
             cmd_display = command
             if len(cmd_display) > command_budget:
                 cmd_display = cmd_display[: max(0, command_budget - len(truncated_suffix))] + truncated_suffix
-            content = f"{prompt_prefix}{cmd_display}{prompt_between}{reason_display}{prompt_suffix}"
+            content = f"{prompt_prefix}{cmd_display}{prompt_between}{prompt_tail}"
 
             view = ExecApprovalView(
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
             )
+            if not allow_permanent:
+                _remove_discord_button_by_label(view, "Always Allow")
 
             send_kwargs = {"content": content, "view": view}
             mention_text = ""

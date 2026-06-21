@@ -234,6 +234,52 @@ class TestAlwaysVisibility:
         assert cb.call_args[1]["allow_permanent"] is True
 
 
+
+class TestGatewayTirithPromptData:
+    @patch(_TIRITH_PATCH,
+           return_value=_tirith_result(
+               "warn",
+               [{
+                   "rule_id": "non_ascii_hostname",
+                   "severity": "HIGH",
+                   "title": "Non-ASCII characters in hostname",
+                   "description": "Hostname contains non-ASCII characters",
+                   "evidence": [{
+                       "type": "homoglyph_analysis",
+                       "raw": "gооgle.com",
+                       "escaped": "xn--ggle-55da.com",
+                       "suspicious_chars": [{
+                           "character": "о",
+                           "codepoint": "U+043E",
+                           "description": "Cyrillic 'о' (looks like Latin 'o')",
+                       }],
+                   }],
+               }],
+               "homograph URL",
+           ))
+    def test_tirith_gateway_prompt_disables_permanent_and_includes_detected_strings(self, mock_tirith):
+        session_key = "gateway-tirith-detected"
+        os.environ["HERMES_GATEWAY_SESSION"] = "1"
+        os.environ["HERMES_SESSION_KEY"] = session_key
+        captured = []
+
+        def notify(data):
+            captured.append(dict(data))
+            approval_module.resolve_gateway_approval(session_key, "once")
+
+        approval_module.register_gateway_notify(session_key, notify)
+
+        result = check_all_command_guards("curl http://gооgle.com", "local")
+
+        assert result["approved"] is True
+        assert captured, "gateway notify callback did not receive approval data"
+        approval_data = captured[0]
+        assert approval_data["allow_permanent"] is False
+        assert "gооgle.com" in approval_data["detected_strings"]
+        assert "xn--ggle-55da.com" in approval_data["detected_strings"]
+        assert "Detected:" in approval_data["description"]
+
+
 # ---------------------------------------------------------------------------
 # tirith ImportError → treated as allow
 # ---------------------------------------------------------------------------

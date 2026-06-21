@@ -18452,6 +18452,8 @@ class GatewayRunner:
 
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
+                allow_permanent = bool(approval_data.get("allow_permanent", True))
+                detected_strings = approval_data.get("detected_strings") or []
                 approval_mention = ""
                 try:
                     approval_mention = _long_turn_mention_text_for_source(
@@ -18469,6 +18471,13 @@ class GatewayRunner:
                     _status_thread_metadata,
                     approval_mention,
                 )
+                if approval_metadata is None:
+                    approval_metadata = {}
+                else:
+                    approval_metadata = dict(approval_metadata)
+                approval_metadata["allow_permanent"] = allow_permanent
+                if detected_strings:
+                    approval_metadata["detected_strings"] = detected_strings
 
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
@@ -18504,12 +18513,27 @@ class GatewayRunner:
                 # Fallback: plain text approval prompt
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
                 prefix = f"{approval_mention} " if approval_mention else ""
+                detected_text = ""
+                if detected_strings:
+                    detected_text = "Detected string(s):\n" + "\n".join(
+                        f"- `{str(item)[:180]}`" for item in detected_strings[:8]
+                    ) + "\n"
+                if allow_permanent:
+                    reply_hint = (
+                        "Reply `/approve` to execute, `/approve session` to approve this pattern "
+                        "for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+                    )
+                else:
+                    reply_hint = (
+                        "Reply `/approve` to execute once, `/approve session` to approve for this session, "
+                        "or `/deny` to cancel. Permanent approval is disabled for security-scan findings."
+                    )
                 msg = (
                     f"{prefix}⚠️ **Dangerous command requires approval:**\n"
                     f"```\n{cmd_preview}\n```\n"
+                    f"{detected_text}"
                     f"Reason: {desc}\n\n"
-                    f"Reply `/approve` to execute, `/approve session` to approve this pattern "
-                    f"for the session, `/approve always` to approve permanently, or `/deny` to cancel."
+                    f"{reply_hint}"
                 )
                 try:
                     _approval_send_fut = safe_schedule_threadsafe(

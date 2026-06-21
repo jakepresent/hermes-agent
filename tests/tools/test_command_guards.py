@@ -280,6 +280,30 @@ class TestGatewayTirithPromptData:
         assert "Detected:" in approval_data["description"]
 
 
+    def test_tirith_detected_strings_include_offset_context(self):
+        command = "python3 - <<'PY'\nprint('hello️')\nPY"
+        findings = [{
+            "rule_id": "variation_selector",
+            "severity": "MEDIUM",
+            "title": "Variation selector characters detected",
+            "description": "Content contains Unicode variation selectors",
+            "evidence": [{
+                "type": "byte_sequence",
+                "offset": command.encode("utf-8").index("️".encode("utf-8")),
+                "hex": "U+FE0F",
+                "description": "variation selector-16",
+            }],
+        }]
+
+        detected = approval_module._extract_tirith_detected_strings(findings, command=command)
+
+        assert detected
+        assert "U+FE0F" in detected[0]
+        assert "variation selector-16" in detected[0]
+        assert "near:" in detected[0]
+        assert "hello" in detected[0]
+
+
 # ---------------------------------------------------------------------------
 # tirith ImportError → treated as allow
 # ---------------------------------------------------------------------------

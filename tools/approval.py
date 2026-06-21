@@ -1091,14 +1091,34 @@ def check_dangerous_command(command: str, env_type: str,
 # Combined pre-exec guard (tirith + dangerous command detection)
 # =========================================================================
 
-def _extract_tirith_detected_strings(findings: list, *, max_items: int = 8) -> list[str]:
+def _snippet_near_byte_offset(text: str, offset, *, radius: int = 40) -> str:
+    """Return a short decoded snippet around a byte offset in *text*."""
+    if not text:
+        return ""
+    try:
+        pos = int(offset)
+    except (TypeError, ValueError):
+        return ""
+    data = text.encode("utf-8", errors="ignore")
+    start = max(0, pos - radius)
+    end = min(len(data), pos + radius)
+    snippet = data[start:end].decode("utf-8", errors="ignore")
+    snippet = " ".join(snippet.split())
+    if start > 0:
+        snippet = "..." + snippet
+    if end < len(data):
+        snippet = snippet + "..."
+    return snippet
+
+
+def _extract_tirith_detected_strings(findings: list, *, command: str = "", max_items: int = 8) -> list[str]:
     """Extract concrete suspicious strings from Tirith findings.
 
     Tirith findings carry their human explanation in title/description and
     the actual observed values in evidence payloads (``raw``, ``matched``,
-    ``raw_host``, etc.). Approval prompts should surface those values directly
-    so the user can see what string triggered the warning instead of only a
-    generic rule name.
+    ``raw_host``, byte offsets, etc.). Approval prompts should surface those
+    values directly so the user can see what string triggered the warning
+    instead of only a generic rule name or the full shell command.
     """
     values: list[str] = []
     seen: set[str] = set()
@@ -1137,6 +1157,15 @@ def _extract_tirith_detected_strings(findings: list, *, max_items: int = 8) -> l
                     _add(obj.get(field))
                     if len(values) >= max_items:
                         return
+            if "offset" in obj and (obj.get("hex") or obj.get("description")):
+                parts = [str(x) for x in (obj.get("hex"), obj.get("description")) if x]
+                snippet = _snippet_near_byte_offset(command, obj.get("offset"))
+                if snippet:
+                    parts.append(f"near: {snippet}")
+                if parts:
+                    _add(" ".join(parts))
+                    if len(values) >= max_items:
+                        return
             for char in obj.get("suspicious_chars") or []:
                 if isinstance(char, dict):
                     character = char.get("character")
@@ -1161,7 +1190,7 @@ def _extract_tirith_detected_strings(findings: list, *, max_items: int = 8) -> l
     return values
 
 
-def _format_tirith_description(tirith_result: dict) -> str:
+def _format_tirith_description(tirith_result: dict, *, command: str = "") -> str:
     """Build a human-readable description from tirith findings.
 
     Includes severity, title, description, and concrete detected strings for
@@ -1177,7 +1206,7 @@ def _format_tirith_description(tirith_result: dict) -> str:
         severity = f.get("severity", "")
         title = f.get("title", "")
         desc = f.get("description", "")
-        detected = _extract_tirith_detected_strings([f], max_items=3)
+        detected = _extract_tirith_detected_strings([f], command=command, max_items=3)
         detected_suffix = ""
         if detected:
             detected_suffix = " Detected: " + ", ".join(detected)
@@ -1393,8 +1422,8 @@ def check_all_command_guards(command: str, env_type: str,
         findings = tirith_result.get("findings") or []
         rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
         tirith_key = f"tirith:{rule_id}"
-        tirith_desc = _format_tirith_description(tirith_result)
-        tirith_detected_strings = _extract_tirith_detected_strings(findings)
+        tirith_desc = _format_tirith_description(tirith_result, command=command)
+        tirith_detected_strings = _extract_tirith_detected_strings(findings, command=command)
         if not is_approved(session_key, tirith_key):
             warnings.append((tirith_key, tirith_desc, True))
 

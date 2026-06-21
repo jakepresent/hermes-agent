@@ -18513,11 +18513,12 @@ class GatewayRunner:
                 # Fallback: plain text approval prompt
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
                 prefix = f"{approval_mention} " if approval_mention else ""
-                detected_text = ""
-                if detected_strings:
-                    detected_text = "Detected string(s):\n" + "\n".join(
+                if detected_strings and not allow_permanent:
+                    subject_text = "Security scanner flagged:\n" + "\n".join(
                         f"- `{str(item)[:180]}`" for item in detected_strings[:8]
-                    ) + "\n"
+                    )
+                else:
+                    subject_text = f"Requested command:\n```\n{cmd_preview}\n```"
                 if allow_permanent:
                     reply_hint = (
                         "Reply `/approve` to execute, `/approve session` to approve this pattern "
@@ -18530,8 +18531,7 @@ class GatewayRunner:
                     )
                 msg = (
                     f"{prefix}⚠️ **Dangerous command requires approval:**\n"
-                    f"```\n{cmd_preview}\n```\n"
-                    f"{detected_text}"
+                    f"{subject_text}\n"
                     f"Reason: {desc}\n\n"
                     f"{reply_hint}"
                 )

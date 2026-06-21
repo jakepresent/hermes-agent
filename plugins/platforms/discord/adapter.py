@@ -4343,17 +4343,19 @@ class DiscordAdapter(BasePlatformAdapter):
                     "this approval until the session resets. Permanent approval "
                     "is disabled for security-scan findings. Deny blocks it."
                 )
+            use_detected_subject = bool(detected_strings) and not allow_permanent
+            if use_detected_subject:
+                subject_label = "**Security scanner flagged:**\n```text\n"
+                subject_text = "\n".join(str(item)[:180] for item in detected_strings[:8])
+            else:
+                subject_label = "**Requested command:**\n```bash\n"
+                subject_text = command
             prompt_prefix = (
                 "⚠️ **Permission needed**\n\n"
                 "Do you want Hermes to run this command?\n\n"
-                "**Requested command:**\n```bash\n"
+                f"{subject_label}"
             )
             prompt_between = "\n```"
-            detected_block = ""
-            if detected_strings:
-                detected_block = "\n**Detected string(s):**\n" + "\n".join(
-                    f"- `{str(item)[:180]}`" for item in detected_strings[:8]
-                )
             reason_label = "\n**Reason:** "
             truncated_suffix = "\n... [truncated]"
             max_content = self.MAX_MESSAGE_LENGTH
@@ -4361,13 +4363,13 @@ class DiscordAdapter(BasePlatformAdapter):
             reason_display = description
             if len(reason_display) > reason_budget:
                 reason_display = reason_display[: max(0, reason_budget - 15)] + "... [truncated]"
-            prompt_tail = f"{detected_block}{reason_label}{reason_display}\n\n{choices_text}"
+            prompt_tail = f"{reason_label}{reason_display}\n\n{choices_text}"
             fixed_budget = len(prompt_prefix) + len(prompt_between) + len(prompt_tail)
-            command_budget = max_content - fixed_budget
-            cmd_display = command
-            if len(cmd_display) > command_budget:
-                cmd_display = cmd_display[: max(0, command_budget - len(truncated_suffix))] + truncated_suffix
-            content = f"{prompt_prefix}{cmd_display}{prompt_between}{prompt_tail}"
+            subject_budget = max_content - fixed_budget
+            subject_display = subject_text
+            if len(subject_display) > subject_budget:
+                subject_display = subject_display[: max(0, subject_budget - len(truncated_suffix))] + truncated_suffix
+            content = f"{prompt_prefix}{subject_display}{prompt_between}{prompt_tail}"
 
             view = ExecApprovalView(
                 session_key=session_key,

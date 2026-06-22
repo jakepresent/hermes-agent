@@ -90,12 +90,11 @@ class TestClarifyChoiceViewConstruction:
             clarify_id="cidX",
             allowed_user_ids={"42"},
         )
-        # 3 numeric + 1 "Other"
+        # 3 compact numeric buttons + 1 "Other". Full choice text belongs in
+        # the prompt body, not in truncation-prone Discord button labels.
         assert len(view.children) == 4
         labels = [b.label for b in view.children]
-        assert labels[0].startswith("1. apple")
-        assert labels[1].startswith("2. banana")
-        assert labels[2].startswith("3. cherry")
+        assert labels[:3] == ["1", "2", "3"]
         assert "Other" in labels[3]
         # custom_ids encode clarify_id + index/other
         ids = [b.custom_id for b in view.children]
@@ -115,19 +114,16 @@ class TestClarifyChoiceViewConstruction:
         assert len(view.children) == 25
         assert "Other" in view.children[-1].label
 
-    def test_truncates_long_choice_label(self):
+    def test_long_choice_label_stays_compact(self):
         long_choice = "x" * 200
         view = ClarifyChoiceView(
             choices=[long_choice],
             clarify_id="cidZ",
             allowed_user_ids=set(),
         )
-        # 75 chars + 3 ellipsis chars in the body, plus "1. " prefix
-        first_label = view.children[0].label
-        assert first_label.startswith("1. ")
-        assert first_label.endswith("...")
-        # Final label total <= 80 (Discord cap on button labels)
-        assert len(first_label) <= 80
+        label = getattr(view.children[0], "label")
+        assert label == "1"
+        assert len(label) <= 80
 
 
 # ===========================================================================
@@ -315,14 +311,26 @@ class TestDiscordSendClarify:
 
         assert result.success is True
         assert result.message_id == "123456"
-        # Verify channel.send was called with embed + view kwargs
+        # Verify channel.send was called with visible content + view kwargs
         channel.send.assert_called_once()
         kwargs = channel.send.call_args.kwargs
-        assert "embed" in kwargs
+        assert "content" in kwargs
+        assert "embed" not in kwargs
         assert "view" in kwargs
+        content = kwargs["content"]
+        assert "Clarification needed" in content
+        assert "**Question:**" in content
+        assert "Pick a color" in content
+        assert "**Choices:**" in content
+        assert "1. red" in content
+        assert "2. green" in content
+        assert "3. blue" in content
         assert isinstance(kwargs["view"], ClarifyChoiceView)
-        # 3 choice buttons + 1 Other
+        # 3 compact choice buttons + 1 Other
         assert len(kwargs["view"].children) == 4
+        labels = [getattr(button, "label") for button in kwargs["view"].children]
+        assert labels[:3] == ["1", "2", "3"]
+        assert "Other" in labels[3]
 
     @pytest.mark.asyncio
     async def test_open_ended_omits_view(self):
@@ -344,9 +352,14 @@ class TestDiscordSendClarify:
         assert result.success is True
         channel.send.assert_called_once()
         kwargs = channel.send.call_args.kwargs
-        # Open-ended path renders embed but no view (text-capture handles reply)
-        assert "embed" in kwargs
+        # Open-ended path renders visible content but no view; text-capture handles reply.
+        assert "content" in kwargs
+        assert "embed" not in kwargs
         assert "view" not in kwargs
+        assert "Clarification needed" in kwargs["content"]
+        assert "**Question:**" in kwargs["content"]
+        assert "What is your name?" in kwargs["content"]
+        assert "Reply in this channel with your answer." in kwargs["content"]
 
     @pytest.mark.asyncio
     async def test_routes_to_thread_when_metadata_thread_id_set(self):
@@ -403,4 +416,64 @@ class TestDiscordSendClarify:
         view = kwargs["view"]
         # Only 1 real choice + 1 Other = 2 children
         assert len(view.children) == 2
-        assert "real-choice" in view.children[0].label
+        assert "1. real-choice" in kwargs["content"]
+        assert getattr(view.children[0], "label") == "1"
+
+    @pytest.mark.asyncio
+    async def test_long_question_and_choices_are_visible_in_content(self):
+        adapter = _make_adapter()
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 555
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        long_question = (
+            "Mic-gate brain is built + Mac-validated. Before live capture, "
+            "two things need your call. "
+            + "hardware-only detail " * 20
+        )
+        long_choice = (
+            "Auto-arm ON by default: "
+            + "mic records only during real meeting app usage " * 10
+        ).strip()
+
+        result = await adapter.send_clarify(
+            chat_id="9001",
+            question=long_question,
+            choices=[long_choice, "Ship passive indicator first"],
+            clarify_id="cidLong",
+            session_key="sk-long",
+        )
+
+        assert result.success is True
+        kwargs = channel.send.call_args.kwargs
+        content = kwargs["content"]
+        assert "Mic-gate brain is built + Mac-validated" in content
+        assert "hardware-only detail hardware-only detail" in content
+        assert f"1. {long_choice}" in content
+        assert "2. Ship passive indicator first" in content
+        labels = [getattr(button, "label") for button in kwargs["view"].children]
+        assert labels[:2] == ["1", "2"]
+
+    @pytest.mark.asyncio
+    async def test_invisible_unicode_is_visible_in_question_and_choices(self):
+        adapter = _make_adapter()
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 666
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        result = await adapter.send_clarify(
+            chat_id="9001",
+            question="Approve hidden char hello️?",
+            choices=["Use hello️", "Skip"],
+            clarify_id="cidUnicode",
+            session_key="sk-unicode",
+        )
+
+        assert result.success is True
+        content = channel.send.call_args.kwargs["content"]
+        assert "hello[U+FE0F]" in content
+        assert "hello️" not in content

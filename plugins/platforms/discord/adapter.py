@@ -142,6 +142,49 @@ def _make_invisible_unicode_visible(text: str) -> str:
     return "".join(rendered)
 
 
+def _truncate_discord_content(text: str, max_length: int) -> str:
+    """Fit plain Discord message content under the platform limit."""
+    body = str(text)
+    if len(body) <= max_length:
+        return body
+    marker = "\n... [truncated]"
+    if max_length <= len(marker):
+        return body[:max_length]
+    return body[: max_length - len(marker)] + marker
+
+
+def _build_discord_clarify_content(
+    question: str,
+    choices: Optional[List[str]],
+    max_length: int,
+) -> str:
+    """Build a self-contained, content-first Discord clarify prompt."""
+    visible_question = _make_invisible_unicode_visible(str(question or "").strip())
+    lines = [
+        "❓ **Clarification needed**",
+        "",
+        "**Question:**",
+        visible_question,
+    ]
+
+    clean_choices = [
+        _make_invisible_unicode_visible(str(choice))
+        for choice in (choices or [])
+    ]
+    if clean_choices:
+        lines.extend(["", "**Choices:**"])
+        for index, choice in enumerate(clean_choices, start=1):
+            lines.append(f"{index}. {choice}")
+        lines.extend([
+            "",
+            "Pick one below, or click ✏️ Other to type a custom answer.",
+        ])
+    else:
+        lines.extend(["", "Reply in this channel with your answer."])
+
+    return _truncate_discord_content("\n".join(lines), max_length)
+
+
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available.
 
@@ -4474,14 +4517,15 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Render a clarify prompt with one Discord button per choice.
 
-        Multi-choice mode (``choices`` non-empty): renders a button per option
-        plus a final "✏️ Other (type answer)" button. Picking "Other" flips
-        the clarify entry into text-capture mode so the next user message in
-        the session becomes the response. Numeric clicks resolve immediately
-        via ``resolve_gateway_clarify(clarify_id, choice_text)``.
+        Multi-choice mode (``choices`` non-empty): sends a self-contained
+        plain content prompt with the full question and full choices visible
+        above compact numeric buttons. Picking "Other" flips the clarify entry
+        into text-capture mode so the next user message in the session becomes
+        the response. Numeric clicks resolve immediately via
+        ``resolve_gateway_clarify(clarify_id, choice_text)``.
 
-        Open-ended mode (``choices`` empty/None): renders the question as
-        plain embed text — no buttons. The gateway's text-intercept captures
+        Open-ended mode (``choices`` empty/None): sends a self-contained plain
+        content prompt with no buttons. The gateway's text-intercept captures
         the next message in this session and resolves the clarify.
         """
         if not self._client or not DISCORD_AVAILABLE:
@@ -4496,18 +4540,6 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            # Discord embed description limit is 4096; trim conservatively.
-            max_desc = 4088
-            body = str(question or "").strip()
-            if len(body) > max_desc:
-                body = body[: max_desc - 3] + "..."
-
-            embed = discord.Embed(
-                title="❓ Hermes needs your input",
-                description=body,
-                color=discord.Color.orange(),
-            )
-
             clean_choices = [
                 str(c).strip() for c in (choices or []) if c is not None and str(c).strip()
             ]
@@ -4515,27 +4547,25 @@ class DiscordAdapter(BasePlatformAdapter):
             # We reserve one slot for the "Other" button, so cap at 24 choices.
             clean_choices = clean_choices[:24]
 
+            content = _build_discord_clarify_content(
+                question=question,
+                choices=clean_choices,
+                max_length=self.MAX_MESSAGE_LENGTH,
+            )
+            view = None
             if clean_choices:
-                embed.add_field(
-                    name="Choices",
-                    value="Pick one below, or click ✏️ Other to type a custom answer.",
-                    inline=False,
-                )
                 view = ClarifyChoiceView(
                     choices=clean_choices,
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
                 )
-            else:
-                embed.add_field(
-                    name="Reply",
-                    value="Reply in this channel with your answer.",
-                    inline=False,
-                )
-                view = None
 
-            msg = await channel.send(embed=embed, view=view) if view else await channel.send(embed=embed)
+            send_kwargs: Dict[str, Any] = {"content": content}
+            if view:
+                send_kwargs["view"] = view
+
+            msg = await channel.send(**send_kwargs)
             if view:
                 view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
@@ -5955,10 +5985,11 @@ def _define_discord_view_classes() -> None:
             self.resolved = False
 
             for index, choice in enumerate(self.choices):
-                # Discord button labels are capped at 80 chars.
-                label_body = choice if len(choice) <= 75 else choice[:72] + "..."
                 button = discord.ui.Button(
-                    label=f"{index + 1}. {label_body}",
+                    # Keep buttons compact and put full choice text in the
+                    # prompt body. Discord truncates long button labels, which
+                    # made users unable to tell what they were selecting.
+                    label=str(index + 1),
                     style=discord.ButtonStyle.primary,
                     custom_id=f"clarify:{clarify_id}:{index}",
                 )

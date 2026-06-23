@@ -11231,7 +11231,7 @@ class GatewayRunner:
         """Handle /model command — switch model for this session.
 
         Supports:
-          /model                              — interactive picker (Telegram/Discord) or text list
+          /model                              — show current model and open picker
           /model status                       — show the current model/provider
           /model <name>                       — switch for this session only
           /model <name> --global              — switch and persist to config.yaml
@@ -11472,7 +11472,7 @@ class GatewayRunner:
                         metadata=metadata,
                     )
                     if result.success:
-                        return None  # Picker sent — adapter handles the response
+                        return None  # Picker message includes the current model/status
 
             # Fallback: text list (for platforms without picker or if picker failed)
             provider_label = get_label(current_provider)

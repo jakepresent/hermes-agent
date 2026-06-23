@@ -8008,7 +8008,7 @@ class HermesCLI:
         """Handle /model command — switch model for this session.
 
         Supports:
-          /model                              — open the model picker
+          /model                              — open picker (shows current model)
           /model status                       — show current model + usage hints
           /model <name>                       — switch for this session only
           /model <name> --global              — switch and persist to config.yaml
@@ -8066,7 +8066,7 @@ class HermesCLI:
             provider_display = get_label(self.provider) if self.provider else "unknown"
             _cprint(f"  Current: {model_display} on {provider_display}")
             _cprint("")
-            _cprint("  /model                              open model picker")
+            _cprint("  /model                              open picker (shows current)")
             _cprint("  /model <name>                       switch model")
             _cprint("  /model --provider <slug>             switch provider")
             _cprint("  /model --refresh                     re-fetch live model lists")

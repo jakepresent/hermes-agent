@@ -3266,7 +3266,7 @@ class DiscordAdapter(BasePlatformAdapter):
             await self._run_simple_slash(interaction, "/reset", "Session reset~")
 
         @tree.command(name="model", description="Show or change the model")
-        @discord.app_commands.describe(name="Model name, or 'status' to show current. Leave empty to open picker.")
+        @discord.app_commands.describe(name="Model name, or 'status' for text-only current model. Empty opens picker.")
         async def slash_model(interaction: discord.Interaction, name: str = ""):
             await self._run_simple_slash(interaction, f"/model {name}".strip())
 
@@ -4636,22 +4636,6 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            try:
-                from hermes_cli.providers import get_label
-                provider_label = get_label(current_provider)
-            except Exception:
-                provider_label = current_provider
-
-            embed = discord.Embed(
-                title="⚙ Model Configuration",
-                description=(
-                    f"Current model: `{current_model or 'unknown'}`\n"
-                    f"Provider: {provider_label}\n\n"
-                    f"Select a provider:"
-                ),
-                color=discord.Color.blue(),
-            )
-
             view = ModelPickerView(
                 providers=providers,
                 current_model=current_model,
@@ -4661,6 +4645,7 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
             )
+            embed = view._build_provider_embed()
 
             msg = await channel.send(embed=embed, view=view)
             view._message = msg  # store for on_timeout expiration editing
@@ -5748,6 +5733,22 @@ def _define_discord_view_classes() -> None:
 
             self._build_provider_select()
 
+        def _build_provider_embed(self):
+            try:
+                from hermes_cli.providers import get_label
+                provider_label = get_label(self.current_provider)
+            except Exception:
+                provider_label = self.current_provider
+            return discord.Embed(
+                title="⚙ Model Configuration",
+                description=(
+                    f"Current: `{self.current_model or 'unknown'}`\n"
+                    f"Provider: {provider_label}\n\n"
+                    f"Select a provider to switch models:"
+                ),
+                color=discord.Color.blue(),
+            )
+
         def _check_auth(self, interaction: discord.Interaction) -> bool:
             return _component_check_auth(
                 interaction, self.allowed_user_ids, self.allowed_role_ids,
@@ -5907,22 +5908,8 @@ def _define_discord_view_classes() -> None:
 
             self._build_provider_select()
 
-            try:
-                from hermes_cli.providers import get_label
-                provider_label = get_label(self.current_provider)
-            except Exception:
-                provider_label = self.current_provider
-
             await interaction.response.edit_message(
-                embed=discord.Embed(
-                    title="⚙ Model Configuration",
-                    description=(
-                        f"Current model: `{self.current_model or 'unknown'}`\n"
-                        f"Provider: {provider_label}\n\n"
-                        f"Select a provider:"
-                    ),
-                    color=discord.Color.blue(),
-                ),
+                embed=self._build_provider_embed(),
                 view=self,
             )
 

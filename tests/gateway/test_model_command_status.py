@@ -74,7 +74,7 @@ async def test_model_status_shows_current_model_without_opening_discord_picker(t
     assert "gpt-5.5" in result
     assert "github-copilot" in result
     assert "`/model`" in result
-    assert "open model picker" in result
+    assert "shows current" in result
     assert adapter.called is False
 
 
@@ -124,3 +124,39 @@ async def test_bare_model_still_opens_discord_picker(tmp_path, monkeypatch):
     assert adapter.called is True
     assert adapter.kwargs["current_model"] == "gpt-5.5"
     assert adapter.kwargs["current_provider"] == "copilot"
+
+
+@pytest.mark.asyncio
+async def test_bare_model_picker_uses_session_override_as_current(tmp_path, monkeypatch):
+    _setup_home(tmp_path, monkeypatch)
+    adapter = _FakePickerAdapter()
+    runner = _make_runner(adapter)
+    event = _make_event("/model")
+    session_key = runner._session_key_for_source(event.source)
+    runner._session_model_overrides[session_key] = {
+        "model": "claude-opus-4.8",
+        "provider": "anthropic",
+        "base_url": "https://api.anthropic.com",
+        "api_key": "sk-test",
+        "api_mode": "chat_completions",
+    }
+
+    monkeypatch.setattr(
+        "hermes_cli.model_switch.list_picker_providers",
+        lambda **kwargs: [
+            {
+                "slug": "anthropic",
+                "name": "Anthropic",
+                "models": ["claude-opus-4.8"],
+                "total_models": 1,
+                "is_current": True,
+            }
+        ],
+    )
+
+    result = await runner._handle_model_command(event)
+
+    assert result is None
+    assert adapter.called is True
+    assert adapter.kwargs["current_model"] == "claude-opus-4.8"
+    assert adapter.kwargs["current_provider"] == "anthropic"

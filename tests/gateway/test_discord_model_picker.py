@@ -80,3 +80,28 @@ async def test_model_picker_clears_controls_before_running_switch_callback():
     interaction.response.edit_message.assert_awaited_once()
     interaction.response.defer.assert_not_called()
     interaction.edit_original_response.assert_awaited_once()
+
+
+def test_model_picker_provider_view_shows_current_model():
+    view = ModelPickerView(
+        providers=[
+            {
+                "slug": "copilot",
+                "name": "GitHub Copilot",
+                "models": ["gpt-5.5"],
+                "total_models": 1,
+                "is_current": True,
+            }
+        ],
+        current_model="gpt-5.5",
+        current_provider="copilot",
+        session_key="session-1",
+        on_model_selected=lambda *_args: "",
+        allowed_user_ids=set(),
+    )
+
+    embed = view._build_provider_embed()
+
+    assert embed.title == "⚙ Model Configuration"
+    assert "Current: `gpt-5.5`" in embed.description
+    assert "Select a provider to switch models:" in embed.description

@@ -53,7 +53,7 @@ gateway:
     current_label:          "Current: `{model}` on {provider}"
     current_tag:            " (current)"
     more_models_suffix:     " (+{count} more)"
-    usage_open_picker:      "`/model` — open model picker"
+    usage_open_picker:      "`/model` — open picker (shows current)"
     usage_switch_model:     "`/model <name>` — switch model"
     usage_switch_provider:  "`/model <name> --provider <slug>` — switch provider"
     usage_persist:          "`/model <name> --global` — persist"

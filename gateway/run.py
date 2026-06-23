@@ -11232,6 +11232,7 @@ class GatewayRunner:
 
         Supports:
           /model                              — interactive picker (Telegram/Discord) or text list
+          /model status                       — show the current model/provider
           /model <name>                       — switch for this session only
           /model <name> --global              — switch and persist to config.yaml
           /model <name> --provider <provider> — switch provider + model
@@ -11274,6 +11275,8 @@ class GatewayRunner:
                     current_model = model_cfg.get("default", "")
                     current_provider = model_cfg.get("provider", current_provider)
                     current_base_url = model_cfg.get("base_url", "")
+                elif isinstance(model_cfg, str) and model_cfg.strip():
+                    current_model = model_cfg.strip()
                 user_provs = cfg.get("providers")
                 try:
                     from hermes_cli.config import get_compatible_custom_providers
@@ -11292,6 +11295,29 @@ class GatewayRunner:
             current_provider = override.get("provider", current_provider)
             current_base_url = override.get("base_url", current_base_url)
             current_api_key = override.get("api_key", current_api_key)
+
+        wants_status = (
+            not explicit_provider
+            and not persist_global
+            and model_input.lower() in {"status", "current", "show", "info"}
+        )
+        if wants_status:
+            provider_label = get_label(current_provider)
+            lines = [
+                t(
+                    "gateway.model.current_label",
+                    model=current_model or "unknown",
+                    provider=provider_label,
+                )
+            ]
+            if override:
+                lines.append(t("gateway.model.session_only_hint"))
+            lines.append("")
+            lines.append(t("gateway.model.usage_open_picker"))
+            lines.append(t("gateway.model.usage_switch_model"))
+            lines.append(t("gateway.model.usage_switch_provider"))
+            lines.append(t("gateway.model.usage_persist"))
+            return "\n".join(lines)
 
         # No args: show interactive picker (Telegram/Discord) or text list
         if not model_input and not explicit_provider:

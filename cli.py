@@ -8008,11 +8008,12 @@ class HermesCLI:
         """Handle /model command — switch model for this session.
 
         Supports:
-          /model                              — show current model + usage hints
+          /model                              — open the model picker
+          /model status                       — show current model + usage hints
           /model <name>                       — switch for this session only
           /model <name> --global              — switch and persist to config.yaml
           /model <name> --provider <provider> — switch provider + model
-          /model --provider <provider>        — switch to provider, auto-detect model
+          /model --provider <provider>        — switch provider, auto-detect model
         """
         from hermes_cli.model_switch import switch_model, parse_model_flags
         from hermes_cli.providers import get_label
@@ -8054,6 +8055,22 @@ class HermesCLI:
         # dicts; ConfigContext is the canonical source for both.
         user_provs = ctx.user_providers if ctx is not None else None
         custom_provs = ctx.custom_providers if ctx is not None else None
+
+        wants_status = (
+            not explicit_provider
+            and not persist_global
+            and model_input.lower() in {"status", "current", "show", "info"}
+        )
+        if wants_status:
+            model_display = self.model or "unknown"
+            provider_display = get_label(self.provider) if self.provider else "unknown"
+            _cprint(f"  Current: {model_display} on {provider_display}")
+            _cprint("")
+            _cprint("  /model                              open model picker")
+            _cprint("  /model <name>                       switch model")
+            _cprint("  /model --provider <slug>             switch provider")
+            _cprint("  /model --refresh                     re-fetch live model lists")
+            return
 
         # No args at all: open prompt_toolkit-native picker modal
         if not model_input and not explicit_provider:

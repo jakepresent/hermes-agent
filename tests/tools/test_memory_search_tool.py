@@ -541,14 +541,45 @@ def test_gemini_persistent_embeddings_use_batched_storage(tmp_path, monkeypatch)
     assert first["success"] is True
     assert first["semantic"]["backend"] == "gemini:gemini-embedding-2"
     assert first["semantic"]["rebuilt"] is True
+    assert first["semantic"]["vector_index"] == "sqlite-vec"
     assert second["semantic"]["rebuilt"] is False
+    assert second["semantic"]["vector_index"] == "sqlite-vec"
     assert len(calls) == 1
     assert second["results"][0]["path"].endswith("agent.md")
 
     with sqlite3.connect(index_path) as con:
-        row = con.execute("SELECT embedding, dim FROM semantic_embeddings LIMIT 1").fetchone()
+        row = con.execute("SELECT embedding, dim, vec_id FROM semantic_embeddings LIMIT 1").fetchone()
     assert isinstance(row[0], bytes)
     assert row[1] == 3
+    assert isinstance(row[2], int)
+
+
+def test_preindex_semantic_embeddings_syncs_sqlite_vec_table(tmp_path, monkeypatch):
+    import tools.memory_search_tool as mst
+
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    for idx in range(2):
+        (root / f"note-{idx}.md").write_text(f"# Note {idx}\n\nText {idx}\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    def fake_batch(texts, *, model, max_retries=0):
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(mst, "_embed_gemini_texts_batched", fake_batch)
+
+    result = mst.preindex_semantic_embeddings(
+        index_path=index_path,
+        roots=[(root, "chatworkspace")],
+        freshness_seconds=9999,
+        retry_429=False,
+    )
+
+    assert result["success"] is True
+    assert result["sqlite_vec_synced"] is True
+    assert result["sqlite_vec"]["table_count"] == 2
+    assert result["sqlite_vec"]["persisted_count"] == 2
 
 
 def test_preindex_semantic_embeddings_processes_limited_batches(tmp_path, monkeypatch):
@@ -607,6 +638,26 @@ def test_semantic_observation_search_respects_category_and_path_filter(tmp_path)
     assert all(hit["category"] == "status" for hit in payload["results"])
     assert "v5 batch" in payload["results"][0]["text"]
 
+
+
+
+def test_gemini_query_embedding_cache_reuses_query_vector(monkeypatch):
+    import tools.memory_search_tool as mst
+
+    calls = []
+
+    def fake_query(texts, *, model):
+        calls.append((list(texts), model))
+        return [[1.0, 0.0, 0.0]]
+
+    monkeypatch.setattr(mst, "_embed_gemini_texts", fake_query)
+    mst._GEMINI_QUERY_EMBEDDING_CACHE.clear()
+
+    first = mst._query_gemini_embedding("configured runtime", model_name="gemini-embedding-2")
+    second = mst._query_gemini_embedding("configured runtime", model_name="gemini-embedding-2")
+
+    assert first == second == [1.0, 0.0, 0.0]
+    assert len(calls) == 1
 
 def test_search_rejects_unknown_mode(tmp_path):
     payload = json.loads(

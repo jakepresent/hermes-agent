@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import pickle
+from collections import OrderedDict
 import re
 import sqlite3
 import time
@@ -49,7 +50,7 @@ _MAX_SNIPPET_CHARS = 700
 
 # Schema version drives one-time, non-destructive migrations (e.g. the
 # observation backfill added in v2). Bump when the on-disk index shape changes.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 # Observation lines look like "- [category] content #tags". The category must be
 # >=2 word chars starting with a letter so markdown checkboxes ("- [ ]", "- [x]")
 # are NOT misread as observations. This mirrors basic-memory's observation syntax.
@@ -128,6 +129,7 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
             source TEXT NOT NULL,
             embedding BLOB NOT NULL,
             dim INTEGER NOT NULL,
+            vec_id INTEGER,
             updated_at REAL NOT NULL,
             PRIMARY KEY (row_id, granularity, backend, model)
         );
@@ -137,12 +139,20 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
             ON semantic_embeddings(path);
         """
     )
-    # Backfill/rebuild is cheap at this scale and keeps external SQLite copies
-    # from drifting if a user edited tables manually.
-    con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
-    con.execute("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')")
-    con.commit()
     _migrate_schema(con)
+    row = con.execute("SELECT value FROM meta WHERE key = 'fts_rebuild_schema_version'").fetchone()
+    if not row or str(row[0]) != str(_SCHEMA_VERSION):
+        # Rebuild once per schema version. The FTS tables are maintained
+        # incrementally by build/import paths; rebuilding on every search adds
+        # hundreds of milliseconds to hot memory lookups.
+        con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+        con.execute("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')")
+        con.execute(
+            "INSERT INTO meta(key, value) VALUES ('fts_rebuild_schema_version', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (str(_SCHEMA_VERSION),),
+        )
+        con.commit()
 
 
 def _schema_version(con: sqlite3.Connection) -> int:
@@ -202,6 +212,33 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
                 con, path=str(row["path"]), source=str(row["source"]),
                 base_line=int(row["start_line"]), text=str(row["text"]),
                 updated_at=float(row["updated_at"] or now),
+            )
+    if version < 4:
+        # v4 adds a numeric vec_id used as sqlite-vec's rowid. Older databases
+        # may have been created before the column existed, so keep this idempotent.
+        columns = {row[1] for row in con.execute("PRAGMA table_info(semantic_embeddings)").fetchall()}
+        if "vec_id" not in columns:
+            con.execute("ALTER TABLE semantic_embeddings ADD COLUMN vec_id INTEGER")
+        con.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS semantic_embeddings_vec_id
+                ON semantic_embeddings(vec_id) WHERE vec_id IS NOT NULL
+            """
+        )
+        for row in con.execute(
+            "SELECT row_id, granularity, backend, model FROM semantic_embeddings "
+            "WHERE vec_id IS NULL ORDER BY updated_at, row_id"
+        ).fetchall():
+            con.execute(
+                """
+                UPDATE semantic_embeddings
+                SET vec_id = ?
+                WHERE row_id = ? AND granularity = ? AND backend = ? AND model = ?
+                """,
+                (
+                    _semantic_vec_id(str(row["row_id"]), str(row["granularity"]), str(row["backend"]), str(row["model"])),
+                    row["row_id"], row["granularity"], row["backend"], row["model"],
+                ),
             )
     _set_schema_version(con, _SCHEMA_VERSION)
     con.commit()
@@ -276,6 +313,29 @@ def _delete_file_chunks(con: sqlite3.Connection, path: str) -> None:
     for rowid in rowids:
         con.execute("DELETE FROM chunks_fts WHERE rowid = ?", (rowid,))
     con.execute("DELETE FROM chunks WHERE path = ?", (path,))
+    stale_vec_ids = [
+        int(r[0]) for r in con.execute(
+            "SELECT vec_id FROM semantic_embeddings WHERE path = ? AND vec_id IS NOT NULL",
+            (path,),
+        ).fetchall()
+    ]
+    if stale_vec_ids:
+        for table_row in con.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'table'
+              AND name LIKE 'semantic_vec_%'
+              AND lower(sql) LIKE '%using vec0%'
+            """
+        ).fetchall():
+            table_name = str(table_row["name"] if isinstance(table_row, sqlite3.Row) else table_row[0])
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
+                continue
+            for vec_id in stale_vec_ids:
+                try:
+                    con.execute(f"DELETE FROM {table_name} WHERE rowid = ?", (vec_id,))
+                except sqlite3.DatabaseError:
+                    pass
     con.execute("DELETE FROM semantic_embeddings WHERE path = ?", (path,))
     _delete_file_observations(con, path)
 
@@ -409,6 +469,7 @@ def build_index(
             con.execute("DELETE FROM observations")
             con.execute("DELETE FROM semantic_embeddings")
             con.execute("DELETE FROM files")
+            con.execute("DELETE FROM meta WHERE key = 'fts_rebuild_schema_version'")
         indexed_files = 0
         indexed_chunks = 0
         scanned_files = 0
@@ -645,7 +706,7 @@ def _semantic_row_id(row: sqlite3.Row, granularity: str) -> str:
     return f"chunk:{row['path']}:{row['start_line']}:{row['end_line']}:{row['text']}"
 
 
-def _semantic_candidate_rows(
+def _semantic_candidate_rows_uncached(
     con: sqlite3.Connection,
     *,
     granularity: str,
@@ -693,6 +754,39 @@ def _semantic_candidate_rows(
         """,
         params,
     ).fetchall()
+
+
+def _semantic_candidate_rows(
+    con: sqlite3.Connection,
+    *,
+    granularity: str,
+    source: str = "all",
+    path_filter: str = "",
+    category: str = "",
+) -> list[sqlite3.Row]:
+    key = (granularity, source or "all", path_filter or "", category or "")
+    db_mtime = 0.0
+    try:
+        row = con.execute("PRAGMA database_list").fetchone()
+        db_path = str(row[2]) if row and len(row) >= 3 else ""
+        db_mtime = Path(db_path).stat().st_mtime if db_path else 0.0
+    except Exception:
+        db_mtime = 0.0
+    cached = _SEMANTIC_CANDIDATE_ROWS_CACHE.get(key)
+    if cached and cached[0] == db_mtime:
+        _SEMANTIC_CANDIDATE_ROWS_CACHE.move_to_end(key)
+        return list(cached[1])
+    rows = _semantic_candidate_rows_uncached(
+        con,
+        granularity=granularity,
+        source=source,
+        path_filter=path_filter,
+        category=category,
+    )
+    _SEMANTIC_CANDIDATE_ROWS_CACHE[key] = (db_mtime, list(rows))
+    while len(_SEMANTIC_CANDIDATE_ROWS_CACHE) > _SEMANTIC_CANDIDATE_ROWS_CACHE_MAX:
+        _SEMANTIC_CANDIDATE_ROWS_CACHE.popitem(last=False)
+    return rows
 
 
 def _semantic_fingerprint(rows: Sequence[sqlite3.Row], *, granularity: str, backend: str) -> str:
@@ -796,6 +890,16 @@ _GEMINI_BATCH_SIZE = 100
 # fallback if the provider starts failing or rate-limiting.
 _GEMINI_DEFAULT_MAX_COLD_ROWS = 25000
 _SKLEARN_DEFAULT_MAX_COLD_ROWS = 5000
+_GEMINI_QUERY_CACHE_MAX = 256
+_GEMINI_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str], list[float]]" = OrderedDict()
+_GEMINI_ROW_REF_CACHE_MAX = 8
+_GEMINI_ROW_REF_CACHE: "OrderedDict[tuple[str, str, str, str, str, str, str], tuple[str, list[dict[str, Any] | None], list[int]]]" = OrderedDict()
+_SEMANTIC_CANDIDATE_ROWS_CACHE_MAX = 8
+_SEMANTIC_CANDIDATE_ROWS_CACHE: "OrderedDict[tuple[str, str, str, str], tuple[float, list[sqlite3.Row]]]" = OrderedDict()
+_SQLITE_VEC_ID_CACHE_MAX = 8
+_SQLITE_VEC_ID_CACHE: "OrderedDict[tuple[str, str, str, str, str, str, str], tuple[str, list[int]]]" = OrderedDict()
+_SQLITE_VEC_READY_CACHE: "OrderedDict[tuple[str, str, str, str, str], tuple[float, dict[str, Any]]]" = OrderedDict()
+_SQLITE_VEC_READY_CACHE_MAX = 16
 
 
 def _extract_gemini_values(embedding: Any) -> list[float]:
@@ -924,6 +1028,268 @@ def _row_map_key(row: sqlite3.Row, granularity: str) -> str:
     return _semantic_row_id(row, granularity)
 
 
+def _semantic_vec_id(row_id: str, granularity: str, backend_id: str, model_name: str) -> int:
+    """Stable positive 63-bit integer id for sqlite-vec rowids."""
+    seed = f"{granularity}\0{backend_id}\0{model_name}\0{row_id}".encode("utf-8", errors="replace")
+    value = int.from_bytes(hashlib.blake2b(seed, digest_size=8).digest(), "big") & ((1 << 63) - 1)
+    return value or 1
+
+
+def _load_sqlite_vec(con: sqlite3.Connection) -> tuple[bool, str]:
+    """Load sqlite-vec into this connection when available."""
+    try:
+        import sqlite_vec  # type: ignore
+    except Exception as exc:  # pragma: no cover - optional dependency
+        return False, f"sqlite-vec unavailable: {exc}"
+    try:
+        con.enable_load_extension(True)
+        sqlite_vec.load(con)
+    except Exception as exc:  # pragma: no cover - environment dependent
+        try:
+            con.enable_load_extension(False)
+        except Exception:
+            pass
+        return False, f"sqlite-vec load failed: {exc}"
+    try:
+        con.enable_load_extension(False)
+    except Exception:
+        pass
+    return True, ""
+
+
+def _vec_table_name(granularity: str, model_name: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_]+", "_", f"{granularity}_{model_name}").strip("_")
+    return f"semantic_vec_{safe[:80]}"
+
+
+def _sqlite_vec_table_exists(con: sqlite3.Connection, table_name: str) -> bool:
+    return con.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone() is not None
+
+
+def _ensure_sqlite_vec_table(
+    con: sqlite3.Connection,
+    *,
+    table_name: str,
+    dim: int,
+) -> tuple[bool, str]:
+    ok, reason = _load_sqlite_vec(con)
+    if not ok:
+        return False, reason
+    existing_dim = con.execute(
+        "SELECT value FROM meta WHERE key = ?",
+        (f"sqlite_vec_dim:{table_name}",),
+    ).fetchone()
+    if existing_dim and str(existing_dim[0]) != str(dim):
+        return False, f"sqlite-vec table {table_name} has dim {existing_dim[0]}, expected {dim}"
+    if not _sqlite_vec_table_exists(con, table_name):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name):
+            return False, f"unsafe sqlite-vec table name: {table_name}"
+        con.execute(
+            f"CREATE VIRTUAL TABLE {table_name} USING vec0(embedding float[{int(dim)}] distance_metric=cosine)"
+        )
+        con.execute(
+            "INSERT INTO meta(key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (f"sqlite_vec_dim:{table_name}", str(dim)),
+        )
+    return True, ""
+
+
+def _sync_sqlite_vec_rows(
+    con: sqlite3.Connection,
+    *,
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+    table_name: str,
+    limit: int = 0,
+) -> tuple[bool, dict[str, Any]]:
+    rows = con.execute(
+        """
+        SELECT vec_id, embedding, dim
+        FROM semantic_embeddings
+        WHERE granularity = ? AND backend = ? AND model = ? AND vec_id IS NOT NULL
+        ORDER BY updated_at DESC
+        """,
+        (granularity, backend_id, model_name),
+    ).fetchall()
+    if not rows:
+        return False, {"available": False, "reason": "no persisted embeddings"}
+    dim = int(rows[0]["dim"] or 0)
+    if dim <= 0:
+        return False, {"available": False, "reason": "persisted embeddings have no dimension"}
+    ok, reason = _ensure_sqlite_vec_table(con, table_name=table_name, dim=dim)
+    if not ok:
+        return False, {"available": False, "reason": reason}
+
+    existing = {int(r[0]) for r in con.execute(f"SELECT rowid FROM {table_name}").fetchall()}
+    wanted = {int(row["vec_id"]) for row in rows}
+    stale = existing - wanted
+    for vec_id in stale:
+        con.execute(f"DELETE FROM {table_name} WHERE rowid = ?", (vec_id,))
+
+    missing = list(wanted - existing)
+    by_id = {int(row["vec_id"]): row for row in rows}
+    inserted = 0
+    max_insert = max(0, int(limit or 0))
+    for vec_id in missing:
+        if max_insert and inserted >= max_insert:
+            break
+        row = by_id[vec_id]
+        try:
+            con.execute(
+                f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                (vec_id, bytes(row["embedding"])),
+            )
+            inserted += 1
+        except sqlite3.IntegrityError:
+            con.execute(f"DELETE FROM {table_name} WHERE rowid = ?", (vec_id,))
+            con.execute(
+                f"INSERT INTO {table_name}(rowid, embedding) VALUES (?, ?)",
+                (vec_id, bytes(row["embedding"])),
+            )
+            inserted += 1
+
+    remaining = max(0, len(missing) - inserted)
+    table_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+    return remaining == 0, {
+        "available": remaining == 0,
+        "table": table_name,
+        "dim": dim,
+        "persisted_count": len(rows),
+        "table_count": int(table_count),
+        "inserted": inserted,
+        "deleted_stale": len(stale),
+        "remaining_sync": remaining,
+    }
+
+
+def _pack_vec_f32(vector: Sequence[float] | bytes | bytearray | memoryview) -> bytes:
+    if isinstance(vector, (bytes, bytearray, memoryview)):
+        return bytes(vector)
+    return _vector_to_blob(vector)
+
+
+def _sqlite_vec_search(
+    con: sqlite3.Connection,
+    *,
+    table_name: str,
+    query_vector: Sequence[float],
+    vec_ids: Sequence[int],
+    k: int,
+) -> list[tuple[int, float]]:
+    if not vec_ids:
+        return []
+    ok, reason = _load_sqlite_vec(con)
+    if not ok:
+        raise RuntimeError(reason)
+    query_blob = _pack_vec_f32(query_vector)
+    search_k = max(int(k), min(len(vec_ids), int(k) * 8))
+    # Fast path: broad searches use all rows in the sqlite-vec table, so avoid
+    # creating/inserting a 19k-row temp candidate table on every query.
+    table_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+    if len(vec_ids) >= int(table_count):
+        rows = con.execute(
+            f"""
+            SELECT rowid, distance
+            FROM {table_name}
+            WHERE embedding MATCH ?
+              AND k = ?
+            ORDER BY distance
+            """,
+            (query_blob, search_k),
+        ).fetchall()
+        return [(int(row[0]), float(row[1])) for row in rows[: int(k)]]
+
+    # Scoped path: sqlite-vec applies JOIN filters after KNN, so constrain the
+    # candidate set with an IN subquery. This yields top-k within the requested
+    # candidate ids.
+    con.execute("DROP TABLE IF EXISTS temp.semantic_vec_candidates")
+    con.execute("CREATE TEMP TABLE semantic_vec_candidates(rowid INTEGER PRIMARY KEY)")
+    con.executemany(
+        "INSERT INTO semantic_vec_candidates(rowid) VALUES (?)",
+        [(int(v),) for v in vec_ids],
+    )
+    rows = con.execute(
+        f"""
+        SELECT rowid, distance
+        FROM {table_name}
+        WHERE embedding MATCH ?
+          AND k = ?
+          AND rowid IN (SELECT rowid FROM semantic_vec_candidates)
+        ORDER BY distance
+        """,
+        (query_blob, search_k),
+    ).fetchall()
+    return [(int(row[0]), float(row[1])) for row in rows[: int(k)]]
+
+
+def _sqlite_vec_coverage(
+    con: sqlite3.Connection,
+    *,
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+) -> dict[str, Any]:
+    table_name = _vec_table_name(granularity, model_name)
+    persisted = con.execute(
+        """
+        SELECT COUNT(*) FROM semantic_embeddings
+        WHERE granularity = ? AND backend = ? AND model = ? AND vec_id IS NOT NULL
+        """,
+        (granularity, backend_id, model_name),
+    ).fetchone()[0]
+    table_count = None
+    reason = ""
+    ok, load_reason = _load_sqlite_vec(con)
+    if not ok:
+        reason = load_reason
+    elif _sqlite_vec_table_exists(con, table_name):
+        table_count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+    else:
+        table_count = 0
+    return {
+        "table": table_name,
+        "available": ok and table_count == persisted and persisted > 0,
+        "persisted_count": int(persisted),
+        "table_count": int(table_count) if table_count is not None else None,
+        "reason": reason,
+    }
+
+
+def _sqlite_vec_ready_cached(
+    con: sqlite3.Connection,
+    *,
+    index_path: Path,
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+    table_name: str,
+) -> tuple[bool, dict[str, Any]]:
+    try:
+        db_mtime = Path(index_path).stat().st_mtime
+    except OSError:
+        db_mtime = 0.0
+    cache_key = (str(index_path), granularity, backend_id, model_name, table_name)
+    cached = _SQLITE_VEC_READY_CACHE.get(cache_key)
+    if cached and cached[0] == db_mtime:
+        _SQLITE_VEC_READY_CACHE.move_to_end(cache_key)
+        return True, dict(cached[1])
+    synced, meta = _sync_sqlite_vec_rows(
+        con,
+        granularity=granularity,
+        backend_id=backend_id,
+        model_name=model_name,
+        table_name=table_name,
+    )
+    if synced:
+        _SQLITE_VEC_READY_CACHE[cache_key] = (db_mtime, dict(meta))
+        while len(_SQLITE_VEC_READY_CACHE) > _SQLITE_VEC_READY_CACHE_MAX:
+            _SQLITE_VEC_READY_CACHE.popitem(last=False)
+    return synced, meta
 
 
 def _vector_to_blob(vector: Sequence[float]) -> bytes:
@@ -945,6 +1311,124 @@ def _vector_from_storage(value: Any) -> list[float]:
     if not text:
         return []
     return [float(v) for v in json.loads(text)]
+
+def _load_persistent_embedding_refs(
+    con: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+    *,
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+) -> tuple[list[dict[str, Any] | None], list[int]]:
+    """Load lightweight embedding references without materializing vector BLOBs."""
+    refs: list[dict[str, Any] | None] = [None] * len(rows)
+    expected: dict[str, tuple[int, str]] = {
+        _row_map_key(row, granularity): (idx, _semantic_content_hash(row, granularity, backend_id))
+        for idx, row in enumerate(rows)
+    }
+    if not expected:
+        return refs, []
+
+    row_ids = list(expected.keys())
+    stale_indices: set[int] = set()
+    for start in range(0, len(row_ids), 500):
+        chunk = row_ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        params: list[Any] = [granularity, backend_id, model_name, *chunk]
+        hits = con.execute(
+            f"""
+            SELECT row_id, content_hash, vec_id, dim
+            FROM semantic_embeddings
+            WHERE granularity = ? AND backend = ? AND model = ?
+              AND row_id IN ({placeholders})
+            """,
+            params,
+        ).fetchall()
+        for hit in hits:
+            row_id = str(hit["row_id"])
+            expected_entry = expected.get(row_id)
+            if not expected_entry:
+                continue
+            idx, content_hash = expected_entry
+            if hit["content_hash"] != content_hash:
+                stale_indices.add(idx)
+                continue
+            vec_id = hit["vec_id"]
+            if vec_id is None:
+                vec_id = _semantic_vec_id(row_id, granularity, backend_id, model_name)
+                con.execute(
+                    """
+                    UPDATE semantic_embeddings SET vec_id = ?
+                    WHERE row_id = ? AND granularity = ? AND backend = ? AND model = ?
+                    """,
+                    (vec_id, row_id, granularity, backend_id, model_name),
+                )
+            refs[idx] = {"row_id": row_id, "vec_id": int(vec_id), "dim": int(hit["dim"] or 0)}
+
+    missing = [idx for idx, ref in enumerate(refs) if ref is None or idx in stale_indices]
+    return refs, missing
+
+
+def _semantic_rows_signature(rows: Sequence[sqlite3.Row], *, granularity: str, backend_id: str) -> str:
+    return _semantic_fingerprint(rows, granularity=granularity, backend=backend_id)
+
+
+def _cached_vec_ids(
+    refs: Sequence[dict[str, Any] | None],
+    *,
+    signature: str,
+    index_path: Path,
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+    source: str,
+    path_filter: str,
+    category: str,
+) -> list[int]:
+    cache_key = (str(index_path), granularity, backend_id, model_name, source or "all", path_filter or "", category or "")
+    cached = _SQLITE_VEC_ID_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        _SQLITE_VEC_ID_CACHE.move_to_end(cache_key)
+        return list(cached[1])
+    vec_ids = [int(ref["vec_id"]) for ref in refs if ref is not None]
+    _SQLITE_VEC_ID_CACHE[cache_key] = (signature, list(vec_ids))
+    while len(_SQLITE_VEC_ID_CACHE) > _SQLITE_VEC_ID_CACHE_MAX:
+        _SQLITE_VEC_ID_CACHE.popitem(last=False)
+    return vec_ids
+
+
+def _load_cached_persistent_embedding_refs(
+    con: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+    *,
+    index_path: Path,
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+    source: str,
+    path_filter: str,
+    category: str,
+) -> tuple[list[dict[str, Any] | None], list[int]]:
+    signature = _semantic_rows_signature(rows, granularity=granularity, backend_id=backend_id)
+    cache_key = (str(index_path), granularity, backend_id, model_name, source or "all", path_filter or "", category or "")
+    cached = _GEMINI_ROW_REF_CACHE.get(cache_key)
+    if cached and cached[0] == signature:
+        _GEMINI_ROW_REF_CACHE.move_to_end(cache_key)
+        refs = [dict(ref) if ref is not None else None for ref in cached[1]]
+        return refs, list(cached[2])
+
+    refs, missing = _load_persistent_embedding_refs(
+        con, rows, granularity=granularity, backend_id=backend_id, model_name=model_name
+    )
+    _GEMINI_ROW_REF_CACHE[cache_key] = (
+        signature,
+        [dict(ref) if ref is not None else None for ref in refs],
+        list(missing),
+    )
+    while len(_GEMINI_ROW_REF_CACHE) > _GEMINI_ROW_REF_CACHE_MAX:
+        _GEMINI_ROW_REF_CACHE.popitem(last=False)
+    return refs, missing
+
 
 def _load_persistent_embeddings(
     con: sqlite3.Connection,
@@ -970,7 +1454,7 @@ def _load_persistent_embeddings(
         params: list[Any] = [granularity, backend_id, model_name, *chunk]
         hits = con.execute(
             f"""
-            SELECT row_id, content_hash, embedding FROM semantic_embeddings
+            SELECT row_id, content_hash, embedding, vec_id FROM semantic_embeddings
             WHERE granularity = ? AND backend = ? AND model = ?
               AND row_id IN ({placeholders})
             """,
@@ -986,6 +1470,14 @@ def _load_persistent_embeddings(
                 stale_indices.add(idx)
                 continue
             raw = hit["embedding"]
+            if hit["vec_id"] is None:
+                con.execute(
+                    """
+                    UPDATE semantic_embeddings SET vec_id = ?
+                    WHERE row_id = ? AND granularity = ? AND backend = ? AND model = ?
+                    """,
+                    (_semantic_vec_id(row_id, granularity, backend_id, model_name), row_id, granularity, backend_id, model_name),
+                )
             if isinstance(raw, (bytes, bytearray, memoryview)) and len(bytes(raw)) % 4 == 0 and raw:
                 vectors[idx] = bytes(raw)
             else:
@@ -1016,17 +1508,19 @@ def _store_persistent_embeddings(
     for row, vector in zip(rows, vectors):
         values = [float(v) for v in vector]
         row_id = _row_map_key(row, granularity)
+        vec_id = _semantic_vec_id(row_id, granularity, backend_id, model_name)
         con.execute(
             """
             INSERT INTO semantic_embeddings(
-                row_id, granularity, backend, model, content_hash, path, source, embedding, dim, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                row_id, granularity, backend, model, content_hash, path, source, embedding, dim, vec_id, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(row_id, granularity, backend, model) DO UPDATE SET
                 content_hash=excluded.content_hash,
                 path=excluded.path,
                 source=excluded.source,
                 embedding=excluded.embedding,
                 dim=excluded.dim,
+                vec_id=excluded.vec_id,
                 updated_at=excluded.updated_at
             """,
             (
@@ -1039,6 +1533,7 @@ def _store_persistent_embeddings(
                 str(row["source"]),
                 _vector_to_blob(values),
                 len(values),
+                vec_id,
                 now,
             ),
         )
@@ -1077,12 +1572,30 @@ def _build_gemini_semantic_model(rows: Sequence[sqlite3.Row], granularity: str, 
     return {"backend": f"gemini:{model}", "model": model, "matrix": matrix}
 
 
+def _query_gemini_embedding(query: str, *, model_name: str) -> list[float]:
+    cache_key = (model_name, query)
+    cached = _GEMINI_QUERY_EMBEDDING_CACHE.get(cache_key)
+    if cached is not None:
+        _GEMINI_QUERY_EMBEDDING_CACHE.move_to_end(cache_key)
+        return list(cached)
+    qtext = _prepare_gemini_embedding_text(query, is_query=True)
+    qvecs = _embed_gemini_texts([qtext], model=model_name)
+    if not qvecs or not qvecs[0]:
+        raise RuntimeError("Gemini embedding backend returned an empty query vector")
+    vector = [float(v) for v in qvecs[0]]
+    _GEMINI_QUERY_EMBEDDING_CACHE[cache_key] = vector
+    while len(_GEMINI_QUERY_EMBEDDING_CACHE) > _GEMINI_QUERY_CACHE_MAX:
+        _GEMINI_QUERY_EMBEDDING_CACHE.popitem(last=False)
+    return list(vector)
+
+
 def _query_semantic_model(model: dict[str, Any], query: str) -> list[float]:
     backend = str(model.get("backend") or "")
     if backend.startswith("gemini:"):
-        qtext = _prepare_gemini_embedding_text(query, is_query=True)
-        qvecs = _embed_gemini_texts([qtext], model=str(model.get("model") or "gemini-embedding-2"))
-        qmatrix = _normalize_dense_matrix(qvecs)
+        if model.get("sqlite_vec_table"):
+            raise RuntimeError("sqlite-vec Gemini model must be queried through _sqlite_vec_search")
+        qvec = _query_gemini_embedding(query, model_name=str(model.get("model") or "gemini-embedding-2"))
+        qmatrix = _normalize_dense_matrix([qvec])
         scores = model["matrix"].dot(qmatrix[0])
         return [float(v) for v in scores.ravel()]
 
@@ -1124,6 +1637,25 @@ def _load_or_build_semantic_cache(
                     raise RuntimeError(
                         f"{backend} semantic cache is only {coverage:.1%} complete ({len(available_indices)}/{len(rows)}); refusing partial broad scoring"
                     )
+                table_name = _vec_table_name(granularity, model_name)
+                synced, vec_meta = _sync_sqlite_vec_rows(
+                    con, granularity=granularity, backend_id=backend_id, model_name=model_name, table_name=table_name
+                )
+                con.commit()
+                if synced:
+                    return {
+                        "fingerprint": _semantic_fingerprint(rows, granularity=granularity, backend=backend_id),
+                        "granularity": granularity,
+                        "backend": backend_id,
+                        "built_at": time.time(),
+                        "model": {"backend": backend_id, "model": model_name, "sqlite_vec_table": table_name},
+                        "row_indices": available_indices,
+                        "missing_count": len(missing),
+                        "vector_index": "sqlite-vec",
+                        "sqlite_vec": vec_meta,
+                    }, False, f"{index_path}#{table_name}"
+                if vec_meta.get("remaining_sync"):
+                    raise RuntimeError(f"sqlite-vec index is incomplete: {vec_meta}")
                 vectors = [existing[i] for i in available_indices if existing[i] is not None]
                 matrix = _normalize_persistent_vector_matrix(vectors)
                 model = {"backend": backend_id, "model": model_name, "matrix": matrix}
@@ -1135,6 +1667,7 @@ def _load_or_build_semantic_cache(
                     "model": model,
                     "row_indices": available_indices,
                     "missing_count": len(missing),
+                    "vector_index": "python",
                 }, False, f"{index_path}#semantic_embeddings"
             rebuilt = bool(missing)
             if missing:
@@ -1161,6 +1694,29 @@ def _load_or_build_semantic_cache(
         vectors = [vector for vector in existing if vector is not None]
         if len(vectors) != len(rows):
             raise RuntimeError("Gemini persistent embedding cache returned incomplete vectors")
+        table_name = _vec_table_name(granularity, model_name)
+        synced, vec_meta = _sqlite_vec_ready_cached(
+            con,
+            index_path=index_path,
+            granularity=granularity,
+            backend_id=backend_id,
+            model_name=model_name,
+            table_name=table_name,
+        )
+        con.commit()
+        if synced:
+            model = {"backend": backend_id, "model": model_name, "sqlite_vec_table": table_name}
+            return {
+                "fingerprint": _semantic_fingerprint(rows, granularity=granularity, backend=backend_id),
+                "granularity": granularity,
+                "backend": backend_id,
+                "built_at": time.time(),
+                "model": model,
+                "row_indices": list(range(len(rows))),
+                "missing_count": 0,
+                "vector_index": "sqlite-vec",
+                "sqlite_vec": vec_meta,
+            }, rebuilt, f"{index_path}#{table_name}"
         matrix = _normalize_persistent_vector_matrix(vectors)
         model = {"backend": backend_id, "model": model_name, "matrix": matrix}
         return {
@@ -1171,6 +1727,8 @@ def _load_or_build_semantic_cache(
             "model": model,
             "row_indices": list(range(len(rows))),
             "missing_count": 0,
+            "vector_index": "python",
+            "sqlite_vec": vec_meta,
         }, rebuilt, f"{index_path}#semantic_embeddings"
 
     cache_path = _semantic_index_path(index_path, granularity, backend_id)
@@ -1249,6 +1807,82 @@ def _search_semantic_rows(
     else:
         sklearn_max_cold_rows = int(os.getenv("HERMES_MEMORY_SEARCH_SKLEARN_MAX_COLD_ROWS", str(_SKLEARN_DEFAULT_MAX_COLD_ROWS)))
         allow_backend_build = live_rebuild or len(rows) <= sklearn_max_cold_rows
+    backend_id = f"gemini:{model_name}" if backend == "gemini" else "sklearn_lsa_v1"
+    if backend == "gemini" and not allow_backend_build:
+        with _connect(index_path) as con:
+            _ensure_schema(con)
+            refs, missing = _load_cached_persistent_embedding_refs(
+                con,
+                rows,
+                index_path=index_path,
+                granularity=granularity,
+                backend_id=backend_id,
+                model_name=model_name,
+                source=source,
+                path_filter=path_filter,
+                category=category,
+            )
+            available_indices = [i for i, ref in enumerate(refs) if ref is not None]
+            coverage = 1.0 - (len(missing) / max(1, len(rows)))
+            min_partial = float(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_MIN_PARTIAL_COVERAGE", "0.95"))
+            if not available_indices or coverage < min_partial:
+                raise RuntimeError(
+                    f"{backend} semantic cache is only {coverage:.1%} complete ({len(available_indices)}/{len(rows)}); refusing partial broad scoring"
+                )
+            table_name = _vec_table_name(granularity, model_name)
+            synced, vec_meta = _sqlite_vec_ready_cached(
+                con,
+                index_path=index_path,
+                granularity=granularity,
+                backend_id=backend_id,
+                model_name=model_name,
+                table_name=table_name,
+            )
+            if synced:
+                qvec = _query_gemini_embedding(query, model_name=model_name)
+                signature = _semantic_rows_signature(rows, granularity=granularity, backend_id=backend_id)
+                vec_ids = _cached_vec_ids(
+                    refs,
+                    signature=signature,
+                    index_path=index_path,
+                    granularity=granularity,
+                    backend_id=backend_id,
+                    model_name=model_name,
+                    source=source,
+                    path_filter=path_filter,
+                    category=category,
+                )
+                vec_id_to_index = {int(ref["vec_id"]): idx for idx, ref in enumerate(refs) if ref is not None}
+                vec_matches = _sqlite_vec_search(
+                    con,
+                    table_name=table_name,
+                    query_vector=qvec,
+                    vec_ids=vec_ids,
+                    k=limit,
+                )
+                ranked = []
+                for vec_id, distance in vec_matches:
+                    idx = vec_id_to_index.get(int(vec_id))
+                    if idx is None:
+                        continue
+                    # Convert cosine distance back to similarity so hybrid ranking
+                    # still treats larger semantic scores as better.
+                    ranked.append((rows[idx], 1.0 - float(distance)))
+                return ranked, {
+                    "backend": backend_id,
+                    "rebuilt": False,
+                    "cache_path": f"{index_path}#{table_name}",
+                    "candidate_count": len(rows),
+                    "embedded_count": len(available_indices),
+                    "missing_count": len(missing),
+                    "vector_index": "sqlite-vec",
+                    "sqlite_vec": vec_meta,
+                }
+            if vec_meta.get("remaining_sync"):
+                raise RuntimeError(f"sqlite-vec index is incomplete: {vec_meta}")
+            if len(rows) > int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_PYTHON_FALLBACK_MAX_ROWS", "5000")):
+                raise RuntimeError(f"sqlite-vec unavailable for {len(rows)} candidates: {vec_meta.get('reason') or vec_meta}")
+
     cache, rebuilt, cache_path = _load_or_build_semantic_cache(
         index_path=index_path,
         rows=rows,
@@ -1257,9 +1891,65 @@ def _search_semantic_rows(
         model_name=model_name,
         allow_build=allow_backend_build,
     )
+    row_indices = cache.get("row_indices")
+    if backend == "gemini" and cache.get("vector_index") == "sqlite-vec":
+        with _connect(index_path) as con:
+            _ensure_schema(con)
+            refs, missing = _load_cached_persistent_embedding_refs(
+                con,
+                rows,
+                index_path=index_path,
+                granularity=granularity,
+                backend_id=backend_id,
+                model_name=model_name,
+                source=source,
+                path_filter=path_filter,
+                category=category,
+            )
+            candidate_indices = [int(i) for i in (row_indices or range(len(rows))) if refs[int(i)] is not None]
+            vec_id_to_index = {int(refs[i]["vec_id"]): i for i in candidate_indices if refs[i] is not None}
+            if row_indices is None or len(candidate_indices) == len([ref for ref in refs if ref is not None]):
+                signature = _semantic_rows_signature(rows, granularity=granularity, backend_id=backend_id)
+                vec_ids = _cached_vec_ids(
+                    refs,
+                    signature=signature,
+                    index_path=index_path,
+                    granularity=granularity,
+                    backend_id=backend_id,
+                    model_name=model_name,
+                    source=source,
+                    path_filter=path_filter,
+                    category=category,
+                )
+            else:
+                vec_ids = list(vec_id_to_index.keys())
+            qvec = _query_gemini_embedding(query, model_name=model_name)
+            vec_matches = _sqlite_vec_search(
+                con,
+                table_name=str(cache["model"].get("sqlite_vec_table") or _vec_table_name(granularity, model_name)),
+                query_vector=qvec,
+                vec_ids=vec_ids,
+                k=limit,
+            )
+        ranked = []
+        for vec_id, distance in vec_matches:
+            idx = vec_id_to_index.get(int(vec_id))
+            if idx is None:
+                continue
+            ranked.append((rows[idx], 1.0 - float(distance)))
+        return ranked, {
+            "backend": cache.get("backend"),
+            "rebuilt": rebuilt,
+            "cache_path": cache_path,
+            "candidate_count": len(rows),
+            "embedded_count": len(vec_id_to_index),
+            "missing_count": int(cache.get("missing_count") or len(missing) or 0),
+            "vector_index": "sqlite-vec",
+            "sqlite_vec": cache.get("sqlite_vec"),
+        }
+
     scores = _query_semantic_model(cache["model"], query)
     score_rows = rows
-    row_indices = cache.get("row_indices")
     if row_indices is not None:
         score_rows = [rows[int(i)] for i in row_indices]
     ranked = sorted(zip(score_rows, scores), key=lambda item: item[1], reverse=True)
@@ -1271,6 +1961,8 @@ def _search_semantic_rows(
         "candidate_count": len(rows),
         "embedded_count": len(score_rows),
         "missing_count": int(cache.get("missing_count") or 0),
+        "vector_index": cache.get("vector_index") or "python",
+        "sqlite_vec": cache.get("sqlite_vec"),
     }
 
 
@@ -2099,6 +2791,18 @@ def preindex_semantic_embeddings(
             """,
             (granularity, backend_id, semantic_model),
         ).fetchone()[0]
+        table_name = _vec_table_name(granularity, semantic_model)
+        sqlite_vec_synced = False
+        sqlite_vec_meta: dict[str, Any] = {}
+        if int(embedded_after) > 0:
+            sqlite_vec_synced, sqlite_vec_meta = _sync_sqlite_vec_rows(
+                con,
+                granularity=granularity,
+                backend_id=backend_id,
+                model_name=semantic_model,
+                table_name=table_name,
+            )
+            con.commit()
     return {
         "success": not errors,
         "index_path": str(index_path),
@@ -2111,6 +2815,8 @@ def preindex_semantic_embeddings(
         "processed": processed,
         "embedded_after": int(embedded_after),
         "remaining_estimate": max(0, len(missing) - processed),
+        "sqlite_vec_synced": sqlite_vec_synced,
+        "sqlite_vec": sqlite_vec_meta,
         "errors": errors,
     }
 

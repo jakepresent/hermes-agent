@@ -8,6 +8,7 @@ SQLite DB is just a fast search index.
 
 from __future__ import annotations
 
+import array
 import hashlib
 import json
 import os
@@ -15,6 +16,8 @@ import pickle
 import re
 import sqlite3
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
@@ -46,7 +49,7 @@ _MAX_SNIPPET_CHARS = 700
 
 # Schema version drives one-time, non-destructive migrations (e.g. the
 # observation backfill added in v2). Bump when the on-disk index shape changes.
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 # Observation lines look like "- [category] content #tags". The category must be
 # >=2 word chars starting with a letter so markdown checkboxes ("- [ ]", "- [x]")
 # are NOT misread as observations. This mirrors basic-memory's observation syntax.
@@ -115,6 +118,23 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
             content='observations',
             content_rowid='rowid'
         );
+        CREATE TABLE IF NOT EXISTS semantic_embeddings (
+            row_id TEXT NOT NULL,
+            granularity TEXT NOT NULL,
+            backend TEXT NOT NULL,
+            model TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            path TEXT NOT NULL,
+            source TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            dim INTEGER NOT NULL,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (row_id, granularity, backend, model)
+        );
+        CREATE INDEX IF NOT EXISTS semantic_embeddings_lookup
+            ON semantic_embeddings(granularity, backend, model, row_id);
+        CREATE INDEX IF NOT EXISTS semantic_embeddings_path
+            ON semantic_embeddings(path);
         """
     )
     # Backfill/rebuild is cheap at this scale and keeps external SQLite copies
@@ -256,6 +276,7 @@ def _delete_file_chunks(con: sqlite3.Connection, path: str) -> None:
     for rowid in rowids:
         con.execute("DELETE FROM chunks_fts WHERE rowid = ?", (rowid,))
     con.execute("DELETE FROM chunks WHERE path = ?", (path,))
+    con.execute("DELETE FROM semantic_embeddings WHERE path = ?", (path,))
     _delete_file_observations(con, path)
 
 
@@ -386,6 +407,7 @@ def build_index(
             con.execute("DELETE FROM chunks")
             con.execute("DELETE FROM observations_fts")
             con.execute("DELETE FROM observations")
+            con.execute("DELETE FROM semantic_embeddings")
             con.execute("DELETE FROM files")
         indexed_files = 0
         indexed_chunks = 0
@@ -767,14 +789,20 @@ def _prepare_gemini_embedding_text(text: str, *, is_query: bool, title: str = "n
 
 
 _GEMINI_REQUEST_TIMEOUT_MS = 8000
+_GEMINI_BATCH_SIZE = 100
 # Default memory_search runs inside a live chat turn. Rebuilding a full Gemini
-# vector cache can mean thousands of network calls, so keep the default path
-# bounded and fall back instead of turning retrieval into a background indexing job.
-# The google-genai embed_content call currently returns one embedding per request
-# for a list input, so cold Gemini rebuilds above this small threshold are too
-# slow for foreground chat turns.
-_GEMINI_DEFAULT_MAX_COLD_ROWS = 16
+# vector cache is allowed because Gemini's batchEmbedContents endpoint supports
+# up to 100 separate inputs per request, but keep an override for emergency
+# fallback if the provider starts failing or rate-limiting.
+_GEMINI_DEFAULT_MAX_COLD_ROWS = 25000
 _SKLEARN_DEFAULT_MAX_COLD_ROWS = 5000
+
+
+def _extract_gemini_values(embedding: Any) -> list[float]:
+    values = getattr(embedding, "values", None) or getattr(embedding, "embedding", None) or []
+    if isinstance(values, dict):
+        values = values.get("values", [])
+    return [float(v) for v in values]
 
 
 def _embed_gemini_texts(texts: Sequence[str], *, model: str) -> list[list[float]]:
@@ -811,9 +839,65 @@ def _embed_gemini_texts(texts: Sequence[str], *, model: str) -> list[list[float]
         if not embeddings:
             vectors.append([])
             continue
-        first = embeddings[0]
-        values = getattr(first, "values", None) or getattr(first, "embedding", None) or []
-        vectors.append([float(v) for v in values])
+        vectors.append(_extract_gemini_values(embeddings[0]))
+    return vectors
+
+
+def _embed_gemini_texts_batched(texts: Sequence[str], *, model: str, max_retries: int = 0) -> list[list[float]]:
+    api_key = _gemini_api_key()
+    if not api_key:
+        raise RuntimeError("Gemini semantic search requires GEMINI_API_KEY or GOOGLE_API_KEY in the environment or ~/.hermes/.env")
+    timeout_ms = int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_TIMEOUT_MS", str(_GEMINI_REQUEST_TIMEOUT_MS)))
+    batch_size = max(1, min(int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_BATCH_SIZE", str(_GEMINI_BATCH_SIZE))), 100))
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:batchEmbedContents"
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        chunk = list(texts[start:start + batch_size])
+        requests = [
+            {
+                "model": f"models/{model}",
+                "content": {"parts": [{"text": text}]},
+            }
+            for text in chunk
+        ]
+        payload = json.dumps({"requests": requests}).encode("utf-8")
+        req = urllib.request.Request(
+            endpoint,
+            data=payload,
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        attempt = 0
+        while True:
+            try:
+                with urllib.request.urlopen(req, timeout=max(1, timeout_ms / 1000)) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as exc:
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")
+                except Exception:
+                    detail = str(exc)
+                if exc.code == 429 and attempt < max_retries:
+                    retry_after = 1.0
+                    try:
+                        parsed = json.loads(detail)
+                        message = str(parsed.get("error", {}).get("message") or "")
+                        match = re.search(r"retry in ([0-9.]+)s", message, flags=re.IGNORECASE)
+                        if match:
+                            retry_after = max(1.0, min(float(match.group(1)), 65.0))
+                    except Exception:
+                        retry_after = 5.0
+                    time.sleep(retry_after)
+                    attempt += 1
+                    continue
+                raise RuntimeError(f"Gemini batch embedding failed ({exc.code}): {detail[:500]}") from exc
+        embeddings = body.get("embeddings") or []
+        if len(embeddings) != len(chunk):
+            raise RuntimeError(f"Gemini batch embedding returned {len(embeddings)} vectors for {len(chunk)} inputs")
+        for embedding in embeddings:
+            values = embedding.get("values") if isinstance(embedding, dict) else _extract_gemini_values(embedding)
+            vectors.append([float(v) for v in (values or [])])
     return vectors
 
 
@@ -830,6 +914,157 @@ def _normalize_dense_matrix(vectors: Sequence[Sequence[float]]):
     return matrix / norms
 
 
+
+
+def _semantic_content_hash(row: sqlite3.Row, granularity: str, backend_id: str) -> str:
+    return _sha256_text(f"semantic-content:{backend_id}:{granularity}:{_semantic_row_id(row, granularity)}")
+
+
+def _row_map_key(row: sqlite3.Row, granularity: str) -> str:
+    return _semantic_row_id(row, granularity)
+
+
+
+
+def _vector_to_blob(vector: Sequence[float]) -> bytes:
+    arr = array.array("f", (float(v) for v in vector))
+    if arr.itemsize != 4:  # pragma: no cover - CPython float array is 32-bit
+        raise RuntimeError("array('f') is not 32-bit on this platform")
+    return arr.tobytes()
+
+
+def _vector_from_storage(value: Any) -> list[float]:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        data = bytes(value)
+        if len(data) % 4 == 0 and data:
+            arr = array.array("f")
+            arr.frombytes(data)
+            return [float(v) for v in arr]
+        return []
+    text = str(value or "")
+    if not text:
+        return []
+    return [float(v) for v in json.loads(text)]
+
+def _load_persistent_embeddings(
+    con: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+    *,
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+) -> tuple[list[Any | None], list[int]]:
+    vectors: list[Any | None] = [None] * len(rows)
+    expected: dict[str, tuple[int, str]] = {
+        _row_map_key(row, granularity): (idx, _semantic_content_hash(row, granularity, backend_id))
+        for idx, row in enumerate(rows)
+    }
+    if not expected:
+        return vectors, []
+
+    row_ids = list(expected.keys())
+    stale_indices: set[int] = set()
+    for start in range(0, len(row_ids), 500):
+        chunk = row_ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        params: list[Any] = [granularity, backend_id, model_name, *chunk]
+        hits = con.execute(
+            f"""
+            SELECT row_id, content_hash, embedding FROM semantic_embeddings
+            WHERE granularity = ? AND backend = ? AND model = ?
+              AND row_id IN ({placeholders})
+            """,
+            params,
+        ).fetchall()
+        for hit in hits:
+            row_id = str(hit["row_id"])
+            expected_entry = expected.get(row_id)
+            if not expected_entry:
+                continue
+            idx, content_hash = expected_entry
+            if hit["content_hash"] != content_hash:
+                stale_indices.add(idx)
+                continue
+            raw = hit["embedding"]
+            if isinstance(raw, (bytes, bytearray, memoryview)) and len(bytes(raw)) % 4 == 0 and raw:
+                vectors[idx] = bytes(raw)
+            else:
+                try:
+                    vector = _vector_from_storage(raw)
+                except Exception:
+                    stale_indices.add(idx)
+                    continue
+                if vector:
+                    vectors[idx] = vector
+                else:
+                    stale_indices.add(idx)
+
+    missing = [idx for idx, vector in enumerate(vectors) if vector is None or idx in stale_indices]
+    return vectors, missing
+
+
+def _store_persistent_embeddings(
+    con: sqlite3.Connection,
+    rows: Sequence[sqlite3.Row],
+    *,
+    vectors: Sequence[Sequence[float]],
+    granularity: str,
+    backend_id: str,
+    model_name: str,
+) -> None:
+    now = time.time()
+    for row, vector in zip(rows, vectors):
+        values = [float(v) for v in vector]
+        row_id = _row_map_key(row, granularity)
+        con.execute(
+            """
+            INSERT INTO semantic_embeddings(
+                row_id, granularity, backend, model, content_hash, path, source, embedding, dim, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(row_id, granularity, backend, model) DO UPDATE SET
+                content_hash=excluded.content_hash,
+                path=excluded.path,
+                source=excluded.source,
+                embedding=excluded.embedding,
+                dim=excluded.dim,
+                updated_at=excluded.updated_at
+            """,
+            (
+                row_id,
+                granularity,
+                backend_id,
+                model_name,
+                _semantic_content_hash(row, granularity, backend_id),
+                str(row["path"]),
+                str(row["source"]),
+                _vector_to_blob(values),
+                len(values),
+                now,
+            ),
+        )
+
+
+
+def _normalize_persistent_vector_matrix(vectors: Sequence[Any]):
+    try:
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - numpy is expected in Hermes env
+        raise RuntimeError("Gemini semantic search requires numpy for local vector scoring") from exc
+    if not vectors:
+        raise RuntimeError("Gemini persistent embedding cache returned no vectors")
+    arrays = []
+    for vector in vectors:
+        if isinstance(vector, (bytes, bytearray, memoryview)):
+            arrays.append(np.frombuffer(bytes(vector), dtype=np.float32))
+        else:
+            arrays.append(np.asarray(vector, dtype=np.float32))
+    matrix = np.vstack(arrays).astype("float32", copy=False)
+    if matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] == 0:
+        raise RuntimeError("Gemini persistent embedding cache returned empty vectors")
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
 def _build_gemini_semantic_model(rows: Sequence[sqlite3.Row], granularity: str, *, model: str) -> dict[str, Any]:
     docs = _semantic_documents(rows, granularity)
     titles = [str(row["path"]) for row in rows]
@@ -837,7 +1072,7 @@ def _build_gemini_semantic_model(rows: Sequence[sqlite3.Row], granularity: str, 
         _prepare_gemini_embedding_text(text, is_query=False, title=title)
         for text, title in zip(docs, titles)
     ]
-    vectors = _embed_gemini_texts(prepared, model=model)
+    vectors = _embed_gemini_texts_batched(prepared, model=model)
     matrix = _normalize_dense_matrix(vectors)
     return {"backend": f"gemini:{model}", "model": model, "matrix": matrix}
 
@@ -875,6 +1110,69 @@ def _load_or_build_semantic_cache(
     allow_build: bool = True,
 ) -> tuple[dict[str, Any], bool, str]:
     backend_id = f"gemini:{model_name}" if backend == "gemini" else "sklearn_lsa_v1"
+    if backend == "gemini":
+        with _connect(index_path) as con:
+            _ensure_schema(con)
+            existing, missing = _load_persistent_embeddings(
+                con, rows, granularity=granularity, backend_id=backend_id, model_name=model_name
+            )
+            if missing and not allow_build:
+                available_indices = [i for i, vector in enumerate(existing) if vector is not None]
+                coverage = 1.0 - (len(missing) / max(1, len(rows)))
+                min_partial = float(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_MIN_PARTIAL_COVERAGE", "0.95"))
+                if not available_indices or coverage < min_partial:
+                    raise RuntimeError(
+                        f"{backend} semantic cache is only {coverage:.1%} complete ({len(available_indices)}/{len(rows)}); refusing partial broad scoring"
+                    )
+                vectors = [existing[i] for i in available_indices if existing[i] is not None]
+                matrix = _normalize_persistent_vector_matrix(vectors)
+                model = {"backend": backend_id, "model": model_name, "matrix": matrix}
+                return {
+                    "fingerprint": _semantic_fingerprint(rows, granularity=granularity, backend=backend_id),
+                    "granularity": granularity,
+                    "backend": backend_id,
+                    "built_at": time.time(),
+                    "model": model,
+                    "row_indices": available_indices,
+                    "missing_count": len(missing),
+                }, False, f"{index_path}#semantic_embeddings"
+            rebuilt = bool(missing)
+            if missing:
+                batch_size = max(1, min(int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_BATCH_SIZE", str(_GEMINI_BATCH_SIZE))), 100))
+                for start in range(0, len(missing), batch_size):
+                    batch_indices = missing[start:start + batch_size]
+                    docs = _semantic_documents([rows[i] for i in batch_indices], granularity)
+                    prepared = [
+                        _prepare_gemini_embedding_text(text, is_query=False, title=str(rows[i]["path"]))
+                        for text, i in zip(docs, batch_indices)
+                    ]
+                    new_vectors = _embed_gemini_texts_batched(prepared, model=model_name)
+                    _store_persistent_embeddings(
+                        con,
+                        [rows[i] for i in batch_indices],
+                        vectors=new_vectors,
+                        granularity=granularity,
+                        backend_id=backend_id,
+                        model_name=model_name,
+                    )
+                    con.commit()
+                    for i, vector in zip(batch_indices, new_vectors):
+                        existing[i] = _vector_to_blob(vector)
+        vectors = [vector for vector in existing if vector is not None]
+        if len(vectors) != len(rows):
+            raise RuntimeError("Gemini persistent embedding cache returned incomplete vectors")
+        matrix = _normalize_persistent_vector_matrix(vectors)
+        model = {"backend": backend_id, "model": model_name, "matrix": matrix}
+        return {
+            "fingerprint": _semantic_fingerprint(rows, granularity=granularity, backend=backend_id),
+            "granularity": granularity,
+            "backend": backend_id,
+            "built_at": time.time(),
+            "model": model,
+            "row_indices": list(range(len(rows))),
+            "missing_count": 0,
+        }, rebuilt, f"{index_path}#semantic_embeddings"
+
     cache_path = _semantic_index_path(index_path, granularity, backend_id)
     fingerprint = _semantic_fingerprint(rows, granularity=granularity, backend=backend_id)
     try:
@@ -893,14 +1191,11 @@ def _load_or_build_semantic_cache(
         raise RuntimeError(
             f"{backend} semantic cache is cold for {len(rows)} candidates; refusing live rebuild"
         )
-    if backend == "gemini":
-        model = _build_gemini_semantic_model(rows, granularity, model=model_name)
-    else:
-        texts = _semantic_documents(rows, granularity)
-        model = _build_semantic_model(texts)
-        backend_id = str(model["backend"])
-        fingerprint = _semantic_fingerprint(rows, granularity=granularity, backend=backend_id)
-        cache_path = _semantic_index_path(index_path, granularity, backend_id)
+    texts = _semantic_documents(rows, granularity)
+    model = _build_semantic_model(texts)
+    backend_id = str(model["backend"])
+    fingerprint = _semantic_fingerprint(rows, granularity=granularity, backend=backend_id)
+    cache_path = _semantic_index_path(index_path, granularity, backend_id)
     payload = {
         "fingerprint": fingerprint,
         "granularity": granularity,
@@ -929,6 +1224,7 @@ def _search_semantic_rows(
     category: str,
     backend: str,
     model_name: str,
+    semantic_rebuild: str = "auto",
     live_rebuild: bool = True,
 ) -> tuple[list[tuple[sqlite3.Row, float]], dict[str, Any]]:
     with _connect(index_path) as con:
@@ -944,7 +1240,12 @@ def _search_semantic_rows(
         return [], {"backend": None, "rebuilt": False, "candidate_count": 0}
     max_cold_rows = int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_MAX_COLD_ROWS", str(_GEMINI_DEFAULT_MAX_COLD_ROWS)))
     if backend == "gemini":
-        allow_backend_build = live_rebuild or len(rows) <= max_cold_rows
+        if semantic_rebuild == "force":
+            allow_backend_build = True
+        elif semantic_rebuild == "never":
+            allow_backend_build = False
+        else:
+            allow_backend_build = live_rebuild or len(rows) <= max_cold_rows
     else:
         sklearn_max_cold_rows = int(os.getenv("HERMES_MEMORY_SEARCH_SKLEARN_MAX_COLD_ROWS", str(_SKLEARN_DEFAULT_MAX_COLD_ROWS)))
         allow_backend_build = live_rebuild or len(rows) <= sklearn_max_cold_rows
@@ -957,13 +1258,19 @@ def _search_semantic_rows(
         allow_build=allow_backend_build,
     )
     scores = _query_semantic_model(cache["model"], query)
-    ranked = sorted(zip(rows, scores), key=lambda item: item[1], reverse=True)
+    score_rows = rows
+    row_indices = cache.get("row_indices")
+    if row_indices is not None:
+        score_rows = [rows[int(i)] for i in row_indices]
+    ranked = sorted(zip(score_rows, scores), key=lambda item: item[1], reverse=True)
     ranked = [(row, score) for row, score in ranked if score > 0][:limit]
     return ranked, {
         "backend": cache.get("backend"),
         "rebuilt": rebuilt,
         "cache_path": cache_path,
         "candidate_count": len(rows),
+        "embedded_count": len(score_rows),
+        "missing_count": int(cache.get("missing_count") or 0),
     }
 
 
@@ -1073,6 +1380,7 @@ def search_index(
     mode: str = "hybrid",
     semantic_backend: str = "gemini",
     semantic_model: str = "gemini-embedding-2",
+    semantic_rebuild: str = "auto",
 ) -> dict[str, Any]:
     query = (query or "").strip()
     granularity = (granularity or "chunk").strip().lower()
@@ -1080,8 +1388,17 @@ def search_index(
     mode = (mode or "hybrid").strip().lower()
     semantic_backend = (semantic_backend or "gemini").strip().lower()
     semantic_model = (semantic_model or "gemini-embedding-2").strip()
+    semantic_rebuild = (semantic_rebuild or "auto").strip().lower()
     if mode not in {"keyword", "semantic", "hybrid"}:
         return {"success": False, "error": "mode must be one of: keyword, semantic, hybrid"}
+    if semantic_rebuild not in {"auto", "never", "force"}:
+        return {"success": False, "error": "semantic_rebuild must be one of: auto, never, force"}
+    if mode == "hybrid" and semantic_backend == "gemini" and semantic_rebuild == "auto" and not path_filter and (not source or source == "all"):
+        # Normal broad memory lookups should be OpenClaw-like: embed the query
+        # once and score against vectors already persisted in SQLite. A full
+        # cold rebuild belongs in an explicit preindex/force path, not a
+        # foreground Discord turn.
+        semantic_rebuild = "never"
     if semantic_backend not in {"sklearn", "gemini"}:
         return {"success": False, "error": "semantic_backend must be one of: sklearn, gemini"}
     if granularity not in {"chunk", "observation"}:
@@ -1117,6 +1434,7 @@ def search_index(
                 category=category,
                 backend=semantic_backend,
                 model_name=semantic_model,
+                semantic_rebuild=semantic_rebuild,
                 live_rebuild=(mode == "semantic"),
             )
         except Exception as exc:  # noqa: BLE001 - semantic backend is best-effort in hybrid mode
@@ -1138,6 +1456,7 @@ def search_index(
                         category=category,
                         backend="sklearn",
                         model_name=semantic_model,
+                        semantic_rebuild="never",
                         live_rebuild=False,
                     )
                     semantic_meta["requested_backend"] = semantic_backend
@@ -1704,6 +2023,97 @@ def import_openclaw_legacy_sessions(
     }
 
 
+
+
+def preindex_semantic_embeddings(
+    *,
+    index_path: Path | str = DEFAULT_INDEX_PATH,
+    roots: Optional[Sequence[tuple[Path | str, str]]] = None,
+    source: str = "all",
+    path_filter: str = "",
+    granularity: str = "chunk",
+    category: str = "",
+    semantic_model: str = "gemini-embedding-2",
+    max_batches: int = 0,
+    freshness_seconds: int = 60,
+    retry_429: bool = True,
+) -> dict[str, Any]:
+    index_path = Path(index_path).expanduser()
+    roots_norm = _normalize_roots(roots)
+    indexed = None
+    if _index_is_stale(index_path, roots_norm, freshness_seconds):
+        indexed = build_index(index_path=index_path, roots=roots_norm)
+    granularity = (granularity or "chunk").strip().lower()
+    category = (category or "").strip().lower()
+    if category and granularity == "chunk":
+        granularity = "observation"
+    if granularity not in {"chunk", "observation"}:
+        return {"success": False, "error": "granularity must be one of: chunk, observation"}
+
+    backend_id = f"gemini:{semantic_model}"
+    with _connect(index_path) as con:
+        _ensure_schema(con)
+        rows = _semantic_candidate_rows(
+            con,
+            granularity=granularity,
+            source=source,
+            path_filter=path_filter,
+            category=category,
+        )
+        existing, missing = _load_persistent_embeddings(
+            con, rows, granularity=granularity, backend_id=backend_id, model_name=semantic_model
+        )
+        batch_size = max(1, min(int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_BATCH_SIZE", str(_GEMINI_BATCH_SIZE))), 100))
+        max_items = len(missing) if not max_batches else min(len(missing), max_batches * batch_size)
+        processed = 0
+        errors: list[str] = []
+        for start in range(0, max_items, batch_size):
+            batch_indices = missing[start:start + batch_size]
+            docs = _semantic_documents([rows[i] for i in batch_indices], granularity)
+            prepared = [
+                _prepare_gemini_embedding_text(text, is_query=False, title=str(rows[i]["path"]))
+                for text, i in zip(docs, batch_indices)
+            ]
+            try:
+                new_vectors = _embed_gemini_texts_batched(
+                    prepared, model=semantic_model, max_retries=(1 if retry_429 else 0)
+                )
+            except Exception as exc:  # noqa: BLE001 - return progress + blocker
+                errors.append(str(exc))
+                break
+            _store_persistent_embeddings(
+                con,
+                [rows[i] for i in batch_indices],
+                vectors=new_vectors,
+                granularity=granularity,
+                backend_id=backend_id,
+                model_name=semantic_model,
+            )
+            con.commit()
+            processed += len(batch_indices)
+
+        embedded_after = con.execute(
+            """
+            SELECT COUNT(*) FROM semantic_embeddings
+            WHERE granularity = ? AND backend = ? AND model = ?
+            """,
+            (granularity, backend_id, semantic_model),
+        ).fetchone()[0]
+    return {
+        "success": not errors,
+        "index_path": str(index_path),
+        "index_updated": indexed,
+        "granularity": granularity,
+        "backend": backend_id,
+        "model": semantic_model,
+        "candidate_count": len(rows),
+        "missing_before": len(missing),
+        "processed": processed,
+        "embedded_after": int(embedded_after),
+        "remaining_estimate": max(0, len(missing) - processed),
+        "errors": errors,
+    }
+
 def memory_search_tool(
     query: str,
     source: str = "all",
@@ -1716,6 +2126,7 @@ def memory_search_tool(
     mode: str = "hybrid",
     semantic_backend: str = "gemini",
     semantic_model: str = "gemini-embedding-2",
+    semantic_rebuild: str = "auto",
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
     task_id: str | None = None,
@@ -1737,6 +2148,7 @@ def memory_search_tool(
                 mode=mode,
                 semantic_backend=semantic_backend,
                 semantic_model=semantic_model,
+                semantic_rebuild=semantic_rebuild,
             ),
             ensure_ascii=False,
         )
@@ -1793,6 +2205,11 @@ MEMORY_SEARCH_SCHEMA = {
                 "type": "string",
                 "description": "Embedding model name when semantic_backend='gemini'. Default: gemini-embedding-2.",
             },
+            "semantic_rebuild": {
+                "type": "string",
+                "enum": ["auto", "never", "force"],
+                "description": "Controls semantic cache rebuilds. Default 'auto' may embed bounded/cold candidates; 'never' uses only persisted/cached vectors plus keyword fallback; 'force' explicitly allows a rebuild.",
+            },
             "granularity": {
                 "type": "string",
                 "enum": ["chunk", "observation"],
@@ -1828,6 +2245,7 @@ registry.register(
         mode=args.get("mode", "hybrid"),
         semantic_backend=args.get("semantic_backend", "gemini"),
         semantic_model=args.get("semantic_model", "gemini-embedding-2"),
+        semantic_rebuild=args.get("semantic_rebuild", "auto"),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_memory_search_requirements,

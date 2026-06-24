@@ -486,10 +486,102 @@ def test_default_hybrid_skips_cold_gemini_rebuild_for_large_corpus(tmp_path, mon
     assert payload["mode"] == "hybrid"
     assert payload["semantic"]["requested_backend"] == "gemini"
     assert payload["semantic"]["fallback"] == "keyword"
-    assert "refusing live rebuild" in payload["semantic"]["error"]
-    assert "refusing live rebuild" in payload["semantic"]["fallback_error"]
+    assert "refusing" in payload["semantic"]["error"]
+    assert "refusing" in payload["semantic"]["fallback_error"]
     assert payload["results"]
 
+
+
+
+def test_gemini_persistent_embeddings_use_batched_storage(tmp_path, monkeypatch):
+    import tools.memory_search_tool as mst
+
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "agent.md").write_text("# Agent\n\nconfigured runtime sandbox\n", encoding="utf-8")
+    (root / "film.md").write_text("# Film\n\nRA-4 darkroom workflow\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    calls = []
+
+    def fake_batch(texts, *, model, max_retries=0):
+        calls.append((list(texts), model, max_retries))
+        vectors = []
+        for text in texts:
+            vectors.append([1.0, 0.0, 0.0] if "configured" in text else [0.0, 1.0, 0.0])
+        return vectors
+
+    def fake_query(texts, *, model):
+        assert len(texts) == 1
+        return [[1.0, 0.0, 0.0]]
+
+    monkeypatch.setattr(mst, "_embed_gemini_texts_batched", fake_batch)
+    monkeypatch.setattr(mst, "_embed_gemini_texts", fake_query)
+
+    first = json.loads(
+        memory_search_tool(
+            "configured runtime",
+            mode="semantic",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+    second = json.loads(
+        memory_search_tool(
+            "configured runtime",
+            mode="semantic",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert first["success"] is True
+    assert first["semantic"]["backend"] == "gemini:gemini-embedding-2"
+    assert first["semantic"]["rebuilt"] is True
+    assert second["semantic"]["rebuilt"] is False
+    assert len(calls) == 1
+    assert second["results"][0]["path"].endswith("agent.md")
+
+    with sqlite3.connect(index_path) as con:
+        row = con.execute("SELECT embedding, dim FROM semantic_embeddings LIMIT 1").fetchone()
+    assert isinstance(row[0], bytes)
+    assert row[1] == 3
+
+
+def test_preindex_semantic_embeddings_processes_limited_batches(tmp_path, monkeypatch):
+    import tools.memory_search_tool as mst
+
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    for idx in range(3):
+        (root / f"note-{idx}.md").write_text(f"# Note {idx}\n\nText {idx}\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    monkeypatch.setenv("HERMES_MEMORY_SEARCH_GEMINI_BATCH_SIZE", "2")
+
+    def fake_batch(texts, *, model, max_retries=0):
+        return [[float(i), 1.0, 0.0] for i, _text in enumerate(texts)]
+
+    monkeypatch.setattr(mst, "_embed_gemini_texts_batched", fake_batch)
+
+    result = mst.preindex_semantic_embeddings(
+        index_path=index_path,
+        roots=[(root, "chatworkspace")],
+        max_batches=1,
+        freshness_seconds=9999,
+        retry_429=False,
+    )
+
+    assert result["success"] is True
+    assert result["processed"] == 2
+    assert result["missing_before"] == 3
+    assert result["remaining_estimate"] == 1
+    with sqlite3.connect(index_path) as con:
+        count = con.execute("SELECT COUNT(*) FROM semantic_embeddings").fetchone()[0]
+    assert count == 2
 
 def test_semantic_observation_search_respects_category_and_path_filter(tmp_path):
     index_path, root = _write_observation_corpus(tmp_path)

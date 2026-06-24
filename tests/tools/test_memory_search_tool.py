@@ -391,7 +391,7 @@ def test_default_search_mode_is_hybrid(tmp_path):
 
     assert payload["success"] is True
     assert payload["mode"] == "hybrid"
-    assert payload["semantic"]["backend"].startswith("sklearn_")
+    assert payload["semantic"]["backend"] == "sklearn_lsa_v1"
     assert payload["results"]
 
 
@@ -449,8 +449,8 @@ def test_hybrid_mode_merges_semantic_and_keyword_results(tmp_path):
 
     assert hybrid["success"] is True
     assert hybrid["mode"] == "hybrid"
-    assert hybrid["semantic"]["backend"].startswith("sklearn_")
-    assert hybrid["query_strategy"] == "semantic_lsa+keyword_rrf"
+    assert hybrid["semantic"]["backend"] == "sklearn_lsa_v1"
+    assert hybrid["query_strategy"] == "semantic+keyword_rrf"
     assert hybrid["results"]
     assert hybrid["results"][0]["path"].endswith("agent.md")
 
@@ -461,6 +461,7 @@ def test_semantic_observation_search_respects_category_and_path_filter(tmp_path)
         memory_search_tool(
             "production batch",
             mode="semantic",
+            semantic_backend="sklearn",
             granularity="observation",
             category="status",
             path_filter="mamiya",
@@ -500,3 +501,32 @@ def test_search_rejects_unknown_semantic_backend(tmp_path):
 
     assert payload["success"] is False
     assert "semantic_backend" in payload["error"]
+
+
+def test_semantic_gemini_backend_error_is_reported_when_key_missing(tmp_path, monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "agent.md").write_text("# Agent\n\nconfigured agent runtime\n", encoding="utf-8")
+    hermes_home = tmp_path / "hermes"
+    hermes_home.mkdir()
+    (hermes_home / ".env").write_text("", encoding="utf-8")
+    index_path = tmp_path / "idx.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    import tools.memory_search_tool as mst
+    monkeypatch.setattr(mst, "get_hermes_home", lambda: hermes_home)
+    payload = json.loads(
+        memory_search_tool(
+            "configured runtime",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            mode="semantic",
+            semantic_backend="gemini",
+            freshness_seconds=9999,
+        )
+    )
+
+    assert payload["success"] is False
+    assert "Gemini" in payload["error"]

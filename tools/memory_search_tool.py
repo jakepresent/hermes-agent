@@ -1030,14 +1030,14 @@ def search_index(
     granularity: str = "chunk",
     category: str = "",
     mode: str = "hybrid",
-    semantic_backend: str = "sklearn",
+    semantic_backend: str = "gemini",
     semantic_model: str = "gemini-embedding-2",
 ) -> dict[str, Any]:
     query = (query or "").strip()
     granularity = (granularity or "chunk").strip().lower()
     category = (category or "").strip().lower()
     mode = (mode or "hybrid").strip().lower()
-    semantic_backend = (semantic_backend or "sklearn").strip().lower()
+    semantic_backend = (semantic_backend or "gemini").strip().lower()
     semantic_model = (semantic_model or "gemini-embedding-2").strip()
     if mode not in {"keyword", "semantic", "hybrid"}:
         return {"success": False, "error": "mode must be one of: keyword, semantic, hybrid"}
@@ -1065,17 +1065,30 @@ def search_index(
     limit = max(1, min(int(limit or 8), 25))
 
     if mode in {"semantic", "hybrid"} and query:
-        semantic_rows, semantic_meta = _search_semantic_rows(
-            query,
-            index_path=index_path,
-            limit=limit,
-            source=source,
-            path_filter=path_filter,
-            granularity=granularity,
-            category=category,
-            backend=semantic_backend,
-            model_name=semantic_model,
-        )
+        try:
+            semantic_rows, semantic_meta = _search_semantic_rows(
+                query,
+                index_path=index_path,
+                limit=limit,
+                source=source,
+                path_filter=path_filter,
+                granularity=granularity,
+                category=category,
+                backend=semantic_backend,
+                model_name=semantic_model,
+            )
+        except Exception as exc:  # noqa: BLE001 - semantic backend is best-effort in hybrid mode
+            if mode == "semantic":
+                return {"success": False, "error": f"semantic search failed: {exc}"}
+            semantic_rows = []
+            fallback_backend = "sklearn_lsa_v1" if semantic_backend == "gemini" else semantic_backend
+            semantic_meta = {
+                "backend": fallback_backend,
+                "requested_backend": semantic_backend,
+                "model": semantic_model,
+                "error": str(exc),
+                "fallback": "keyword",
+            }
         if granularity == "observation":
             semantic_results = [
                 _observation_result_from_row(row, score=score)
@@ -1096,7 +1109,7 @@ def search_index(
                 index_path=index_path,
                 indexed=indexed,
                 category=category,
-                query_strategy="semantic_lsa",
+                query_strategy="semantic",
                 semantic=semantic_meta,
             )
     else:
@@ -1131,7 +1144,7 @@ def search_index(
                 index_path=index_path,
                 indexed=indexed,
                 category=category,
-                query_strategy="semantic_lsa+keyword_rrf",
+                query_strategy="semantic+keyword_rrf",
                 semantic=semantic_meta,
             )
         return obs_payload
@@ -1189,7 +1202,7 @@ def search_index(
             granularity="chunk",
             limit=limit,
         )
-        query_strategy = "semantic_lsa+keyword_rrf"
+        query_strategy = "semantic+keyword_rrf"
     return _format_search_payload(
         query=query,
         mode=mode,
@@ -1627,7 +1640,7 @@ def memory_search_tool(
     granularity: str = "chunk",
     category: str = "",
     mode: str = "hybrid",
-    semantic_backend: str = "sklearn",
+    semantic_backend: str = "gemini",
     semantic_model: str = "gemini-embedding-2",
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
@@ -1679,7 +1692,7 @@ MEMORY_SEARCH_SCHEMA = {
         "individual fact lines written as '- [category] text #tags' with exact file line numbers. Use "
         "observation granularity (or pass a category) to pull a specific fact or list all facts of a kind, "
         "e.g. category='decision' to find decisions across every project without reading whole files. "
-        "Search mode defaults to 'hybrid' so normal calls use the local semantic cache plus keyword ranking."
+        "Search mode defaults to 'hybrid' so normal calls use Gemini embeddings plus keyword ranking."
     ),
     "parameters": {
         "type": "object",
@@ -1700,7 +1713,7 @@ MEMORY_SEARCH_SCHEMA = {
             "semantic_backend": {
                 "type": "string",
                 "enum": ["sklearn", "gemini"],
-                "description": "Semantic backend for mode='semantic' or 'hybrid'. Default 'sklearn' is local/offline LSA over TF-IDF. 'gemini' uses Gemini embeddings and requires GEMINI_API_KEY or GOOGLE_API_KEY.",
+                "description": "Semantic backend for mode='semantic' or 'hybrid'. Default 'gemini' uses Gemini embeddings and requires GEMINI_API_KEY or GOOGLE_API_KEY. 'sklearn' is local/offline LSA over TF-IDF.",
             },
             "semantic_model": {
                 "type": "string",
@@ -1739,7 +1752,7 @@ registry.register(
         granularity=args.get("granularity", "chunk"),
         category=args.get("category", ""),
         mode=args.get("mode", "hybrid"),
-        semantic_backend=args.get("semantic_backend", "sklearn"),
+        semantic_backend=args.get("semantic_backend", "gemini"),
         semantic_model=args.get("semantic_model", "gemini-embedding-2"),
         task_id=kw.get("task_id"),
     ),

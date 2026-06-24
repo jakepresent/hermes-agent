@@ -607,13 +607,14 @@ def _snippet(text: str, query: str) -> str:
     return snippet
 
 
-def _semantic_index_path(index_path: Path | str, granularity: str) -> Path:
+def _semantic_index_path(index_path: Path | str, granularity: str, backend: str) -> Path:
     """Return the sidecar semantic cache path for a SQLite memory index."""
     path = Path(index_path).expanduser()
     safe_granularity = re.sub(r"[^A-Za-z0-9_-]+", "_", granularity or "chunk")
+    safe_backend = re.sub(r"[^A-Za-z0-9_-]+", "_", backend or "sklearn")
     if path == DEFAULT_INDEX_PATH:
-        return get_hermes_home() / f"memory_search_semantic_{safe_granularity}.pkl"
-    return path.with_suffix(path.suffix + f".{safe_granularity}.semantic.pkl")
+        return get_hermes_home() / f"memory_search_semantic_{safe_backend}_{safe_granularity}.pkl"
+    return path.with_suffix(path.suffix + f".{safe_backend}.{safe_granularity}.semantic.pkl")
 
 
 def _semantic_row_id(row: sqlite3.Row, granularity: str) -> str:
@@ -734,7 +735,94 @@ def _build_semantic_model(texts: Sequence[str]) -> dict[str, Any]:
     }
 
 
+def _gemini_api_key() -> str:
+    """Resolve Gemini API key from the live environment or Hermes .env."""
+    for key in ("GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        value = os.getenv(key)
+        if value:
+            return value
+    env_path = get_hermes_home() / ".env"
+    try:
+        for line in env_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            name, value = stripped.split("=", 1)
+            name = name.replace("export ", "").strip()
+            if name not in {"GEMINI_API_KEY", "GOOGLE_API_KEY"}:
+                continue
+            value = value.strip().strip('"').strip("'")
+            if value:
+                return value
+    except OSError:
+        pass
+    return ""
+
+
+def _prepare_gemini_embedding_text(text: str, *, is_query: bool, title: str = "none") -> str:
+    if is_query:
+        return f"task: search result | query: {text}"
+    clean_title = title or "none"
+    return f"title: {clean_title} | text: {text}"
+
+
+def _embed_gemini_texts(texts: Sequence[str], *, model: str) -> list[list[float]]:
+    api_key = _gemini_api_key()
+    if not api_key:
+        raise RuntimeError("Gemini semantic search requires GEMINI_API_KEY or GOOGLE_API_KEY in the environment or ~/.hermes/.env")
+    try:
+        from google import genai
+    except Exception as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("Gemini semantic search requires the google-genai package") from exc
+
+    client = genai.Client(api_key=api_key)
+    vectors: list[list[float]] = []
+    for text in texts:
+        response = client.models.embed_content(model=model, contents=text)
+        embeddings = getattr(response, "embeddings", None) or []
+        if not embeddings:
+            vectors.append([])
+            continue
+        first = embeddings[0]
+        values = getattr(first, "values", None) or getattr(first, "embedding", None) or []
+        vectors.append([float(v) for v in values])
+    return vectors
+
+
+def _normalize_dense_matrix(vectors: Sequence[Sequence[float]]):
+    try:
+        import numpy as np
+    except Exception as exc:  # pragma: no cover - numpy is expected in Hermes env
+        raise RuntimeError("Gemini semantic search requires numpy for local vector scoring") from exc
+    matrix = np.asarray(vectors, dtype="float32")
+    if matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] == 0:
+        raise RuntimeError("Gemini embedding backend returned empty vectors")
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return matrix / norms
+
+
+def _build_gemini_semantic_model(rows: Sequence[sqlite3.Row], granularity: str, *, model: str) -> dict[str, Any]:
+    docs = _semantic_documents(rows, granularity)
+    titles = [str(row["path"]) for row in rows]
+    prepared = [
+        _prepare_gemini_embedding_text(text, is_query=False, title=title)
+        for text, title in zip(docs, titles)
+    ]
+    vectors = _embed_gemini_texts(prepared, model=model)
+    matrix = _normalize_dense_matrix(vectors)
+    return {"backend": f"gemini:{model}", "model": model, "matrix": matrix}
+
+
 def _query_semantic_model(model: dict[str, Any], query: str) -> list[float]:
+    backend = str(model.get("backend") or "")
+    if backend.startswith("gemini:"):
+        qtext = _prepare_gemini_embedding_text(query, is_query=True)
+        qvecs = _embed_gemini_texts([qtext], model=str(model.get("model") or "gemini-embedding-2"))
+        qmatrix = _normalize_dense_matrix(qvecs)
+        scores = model["matrix"].dot(qmatrix[0])
+        return [float(v) for v in scores.ravel()]
+
     from sklearn.preprocessing import normalize
 
     q = model["vectorizer"].transform([query])
@@ -754,24 +842,32 @@ def _load_or_build_semantic_cache(
     index_path: Path,
     rows: Sequence[sqlite3.Row],
     granularity: str,
+    backend: str,
+    model_name: str,
 ) -> tuple[dict[str, Any], bool, str]:
-    cache_path = _semantic_index_path(index_path, granularity)
-    backend = "sklearn_lsa_v1"
-    fingerprint = _semantic_fingerprint(rows, granularity=granularity, backend=backend)
+    backend_id = f"gemini:{model_name}" if backend == "gemini" else "sklearn_lsa_v1"
+    cache_path = _semantic_index_path(index_path, granularity, backend_id)
+    fingerprint = _semantic_fingerprint(rows, granularity=granularity, backend=backend_id)
     try:
         with cache_path.open("rb") as fh:
             cached = pickle.load(fh)
         if (
             cached.get("fingerprint") == fingerprint
             and cached.get("granularity") == granularity
-            and cached.get("backend", "").startswith("sklearn_")
+            and cached.get("backend") == backend_id
         ):
             return cached, False, str(cache_path)
     except Exception:
         pass
 
-    texts = _semantic_documents(rows, granularity)
-    model = _build_semantic_model(texts)
+    if backend == "gemini":
+        model = _build_gemini_semantic_model(rows, granularity, model=model_name)
+    else:
+        texts = _semantic_documents(rows, granularity)
+        model = _build_semantic_model(texts)
+        backend_id = str(model["backend"])
+        fingerprint = _semantic_fingerprint(rows, granularity=granularity, backend=backend_id)
+        cache_path = _semantic_index_path(index_path, granularity, backend_id)
     payload = {
         "fingerprint": fingerprint,
         "granularity": granularity,
@@ -798,6 +894,8 @@ def _search_semantic_rows(
     path_filter: str,
     granularity: str,
     category: str,
+    backend: str,
+    model_name: str,
 ) -> tuple[list[tuple[sqlite3.Row, float]], dict[str, Any]]:
     with _connect(index_path) as con:
         _ensure_schema(con)
@@ -814,6 +912,8 @@ def _search_semantic_rows(
         index_path=index_path,
         rows=rows,
         granularity=granularity,
+        backend=backend,
+        model_name=model_name,
     )
     scores = _query_semantic_model(cache["model"], query)
     ranked = sorted(zip(rows, scores), key=lambda item: item[1], reverse=True)
@@ -929,14 +1029,20 @@ def search_index(
     render_format: str = "json",
     granularity: str = "chunk",
     category: str = "",
-    mode: str = "keyword",
+    mode: str = "hybrid",
+    semantic_backend: str = "sklearn",
+    semantic_model: str = "gemini-embedding-2",
 ) -> dict[str, Any]:
     query = (query or "").strip()
     granularity = (granularity or "chunk").strip().lower()
     category = (category or "").strip().lower()
-    mode = (mode or "keyword").strip().lower()
+    mode = (mode or "hybrid").strip().lower()
+    semantic_backend = (semantic_backend or "sklearn").strip().lower()
+    semantic_model = (semantic_model or "gemini-embedding-2").strip()
     if mode not in {"keyword", "semantic", "hybrid"}:
         return {"success": False, "error": "mode must be one of: keyword, semantic, hybrid"}
+    if semantic_backend not in {"sklearn", "gemini"}:
+        return {"success": False, "error": "semantic_backend must be one of: sklearn, gemini"}
     if granularity not in {"chunk", "observation"}:
         return {"success": False, "error": "granularity must be one of: chunk, observation"}
     # A category filter implies observation granularity; let it be a shorthand.
@@ -967,6 +1073,8 @@ def search_index(
             path_filter=path_filter,
             granularity=granularity,
             category=category,
+            backend=semantic_backend,
+            model_name=semantic_model,
         )
         if granularity == "observation":
             semantic_results = [
@@ -1518,7 +1626,9 @@ def memory_search_tool(
     render_format: str = "json",
     granularity: str = "chunk",
     category: str = "",
-    mode: str = "keyword",
+    mode: str = "hybrid",
+    semantic_backend: str = "sklearn",
+    semantic_model: str = "gemini-embedding-2",
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
     task_id: str | None = None,
@@ -1538,6 +1648,8 @@ def memory_search_tool(
                 granularity=granularity,
                 category=category,
                 mode=mode,
+                semantic_backend=semantic_backend,
+                semantic_model=semantic_model,
             ),
             ensure_ascii=False,
         )
@@ -1566,7 +1678,8 @@ MEMORY_SEARCH_SCHEMA = {
         "Two granularities: 'chunk' (default) returns heading-sized passages; 'observation' returns "
         "individual fact lines written as '- [category] text #tags' with exact file line numbers. Use "
         "observation granularity (or pass a category) to pull a specific fact or list all facts of a kind, "
-        "e.g. category='decision' to find decisions across every project without reading whole files."
+        "e.g. category='decision' to find decisions across every project without reading whole files. "
+        "Search mode defaults to 'hybrid' so normal calls use the local semantic cache plus keyword ranking."
     ),
     "parameters": {
         "type": "object",
@@ -1582,7 +1695,16 @@ MEMORY_SEARCH_SCHEMA = {
             "mode": {
                 "type": "string",
                 "enum": ["keyword", "semantic", "hybrid"],
-                "description": "Search mode. 'keyword' (default) uses SQLite FTS; 'semantic' uses a local rebuildable sklearn LSA/TF-IDF vector cache for fuzzy recall; 'hybrid' tries semantic first and falls back to keyword when semantic finds no scored candidates.",
+                "description": "Search mode. 'hybrid' (default) uses semantic + keyword reciprocal-rank fusion; 'keyword' uses SQLite FTS only; 'semantic' uses the selected semantic backend only.",
+            },
+            "semantic_backend": {
+                "type": "string",
+                "enum": ["sklearn", "gemini"],
+                "description": "Semantic backend for mode='semantic' or 'hybrid'. Default 'sklearn' is local/offline LSA over TF-IDF. 'gemini' uses Gemini embeddings and requires GEMINI_API_KEY or GOOGLE_API_KEY.",
+            },
+            "semantic_model": {
+                "type": "string",
+                "description": "Embedding model name when semantic_backend='gemini'. Default: gemini-embedding-2.",
             },
             "granularity": {
                 "type": "string",
@@ -1616,7 +1738,9 @@ registry.register(
         render_format=args.get("render_format", "json"),
         granularity=args.get("granularity", "chunk"),
         category=args.get("category", ""),
-        mode=args.get("mode", "keyword"),
+        mode=args.get("mode", "hybrid"),
+        semantic_backend=args.get("semantic_backend", "sklearn"),
+        semantic_model=args.get("semantic_model", "gemini-embedding-2"),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_memory_search_requirements,

@@ -156,7 +156,7 @@ def test_search_retries_with_or_terms_when_strict_and_query_has_multiple_terms(t
     index_path = tmp_path / "memory_search.sqlite"
     build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
 
-    payload = json.loads(memory_search_tool("AutoFilmCrop licensing SQLite", roots=[(root, "chatworkspace")], index_path=index_path, freshness_seconds=9999))
+    payload = json.loads(memory_search_tool("AutoFilmCrop licensing SQLite", mode="keyword", roots=[(root, "chatworkspace")], index_path=index_path, freshness_seconds=9999))
 
     assert payload["success"] is True
     assert payload["results"]
@@ -283,6 +283,7 @@ def test_observation_search_returns_individual_facts_with_exact_lines(tmp_path):
     payload = json.loads(
         memory_search_tool(
             "storage privacy",
+            mode="keyword",
             granularity="observation",
             index_path=index_path,
             roots=[(str(root), "chatworkspace")],
@@ -305,6 +306,7 @@ def test_observation_search_excludes_markdown_checkboxes(tmp_path):
     payload = json.loads(
         memory_search_tool(
             "",
+            mode="keyword",
             granularity="observation",
             path_filter="mamiya",
             limit=25,
@@ -325,6 +327,7 @@ def test_category_filter_lists_facts_without_a_query(tmp_path):
     payload = json.loads(
         memory_search_tool(
             "",
+            mode="keyword",
             category="decision",
             index_path=index_path,
             roots=[(str(root), "chatworkspace")],
@@ -342,12 +345,14 @@ def test_chunk_granularity_is_default_and_unchanged(tmp_path):
     payload = json.loads(
         memory_search_tool(
             "targeted sanding",
+            mode="keyword",
             index_path=index_path,
             roots=[(str(root), "chatworkspace")],
             freshness_seconds=0,
         )
     )
     assert payload["success"] is True
+    assert payload["mode"] == "keyword"
     assert payload["granularity"] == "chunk"
     assert payload["results"]
     # Chunk results expose passage line ranges, not single-line observations.
@@ -361,6 +366,33 @@ def test_schema_exposes_granularity_category_and_mode_params():
     assert props["granularity"]["enum"] == ["chunk", "observation"]
     assert "category" in props
     assert props["mode"]["enum"] == ["keyword", "semantic", "hybrid"]
+    assert props["semantic_backend"]["enum"] == ["sklearn", "gemini"]
+    assert "semantic_model" in props
+
+
+def test_default_search_mode_is_hybrid(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "agent.md").write_text(
+        "# Agent evals\n\nA configured agent runtime uses a disposable sandbox.\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    payload = json.loads(
+        memory_search_tool(
+            "configured runtime",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["mode"] == "hybrid"
+    assert payload["semantic"]["backend"].startswith("sklearn_")
+    assert payload["results"]
 
 
 def test_build_index_prunes_deleted_files(tmp_path):
@@ -454,3 +486,17 @@ def test_search_rejects_unknown_mode(tmp_path):
 
     assert payload["success"] is False
     assert "mode" in payload["error"]
+
+
+def test_search_rejects_unknown_semantic_backend(tmp_path):
+    payload = json.loads(
+        memory_search_tool(
+            "RA-4",
+            index_path=tmp_path / "idx.sqlite",
+            mode="semantic",
+            semantic_backend="magic",
+        )
+    )
+
+    assert payload["success"] is False
+    assert "semantic_backend" in payload["error"]

@@ -42,6 +42,15 @@ _IGNORE_DIRS = {
 _MARKDOWN_EXTS = {".md", ".mdx", ".txt"}
 _MAX_SNIPPET_CHARS = 700
 
+# Schema version drives one-time, non-destructive migrations (e.g. the
+# observation backfill added in v2). Bump when the on-disk index shape changes.
+_SCHEMA_VERSION = 2
+# Observation lines look like "- [category] content #tags". The category must be
+# >=2 word chars starting with a letter so markdown checkboxes ("- [ ]", "- [x]")
+# are NOT misread as observations. This mirrors basic-memory's observation syntax.
+_OBSERVATION_RE = re.compile(r"^\s*[-*+]\s*\[([A-Za-z][\w-]+)\]\s+(\S.*?)\s*$")
+_TAG_RE = re.compile(r"(?:^|\s)#([\w-]+)")
+
 
 def _connect(index_path: Path) -> sqlite3.Connection:
     index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -79,11 +88,100 @@ def _ensure_schema(con: sqlite3.Connection) -> None:
             content='chunks',
             content_rowid='rowid'
         );
+        CREATE TABLE IF NOT EXISTS meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS observations (
+            id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            source TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            category TEXT NOT NULL,
+            tags TEXT NOT NULL,
+            text TEXT NOT NULL,
+            updated_at REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS observations_path ON observations(path);
+        CREATE INDEX IF NOT EXISTS observations_category ON observations(category);
+        CREATE VIRTUAL TABLE IF NOT EXISTS observations_fts USING fts5(
+            text,
+            category UNINDEXED,
+            tags,
+            path UNINDEXED,
+            source UNINDEXED,
+            content='observations',
+            content_rowid='rowid'
+        );
         """
     )
     # Backfill/rebuild is cheap at this scale and keeps external SQLite copies
     # from drifting if a user edited tables manually.
     con.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+    con.execute("INSERT INTO observations_fts(observations_fts) VALUES('rebuild')")
+    con.commit()
+    _migrate_schema(con)
+
+
+def _schema_version(con: sqlite3.Connection) -> int:
+    row = con.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+    if not row:
+        return 0
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_schema_version(con: sqlite3.Connection, version: int) -> None:
+    con.execute(
+        "INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(version),),
+    )
+
+
+def _migrate_schema(con: sqlite3.Connection) -> None:
+    """One-time, non-destructive migrations keyed on meta.schema_version.
+
+    v2 introduces the observations layer. Existing chunks and legacy imports are
+    preserved. Observations are backfilled by re-reading real files from disk
+    (exact line numbers); virtual legacy paths with no file on disk fall back to
+    their stored chunk text.
+    """
+    version = _schema_version(con)
+    if version >= _SCHEMA_VERSION:
+        return
+    if version < 2:
+        con.execute("DELETE FROM observations_fts")
+        con.execute("DELETE FROM observations")
+        now = time.time()
+        # Real on-disk files: re-read source for exact 1-indexed line numbers.
+        file_rows = con.execute("SELECT path, source FROM files").fetchall()
+        for row in file_rows:
+            path_str = str(row["path"])
+            if path_str.startswith(("openclaw://", "openclaw-session://")):
+                continue
+            try:
+                text = Path(path_str).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            _index_observations(
+                con, path=path_str, source=str(row["source"]),
+                base_line=1, text=text, updated_at=now,
+            )
+        # Virtual legacy paths (no file on disk): backfill from stored chunks.
+        legacy_chunks = con.execute(
+            "SELECT path, source, start_line, text, updated_at FROM chunks "
+            "WHERE path LIKE 'openclaw://%' OR path LIKE 'openclaw-session://%'"
+        ).fetchall()
+        for row in legacy_chunks:
+            _index_observations(
+                con, path=str(row["path"]), source=str(row["source"]),
+                base_line=int(row["start_line"]), text=str(row["text"]),
+                updated_at=float(row["updated_at"] or now),
+            )
+    _set_schema_version(con, _SCHEMA_VERSION)
     con.commit()
 
 
@@ -156,6 +254,57 @@ def _delete_file_chunks(con: sqlite3.Connection, path: str) -> None:
     for rowid in rowids:
         con.execute("DELETE FROM chunks_fts WHERE rowid = ?", (rowid,))
     con.execute("DELETE FROM chunks WHERE path = ?", (path,))
+    _delete_file_observations(con, path)
+
+
+def _delete_file_observations(con: sqlite3.Connection, path: str) -> None:
+    rowids = [r[0] for r in con.execute("SELECT rowid FROM observations WHERE path = ?", (path,)).fetchall()]
+    for rowid in rowids:
+        con.execute("DELETE FROM observations_fts WHERE rowid = ?", (rowid,))
+    con.execute("DELETE FROM observations WHERE path = ?", (path,))
+
+
+def _index_observations(
+    con: sqlite3.Connection,
+    *,
+    path: str,
+    source: str,
+    base_line: int,
+    text: str,
+    updated_at: float,
+) -> int:
+    """Index `- [category] content #tags` lines as individually searchable facts.
+
+    `base_line` is the absolute 1-indexed line of the first line of `text` in the
+    source file, so observation line numbers point at the real file location.
+    Markdown checkboxes are excluded by _OBSERVATION_RE's category rule.
+    """
+    inserted = 0
+    for offset, line in enumerate(text.splitlines()):
+        match = _OBSERVATION_RE.match(line)
+        if not match:
+            continue
+        category = match.group(1).lower()
+        body = match.group(2).strip()
+        if not body:
+            continue
+        abs_line = base_line + offset
+        tags = " ".join(sorted({t.lower() for t in _TAG_RE.findall(body)}))
+        obs_id = _sha256_text(f"obs:{path}:{abs_line}:{category}:{body}")
+        con.execute(
+            """
+            INSERT OR REPLACE INTO observations(id, path, source, line, category, tags, text, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (obs_id, path, source, abs_line, category, tags, body, updated_at),
+        )
+        rowid = con.execute("SELECT rowid FROM observations WHERE id = ?", (obs_id,)).fetchone()[0]
+        con.execute(
+            "INSERT INTO observations_fts(rowid, text, category, tags, path, source) VALUES (?, ?, ?, ?, ?, ?)",
+            (rowid, body, category, tags, path, source),
+        )
+        inserted += 1
+    return inserted
 
 
 def _index_file(con: sqlite3.Connection, path: Path, source: str) -> tuple[int, bool]:
@@ -184,6 +333,17 @@ def _index_file(con: sqlite3.Connection, path: Path, source: str) -> tuple[int, 
             (rowid, chunk_text, path_str, source),
         )
         inserted += 1
+
+    # Index observations from the full original file text so line numbers are
+    # exact (chunk text is strip()ed, which would skew per-chunk line offsets).
+    _index_observations(
+        con,
+        path=path_str,
+        source=source,
+        base_line=1,
+        text=text,
+        updated_at=now,
+    )
 
     con.execute(
         """
@@ -222,6 +382,8 @@ def build_index(
         if force:
             con.execute("DELETE FROM chunks_fts")
             con.execute("DELETE FROM chunks")
+            con.execute("DELETE FROM observations_fts")
+            con.execute("DELETE FROM observations")
             con.execute("DELETE FROM files")
         indexed_files = 0
         indexed_chunks = 0
@@ -316,6 +478,14 @@ def _insert_chunk(
         "INSERT INTO chunks_fts(rowid, text, path, source) VALUES (?, ?, ?, ?)",
         (rowid, text, path, source),
     )
+    _index_observations(
+        con,
+        path=path,
+        source=source,
+        base_line=start_line,
+        text=text,
+        updated_at=updated_at,
+    )
 
 
 def _query_chunks(
@@ -342,6 +512,54 @@ def _query_chunks(
         JOIN chunks c ON c.rowid = chunks_fts.rowid
         WHERE {' AND '.join(filters)}
         ORDER BY score
+        LIMIT ?
+    """
+    return con.execute(sql, params).fetchall()
+
+
+def _query_observations(
+    con: sqlite3.Connection,
+    *,
+    fts: str,
+    limit: int,
+    source: str = "all",
+    path_filter: str = "",
+    category: str = "",
+) -> list[sqlite3.Row]:
+    """Return individual observation lines ranked by relevance.
+
+    When `fts` is empty (no query terms), fall back to a metadata-only listing
+    filtered by category/source/path so "show me all [decision] facts" works
+    without a search term.
+    """
+    params: list[Any] = []
+    filters: list[str] = []
+    use_fts = bool(fts and fts != '""')
+    if use_fts:
+        filters.append("observations_fts MATCH ?")
+        params.append(fts)
+    if source and source != "all":
+        filters.append("o.source = ?")
+        params.append(source)
+    if path_filter:
+        filters.append("o.path LIKE ?")
+        params.append(f"%{path_filter}%")
+    if category:
+        filters.append("o.category = ?")
+        params.append(category.lower())
+    where = (" WHERE " + " AND ".join(filters)) if filters else ""
+    order = "ORDER BY score" if use_fts else "ORDER BY o.updated_at DESC"
+    score_expr = "bm25(observations_fts)" if use_fts else "0.0"
+    join = "JOIN observations o ON o.rowid = observations_fts.rowid" if use_fts else ""
+    table = "observations_fts" if use_fts else "observations o"
+    params.append(limit)
+    sql = f"""
+        SELECT o.path, o.source, o.line, o.category, o.tags, o.text,
+               {score_expr} AS score
+        FROM {table}
+        {join}
+        {where}
+        {order}
         LIMIT ?
     """
     return con.execute(sql, params).fetchall()
@@ -407,9 +625,21 @@ def search_index(
     path_filter: str = "",
     freshness_seconds: int = 60,
     render_format: str = "json",
+    granularity: str = "chunk",
+    category: str = "",
 ) -> dict[str, Any]:
     query = (query or "").strip()
-    if not query:
+    granularity = (granularity or "chunk").strip().lower()
+    category = (category or "").strip().lower()
+    if granularity not in {"chunk", "observation"}:
+        return {"success": False, "error": "granularity must be one of: chunk, observation"}
+    # A category filter implies observation granularity; let it be a shorthand.
+    if category and granularity == "chunk":
+        granularity = "observation"
+    # Chunk search still requires a query. Observation search may run on a bare
+    # category/source/path filter (e.g. "list every [decision]"), so only demand
+    # a query when none of those narrowing filters are present.
+    if not query and not (granularity == "observation" and (category or path_filter or (source and source != "all"))):
         return {"success": False, "error": "query is required"}
     render_format = (render_format or "json").strip().lower()
     if render_format not in {"json", "toon"}:
@@ -421,6 +651,19 @@ def search_index(
         indexed = build_index(index_path=index_path, roots=roots_norm)
 
     limit = max(1, min(int(limit or 8), 25))
+
+    if granularity == "observation":
+        return _search_observations(
+            query,
+            index_path=index_path,
+            limit=limit,
+            source=source,
+            path_filter=path_filter,
+            category=category,
+            render_format=render_format,
+            indexed=indexed,
+        )
+
     query_strategy = "strict_and"
     with _connect(index_path) as con:
         _ensure_schema(con)
@@ -481,6 +724,7 @@ def search_index(
         "success": True,
         "query": query,
         "mode": "keyword",
+        "granularity": "chunk",
         "query_strategy": query_strategy,
         "index_path": str(index_path),
         "index_updated": indexed,
@@ -508,6 +752,120 @@ def search_index(
             "hits",
             toon_rows,
             ["source", "path", "lines", "score", "snippet"],
+        )
+    return payload
+
+
+def _search_observations(
+    query: str,
+    *,
+    index_path: Path,
+    limit: int,
+    source: str,
+    path_filter: str,
+    category: str,
+    render_format: str,
+    indexed: Any,
+) -> dict[str, Any]:
+    """Observation-granularity search: returns individual facts with exact lines."""
+    query_strategy = "strict_and" if query else "metadata_only"
+    with _connect(index_path) as con:
+        _ensure_schema(con)
+        try:
+            rows = _query_observations(
+                con,
+                fts=_fts_query(query, operator="AND") if query else "",
+                limit=limit,
+                source=source,
+                path_filter=path_filter,
+                category=category,
+            )
+            if query and not rows and len(re.findall(r"\w+", query)) > 1:
+                rows = _query_observations(
+                    con,
+                    fts=_fts_query(query, operator="OR"),
+                    limit=limit,
+                    source=source,
+                    path_filter=path_filter,
+                    category=category,
+                )
+                if rows:
+                    query_strategy = "relaxed_or"
+        except sqlite3.OperationalError:
+            query_strategy = "like_fallback"
+            like_params: list[Any] = []
+            like_filters: list[str] = []
+            if query:
+                like_filters.append("text LIKE ?")
+                like_params.append(f"%{query}%")
+            if source and source != "all":
+                like_filters.append("source = ?")
+                like_params.append(source)
+            if path_filter:
+                like_filters.append("path LIKE ?")
+                like_params.append(f"%{path_filter}%")
+            if category:
+                like_filters.append("category = ?")
+                like_params.append(category)
+            where = (" WHERE " + " AND ".join(like_filters)) if like_filters else ""
+            like_params.append(limit)
+            rows = con.execute(
+                f"""
+                SELECT path, source, line, category, tags, text, 0.0 AS score
+                FROM observations
+                {where}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                like_params,
+            ).fetchall()
+
+    results = [
+        {
+            "source": row["source"],
+            "path": row["path"],
+            "line": int(row["line"]),
+            "category": row["category"],
+            "tags": [t for t in str(row["tags"]).split() if t],
+            "text": row["text"],
+            "score": float(row["score"]),
+        }
+        for row in rows
+    ]
+    payload: dict[str, Any] = {
+        "success": True,
+        "query": query,
+        "mode": "keyword",
+        "granularity": "observation",
+        "category": category or None,
+        "query_strategy": query_strategy,
+        "index_path": str(index_path),
+        "index_updated": indexed,
+        "count": len(results),
+        "cache_miss_writeback": (
+            "If this search recovers durable context that should have been in memory, "
+            "write a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer."
+        ),
+    }
+    if render_format == "json":
+        payload["results"] = results
+    elif render_format == "toon":
+        toon_rows = [
+            {
+                "source": hit["source"],
+                "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
+                "line": hit["line"],
+                "category": hit["category"],
+                "tags": ",".join(hit["tags"]),
+                "text": hit["text"],
+            }
+            for hit in results
+        ]
+        payload["render_format"] = "toon"
+        payload["toon_context"] = render_toon_rows(
+            "facts",
+            toon_rows,
+            ["source", "path", "line", "category", "tags", "text"],
         )
     return payload
 
@@ -779,6 +1137,8 @@ def memory_search_tool(
     limit: int = 8,
     freshness_seconds: int = 60,
     render_format: str = "json",
+    granularity: str = "chunk",
+    category: str = "",
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
     task_id: str | None = None,
@@ -795,6 +1155,8 @@ def memory_search_tool(
                 path_filter=path_filter,
                 freshness_seconds=freshness_seconds,
                 render_format=render_format,
+                granularity=granularity,
+                category=category,
             ),
             ensure_ascii=False,
         )
@@ -819,12 +1181,16 @@ MEMORY_SEARCH_SCHEMA = {
         "Indexes ~/ChatWorkspace and ~/.hermes/memories into a rebuildable SQLite FTS cache. "
         "Use this as the cache tier when current context is missing prior/project context. "
         "If it finds durable context that should have been saved already, treat that as a cache miss "
-        "and write back a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer."
+        "and write back a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer. "
+        "Two granularities: 'chunk' (default) returns heading-sized passages; 'observation' returns "
+        "individual fact lines written as '- [category] text #tags' with exact file line numbers. Use "
+        "observation granularity (or pass a category) to pull a specific fact or list all facts of a kind, "
+        "e.g. category='decision' to find decisions across every project without reading whole files."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search terms."},
+            "query": {"type": "string", "description": "Search terms. Optional when granularity='observation' and a category/source/path filter is given (lists matching facts)."},
             "source": {
                 "type": "string",
                 "enum": ["all", "chatworkspace", "memories", "localops", "openclaw_legacy", "legacy_sessions", "discord"],
@@ -832,6 +1198,15 @@ MEMORY_SEARCH_SCHEMA = {
             },
             "path_filter": {"type": "string", "description": "Optional substring filter for result paths, e.g. 'ngng' or 'microsoft/work_context'."},
             "limit": {"type": "integer", "description": "Maximum results, 1-25. Default 8."},
+            "granularity": {
+                "type": "string",
+                "enum": ["chunk", "observation"],
+                "description": "'chunk' (default) returns passages; 'observation' returns individual '- [category] ...' fact lines with exact line numbers.",
+            },
+            "category": {
+                "type": "string",
+                "description": "Optional observation-category filter (e.g. 'decision', 'status', 'risk', 'todo', 'preference'). Implies granularity='observation'. Combine with an empty query to list every fact of that category.",
+            },
             "render_format": {
                 "type": "string",
                 "enum": ["json", "toon"],
@@ -853,6 +1228,8 @@ registry.register(
         path_filter=args.get("path_filter", ""),
         limit=args.get("limit", 8),
         render_format=args.get("render_format", "json"),
+        granularity=args.get("granularity", "chunk"),
+        category=args.get("category", ""),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_memory_search_requirements,

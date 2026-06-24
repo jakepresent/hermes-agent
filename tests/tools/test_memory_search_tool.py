@@ -256,3 +256,106 @@ def test_import_openclaw_legacy_sessions_indexes_jsonl_messages(tmp_path):
     assert hit["path"] == "openclaw-session://main/session-123"
     assert "Granola" in hit["snippet"]
     assert "SHOULD_NOT_APPEAR" not in hit["snippet"]
+
+
+def _write_observation_corpus(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    project = root / "mamiya"
+    project.mkdir(parents=True)
+    (project / "context.md").write_text(
+        "# Mamiya Context\n\n"
+        "## Observations\n"
+        "- [decision] Use local-first storage for privacy #sovereignty #privacy\n"
+        "- [status] v5 batch tested and ready for beta\n"
+        "- [risk] Burr on tooth 3 needs targeted sanding #qc\n"
+        "- [ ] this is a checkbox not an observation\n"
+        "- [x] also a checkbox\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    return index_path, root
+
+
+def test_observation_search_returns_individual_facts_with_exact_lines(tmp_path):
+    index_path, root = _write_observation_corpus(tmp_path)
+    payload = json.loads(
+        memory_search_tool(
+            "storage privacy",
+            granularity="observation",
+            index_path=index_path,
+            roots=[(str(root), "chatworkspace")],
+            freshness_seconds=0,
+        )
+    )
+    assert payload["success"] is True
+    assert payload["granularity"] == "observation"
+    assert payload["count"] == 1
+    hit = payload["results"][0]
+    assert hit["category"] == "decision"
+    # The decision line is line 4 of the file (1: title, 2: blank, 3: heading).
+    assert hit["line"] == 4
+    assert set(hit["tags"]) == {"privacy", "sovereignty"}
+    assert "local-first" in hit["text"]
+
+
+def test_observation_search_excludes_markdown_checkboxes(tmp_path):
+    index_path, root = _write_observation_corpus(tmp_path)
+    payload = json.loads(
+        memory_search_tool(
+            "",
+            granularity="observation",
+            path_filter="mamiya",
+            limit=25,
+            index_path=index_path,
+            roots=[(str(root), "chatworkspace")],
+            freshness_seconds=0,
+        )
+    )
+    categories = sorted(h["category"] for h in payload["results"])
+    assert categories == ["decision", "risk", "status"]
+    # Checkbox markers must never be indexed as observation categories.
+    assert " " not in categories
+    assert "x" not in categories
+
+
+def test_category_filter_lists_facts_without_a_query(tmp_path):
+    index_path, root = _write_observation_corpus(tmp_path)
+    payload = json.loads(
+        memory_search_tool(
+            "",
+            category="decision",
+            index_path=index_path,
+            roots=[(str(root), "chatworkspace")],
+            freshness_seconds=0,
+        )
+    )
+    assert payload["success"] is True
+    assert payload["granularity"] == "observation"  # category implies observation mode
+    assert payload["count"] == 1
+    assert payload["results"][0]["category"] == "decision"
+
+
+def test_chunk_granularity_is_default_and_unchanged(tmp_path):
+    index_path, root = _write_observation_corpus(tmp_path)
+    payload = json.loads(
+        memory_search_tool(
+            "targeted sanding",
+            index_path=index_path,
+            roots=[(str(root), "chatworkspace")],
+            freshness_seconds=0,
+        )
+    )
+    assert payload["success"] is True
+    assert payload["granularity"] == "chunk"
+    assert payload["results"]
+    # Chunk results expose passage line ranges, not single-line observations.
+    assert "start_line" in payload["results"][0]
+    assert "end_line" in payload["results"][0]
+
+
+def test_schema_exposes_granularity_and_category_params():
+    props = MEMORY_SEARCH_SCHEMA["parameters"]["properties"]
+    assert "granularity" in props
+    assert props["granularity"]["enum"] == ["chunk", "observation"]
+    assert "category" in props

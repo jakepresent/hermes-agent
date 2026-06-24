@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import pickle
 import re
 import sqlite3
 import time
@@ -22,6 +23,7 @@ from tools.registry import registry, tool_error
 from tools.toon_renderer import render_toon_rows
 
 DEFAULT_INDEX_PATH = get_hermes_home() / "memory_search.sqlite"
+DEFAULT_SEMANTIC_INDEX_PATH = get_hermes_home() / "memory_search_semantic.pkl"
 DEFAULT_ROOTS: list[tuple[Path, str]] = [
     (Path.home() / "ChatWorkspace", "chatworkspace"),
     (get_hermes_home() / "memories", "memories"),
@@ -389,10 +391,13 @@ def build_index(
         indexed_chunks = 0
         scanned_files = 0
         roots_seen = []
+        seen_paths: set[str] = set()
         for root, source in roots_norm:
             roots_seen.append(str(root))
             for path in _iter_indexable_files(root) or []:
                 scanned_files += 1
+                path_str = str(path)
+                seen_paths.add(path_str)
                 try:
                     inserted, changed = _index_file(con, path, source)
                 except (OSError, UnicodeError):
@@ -400,6 +405,26 @@ def build_index(
                 indexed_chunks += inserted
                 if changed:
                     indexed_files += 1
+
+        # The SQLite index is a rebuildable cache over files. Remove rows for
+        # source files that no longer exist under the live on-disk roots so git
+        # moves/deletes do not leave stale search hits behind. Virtual imported
+        # sources (OpenClaw legacy memory/sessions) are left alone because they
+        # are refreshed by their importers, not by filesystem scans.
+        deleted_files = 0
+        real_sources = {source for _root, source in roots_norm}
+        if real_sources:
+            placeholders = ",".join("?" for _ in real_sources)
+            file_rows = con.execute(
+                f"SELECT path FROM files WHERE source IN ({placeholders})",
+                tuple(real_sources),
+            ).fetchall()
+            for row in file_rows:
+                stale_path = str(row["path"])
+                if stale_path not in seen_paths:
+                    _delete_file_chunks(con, stale_path)
+                    con.execute("DELETE FROM files WHERE path = ?", (stale_path,))
+                    deleted_files += 1
         con.commit()
         total_chunks = con.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
         total_files = con.execute("SELECT COUNT(*) FROM files").fetchone()[0]
@@ -410,6 +435,7 @@ def build_index(
         "scanned_files": scanned_files,
         "indexed_files": indexed_files,
         "indexed_chunks": indexed_chunks,
+        "deleted_files": deleted_files,
         "total_files": total_files,
         "total_chunks": total_chunks,
     }
@@ -581,6 +607,225 @@ def _snippet(text: str, query: str) -> str:
     return snippet
 
 
+def _semantic_index_path(index_path: Path | str, granularity: str) -> Path:
+    """Return the sidecar semantic cache path for a SQLite memory index."""
+    path = Path(index_path).expanduser()
+    safe_granularity = re.sub(r"[^A-Za-z0-9_-]+", "_", granularity or "chunk")
+    if path == DEFAULT_INDEX_PATH:
+        return get_hermes_home() / f"memory_search_semantic_{safe_granularity}.pkl"
+    return path.with_suffix(path.suffix + f".{safe_granularity}.semantic.pkl")
+
+
+def _semantic_row_id(row: sqlite3.Row, granularity: str) -> str:
+    if granularity == "observation":
+        return f"obs:{row['path']}:{row['line']}:{row['category']}:{row['text']}"
+    return f"chunk:{row['path']}:{row['start_line']}:{row['end_line']}:{row['text']}"
+
+
+def _semantic_candidate_rows(
+    con: sqlite3.Connection,
+    *,
+    granularity: str,
+    source: str = "all",
+    path_filter: str = "",
+    category: str = "",
+) -> list[sqlite3.Row]:
+    params: list[Any] = []
+    if granularity == "observation":
+        filters: list[str] = []
+        if source and source != "all":
+            filters.append("source = ?")
+            params.append(source)
+        if path_filter:
+            filters.append("path LIKE ?")
+            params.append(f"%{path_filter}%")
+        if category:
+            filters.append("category = ?")
+            params.append(category.lower())
+        where = (" WHERE " + " AND ".join(filters)) if filters else ""
+        return con.execute(
+            f"""
+            SELECT path, source, line, category, tags, text, updated_at
+            FROM observations
+            {where}
+            ORDER BY updated_at DESC
+            """,
+            params,
+        ).fetchall()
+
+    filters = []
+    if source and source != "all":
+        filters.append("source = ?")
+        params.append(source)
+    if path_filter:
+        filters.append("path LIKE ?")
+        params.append(f"%{path_filter}%")
+    where = (" WHERE " + " AND ".join(filters)) if filters else ""
+    return con.execute(
+        f"""
+        SELECT path, source, start_line, end_line, text, updated_at
+        FROM chunks
+        {where}
+        ORDER BY updated_at DESC
+        """,
+        params,
+    ).fetchall()
+
+
+def _semantic_fingerprint(rows: Sequence[sqlite3.Row], *, granularity: str, backend: str) -> str:
+    h = hashlib.sha256()
+    h.update(f"semantic-v1:{backend}:{granularity}\n".encode("utf-8"))
+    for row in rows:
+        h.update(_semantic_row_id(row, granularity).encode("utf-8", errors="replace"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _semantic_documents(rows: Sequence[sqlite3.Row], granularity: str) -> list[str]:
+    docs: list[str] = []
+    for row in rows:
+        text = str(row["text"])
+        if granularity == "observation":
+            # Include metadata terms in the vectorized text so fuzzy searches can
+            # match project/category/tag intent even when the fact wording is short.
+            docs.append(f"{row['category']} {row['tags']} {row['path']} {text}")
+        else:
+            docs.append(f"{row['path']} {text}")
+    return docs
+
+
+def _build_semantic_model(texts: Sequence[str]) -> dict[str, Any]:
+    """Build a local lexical-semantic vector cache.
+
+    This deliberately uses sklearn TF-IDF + truncated SVD (LSA) instead of a
+    network embedding provider. It is rebuildable, private, works offline, and
+    can later be swapped for neural embeddings behind the same search mode.
+    """
+    try:
+        from sklearn.decomposition import TruncatedSVD
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.preprocessing import normalize
+    except Exception as exc:  # pragma: no cover - depends on optional runtime deps
+        raise RuntimeError(
+            "semantic search requires scikit-learn; install sklearn or use mode='keyword'"
+        ) from exc
+
+    vectorizer = TfidfVectorizer(
+        lowercase=True,
+        stop_words="english",
+        ngram_range=(1, 2),
+        min_df=1,
+        max_features=50000,
+        sublinear_tf=True,
+    )
+    tfidf = vectorizer.fit_transform(texts)
+    n_components = min(128, max(1, tfidf.shape[0] - 1), max(1, tfidf.shape[1] - 1))
+    if n_components >= 2 and tfidf.shape[0] >= 3 and tfidf.shape[1] >= 3:
+        svd = TruncatedSVD(n_components=n_components, random_state=0)
+        matrix = normalize(svd.fit_transform(tfidf))
+    else:
+        svd = None
+        matrix = normalize(tfidf)
+    return {
+        "backend": "sklearn_lsa_v1" if svd is not None else "sklearn_tfidf_v1",
+        "vectorizer": vectorizer,
+        "svd": svd,
+        "matrix": matrix,
+    }
+
+
+def _query_semantic_model(model: dict[str, Any], query: str) -> list[float]:
+    from sklearn.preprocessing import normalize
+
+    q = model["vectorizer"].transform([query])
+    if model.get("svd") is not None:
+        qv = normalize(model["svd"].transform(q))
+    else:
+        qv = normalize(q)
+    scores = model["matrix"].dot(qv.T)
+    try:
+        return [float(v) for v in scores.toarray().ravel()]
+    except AttributeError:
+        return [float(v) for v in scores.ravel()]
+
+
+def _load_or_build_semantic_cache(
+    *,
+    index_path: Path,
+    rows: Sequence[sqlite3.Row],
+    granularity: str,
+) -> tuple[dict[str, Any], bool, str]:
+    cache_path = _semantic_index_path(index_path, granularity)
+    backend = "sklearn_lsa_v1"
+    fingerprint = _semantic_fingerprint(rows, granularity=granularity, backend=backend)
+    try:
+        with cache_path.open("rb") as fh:
+            cached = pickle.load(fh)
+        if (
+            cached.get("fingerprint") == fingerprint
+            and cached.get("granularity") == granularity
+            and cached.get("backend", "").startswith("sklearn_")
+        ):
+            return cached, False, str(cache_path)
+    except Exception:
+        pass
+
+    texts = _semantic_documents(rows, granularity)
+    model = _build_semantic_model(texts)
+    payload = {
+        "fingerprint": fingerprint,
+        "granularity": granularity,
+        "backend": model["backend"],
+        "built_at": time.time(),
+        "model": model,
+    }
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with cache_path.open("wb") as fh:
+            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        # Search can still proceed if the sidecar cache cannot be written.
+        pass
+    return payload, True, str(cache_path)
+
+
+def _search_semantic_rows(
+    query: str,
+    *,
+    index_path: Path,
+    limit: int,
+    source: str,
+    path_filter: str,
+    granularity: str,
+    category: str,
+) -> tuple[list[tuple[sqlite3.Row, float]], dict[str, Any]]:
+    with _connect(index_path) as con:
+        _ensure_schema(con)
+        rows = _semantic_candidate_rows(
+            con,
+            granularity=granularity,
+            source=source,
+            path_filter=path_filter,
+            category=category,
+        )
+    if not rows:
+        return [], {"backend": None, "rebuilt": False, "candidate_count": 0}
+    cache, rebuilt, cache_path = _load_or_build_semantic_cache(
+        index_path=index_path,
+        rows=rows,
+        granularity=granularity,
+    )
+    scores = _query_semantic_model(cache["model"], query)
+    ranked = sorted(zip(rows, scores), key=lambda item: item[1], reverse=True)
+    ranked = [(row, score) for row, score in ranked if score > 0][:limit]
+    return ranked, {
+        "backend": cache.get("backend"),
+        "rebuilt": rebuilt,
+        "cache_path": cache_path,
+        "candidate_count": len(rows),
+    }
+
+
 def _path_from_anchor(path: Path, anchor: str) -> str | None:
     try:
         idx = path.parts.index(anchor)
@@ -615,6 +860,63 @@ def _compact_context_path(path: str, source: str) -> str:
         return path
 
 
+def _chunk_result_from_row(row: sqlite3.Row, query: str, *, score: float | None = None) -> dict[str, Any]:
+    return {
+        "source": row["source"],
+        "path": row["path"],
+        "start_line": int(row["start_line"]),
+        "end_line": int(row["end_line"]),
+        "score": float(row["score"] if score is None and "score" in row.keys() else (score or 0.0)),
+        "snippet": _snippet(row["text"], query),
+    }
+
+
+def _observation_result_from_row(row: sqlite3.Row, *, score: float | None = None) -> dict[str, Any]:
+    return {
+        "source": row["source"],
+        "path": row["path"],
+        "line": int(row["line"]),
+        "category": row["category"],
+        "tags": [t for t in str(row["tags"]).split() if t],
+        "text": row["text"],
+        "score": float(row["score"] if score is None and "score" in row.keys() else (score or 0.0)),
+    }
+
+
+def _result_key(hit: dict[str, Any], granularity: str) -> tuple[Any, ...]:
+    if granularity == "observation":
+        return (hit["path"], hit["line"], hit.get("category"), hit.get("text"))
+    return (hit["path"], hit["start_line"], hit["end_line"])
+
+
+def _merge_hybrid_results(
+    *,
+    semantic_results: list[dict[str, Any]],
+    keyword_results: list[dict[str, Any]],
+    granularity: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Merge semantic + keyword rankings with reciprocal-rank fusion."""
+    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    scores: dict[tuple[Any, ...], float] = {}
+    rank_k = 60.0
+    for rank, hit in enumerate(semantic_results, start=1):
+        key = _result_key(hit, granularity)
+        merged.setdefault(key, dict(hit))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (rank_k + rank)
+    for rank, hit in enumerate(keyword_results, start=1):
+        key = _result_key(hit, granularity)
+        merged.setdefault(key, dict(hit))
+        scores[key] = scores.get(key, 0.0) + 1.0 / (rank_k + rank)
+    ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)[:limit]
+    results: list[dict[str, Any]] = []
+    for key, score in ranked:
+        hit = merged[key]
+        hit["score"] = float(score)
+        results.append(hit)
+    return results
+
+
 def search_index(
     query: str,
     *,
@@ -627,10 +929,14 @@ def search_index(
     render_format: str = "json",
     granularity: str = "chunk",
     category: str = "",
+    mode: str = "keyword",
 ) -> dict[str, Any]:
     query = (query or "").strip()
     granularity = (granularity or "chunk").strip().lower()
     category = (category or "").strip().lower()
+    mode = (mode or "keyword").strip().lower()
+    if mode not in {"keyword", "semantic", "hybrid"}:
+        return {"success": False, "error": "mode must be one of: keyword, semantic, hybrid"}
     if granularity not in {"chunk", "observation"}:
         return {"success": False, "error": "granularity must be one of: chunk, observation"}
     # A category filter implies observation granularity; let it be a shorthand.
@@ -652,17 +958,75 @@ def search_index(
 
     limit = max(1, min(int(limit or 8), 25))
 
+    if mode in {"semantic", "hybrid"} and query:
+        semantic_rows, semantic_meta = _search_semantic_rows(
+            query,
+            index_path=index_path,
+            limit=limit,
+            source=source,
+            path_filter=path_filter,
+            granularity=granularity,
+            category=category,
+        )
+        if granularity == "observation":
+            semantic_results = [
+                _observation_result_from_row(row, score=score)
+                for row, score in semantic_rows
+            ]
+        else:
+            semantic_results = [
+                _chunk_result_from_row(row, query, score=score)
+                for row, score in semantic_rows
+            ]
+        if mode == "semantic":
+            return _format_search_payload(
+                query=query,
+                mode=mode,
+                granularity=granularity,
+                results=semantic_results,
+                render_format=render_format,
+                index_path=index_path,
+                indexed=indexed,
+                category=category,
+                query_strategy="semantic_lsa",
+                semantic=semantic_meta,
+            )
+    else:
+        semantic_results = []
+        semantic_meta = None
+
     if granularity == "observation":
-        return _search_observations(
+        obs_payload = _search_observations(
             query,
             index_path=index_path,
             limit=limit,
             source=source,
             path_filter=path_filter,
             category=category,
-            render_format=render_format,
+            render_format="json" if mode == "hybrid" else render_format,
             indexed=indexed,
         )
+        if mode == "hybrid" and obs_payload.get("success"):
+            keyword_results = obs_payload.get("results", [])
+            results = _merge_hybrid_results(
+                semantic_results=semantic_results,
+                keyword_results=keyword_results,
+                granularity="observation",
+                limit=limit,
+            )
+            return _format_search_payload(
+                query=query,
+                mode="hybrid",
+                granularity="observation",
+                results=results,
+                render_format=render_format,
+                index_path=index_path,
+                indexed=indexed,
+                category=category,
+                query_strategy="semantic_lsa+keyword_rrf",
+                semantic=semantic_meta,
+            )
+        return obs_payload
 
     query_strategy = "strict_and"
     with _connect(index_path) as con:
@@ -709,51 +1073,27 @@ def search_index(
                 like_params,
             ).fetchall()
 
-    results = [
-        {
-            "source": row["source"],
-            "path": row["path"],
-            "start_line": int(row["start_line"]),
-            "end_line": int(row["end_line"]),
-            "score": float(row["score"]),
-            "snippet": _snippet(row["text"], query),
-        }
-        for row in rows
-    ]
-    payload: dict[str, Any] = {
-        "success": True,
-        "query": query,
-        "mode": "keyword",
-        "granularity": "chunk",
-        "query_strategy": query_strategy,
-        "index_path": str(index_path),
-        "index_updated": indexed,
-        "count": len(results),
-        "cache_miss_writeback": (
-            "If this search recovers durable context that should have been in memory, "
-            "write a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer."
-        ),
-    }
-    if render_format == "json":
-        payload["results"] = results
-    elif render_format == "toon":
-        toon_rows = [
-            {
-                "source": hit["source"],
-                "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
-                "lines": f"{hit['start_line']}-{hit['end_line']}",
-                "score": round(float(hit["score"]), 3),
-                "snippet": hit["snippet"],
-            }
-            for hit in results
-        ]
-        payload["render_format"] = "toon"
-        payload["toon_context"] = render_toon_rows(
-            "hits",
-            toon_rows,
-            ["source", "path", "lines", "score", "snippet"],
+    results = [_chunk_result_from_row(row, query) for row in rows]
+    if mode == "hybrid":
+        results = _merge_hybrid_results(
+            semantic_results=semantic_results,
+            keyword_results=results,
+            granularity="chunk",
+            limit=limit,
         )
-    return payload
+        query_strategy = "semantic_lsa+keyword_rrf"
+    return _format_search_payload(
+        query=query,
+        mode=mode,
+        granularity="chunk",
+        results=results,
+        render_format=render_format,
+        index_path=index_path,
+        indexed=indexed,
+        category="",
+        query_strategy=query_strategy,
+        semantic=semantic_meta if mode == "hybrid" else None,
+    )
 
 
 def _search_observations(
@@ -820,24 +1160,38 @@ def _search_observations(
                 like_params,
             ).fetchall()
 
-    results = [
-        {
-            "source": row["source"],
-            "path": row["path"],
-            "line": int(row["line"]),
-            "category": row["category"],
-            "tags": [t for t in str(row["tags"]).split() if t],
-            "text": row["text"],
-            "score": float(row["score"]),
-        }
-        for row in rows
-    ]
+    results = [_observation_result_from_row(row) for row in rows]
+    return _format_search_payload(
+        query=query,
+        mode="keyword",
+        granularity="observation",
+        results=results,
+        render_format=render_format,
+        index_path=index_path,
+        indexed=indexed,
+        category=category,
+        query_strategy=query_strategy,
+    )
+
+
+def _format_search_payload(
+    *,
+    query: str,
+    mode: str,
+    granularity: str,
+    results: list[dict[str, Any]],
+    render_format: str,
+    index_path: Path,
+    indexed: Any,
+    category: str = "",
+    query_strategy: str,
+    semantic: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "success": True,
         "query": query,
-        "mode": "keyword",
-        "granularity": "observation",
-        "category": category or None,
+        "mode": mode,
+        "granularity": granularity,
         "query_strategy": query_strategy,
         "index_path": str(index_path),
         "index_updated": indexed,
@@ -847,26 +1201,51 @@ def _search_observations(
             "write a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer."
         ),
     }
+    if category:
+        payload["category"] = category
+    elif granularity == "observation":
+        payload["category"] = None
+    if semantic is not None:
+        payload["semantic"] = semantic
+
     if render_format == "json":
         payload["results"] = results
     elif render_format == "toon":
-        toon_rows = [
-            {
-                "source": hit["source"],
-                "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
-                "line": hit["line"],
-                "category": hit["category"],
-                "tags": ",".join(hit["tags"]),
-                "text": hit["text"],
-            }
-            for hit in results
-        ]
-        payload["render_format"] = "toon"
-        payload["toon_context"] = render_toon_rows(
-            "facts",
-            toon_rows,
-            ["source", "path", "line", "category", "tags", "text"],
-        )
+        if granularity == "observation":
+            toon_rows = [
+                {
+                    "source": hit["source"],
+                    "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
+                    "line": hit["line"],
+                    "category": hit["category"],
+                    "tags": ",".join(hit["tags"]),
+                    "text": hit["text"],
+                }
+                for hit in results
+            ]
+            payload["render_format"] = "toon"
+            payload["toon_context"] = render_toon_rows(
+                "facts",
+                toon_rows,
+                ["source", "path", "line", "category", "tags", "text"],
+            )
+        else:
+            toon_rows = [
+                {
+                    "source": hit["source"],
+                    "path": _compact_context_path(str(hit["path"]), str(hit["source"])),
+                    "lines": f"{hit['start_line']}-{hit['end_line']}",
+                    "score": round(float(hit["score"]), 3),
+                    "snippet": hit["snippet"],
+                }
+                for hit in results
+            ]
+            payload["render_format"] = "toon"
+            payload["toon_context"] = render_toon_rows(
+                "hits",
+                toon_rows,
+                ["source", "path", "lines", "score", "snippet"],
+            )
     return payload
 
 
@@ -1139,6 +1518,7 @@ def memory_search_tool(
     render_format: str = "json",
     granularity: str = "chunk",
     category: str = "",
+    mode: str = "keyword",
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
     task_id: str | None = None,
@@ -1157,6 +1537,7 @@ def memory_search_tool(
                 render_format=render_format,
                 granularity=granularity,
                 category=category,
+                mode=mode,
             ),
             ensure_ascii=False,
         )
@@ -1198,6 +1579,11 @@ MEMORY_SEARCH_SCHEMA = {
             },
             "path_filter": {"type": "string", "description": "Optional substring filter for result paths, e.g. 'ngng' or 'microsoft/work_context'."},
             "limit": {"type": "integer", "description": "Maximum results, 1-25. Default 8."},
+            "mode": {
+                "type": "string",
+                "enum": ["keyword", "semantic", "hybrid"],
+                "description": "Search mode. 'keyword' (default) uses SQLite FTS; 'semantic' uses a local rebuildable sklearn LSA/TF-IDF vector cache for fuzzy recall; 'hybrid' tries semantic first and falls back to keyword when semantic finds no scored candidates.",
+            },
             "granularity": {
                 "type": "string",
                 "enum": ["chunk", "observation"],
@@ -1230,6 +1616,7 @@ registry.register(
         render_format=args.get("render_format", "json"),
         granularity=args.get("granularity", "chunk"),
         category=args.get("category", ""),
+        mode=args.get("mode", "keyword"),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_memory_search_requirements,

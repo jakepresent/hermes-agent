@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -354,8 +355,102 @@ def test_chunk_granularity_is_default_and_unchanged(tmp_path):
     assert "end_line" in payload["results"][0]
 
 
-def test_schema_exposes_granularity_and_category_params():
+def test_schema_exposes_granularity_category_and_mode_params():
     props = MEMORY_SEARCH_SCHEMA["parameters"]["properties"]
     assert "granularity" in props
     assert props["granularity"]["enum"] == ["chunk", "observation"]
     assert "category" in props
+    assert props["mode"]["enum"] == ["keyword", "semantic", "hybrid"]
+
+
+def test_build_index_prunes_deleted_files(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    keep = root / "keep.md"
+    gone = root / "gone.md"
+    keep.write_text("Keep note about cameras.\n", encoding="utf-8")
+    gone.write_text("Stale note about deleted espresso grinder.\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    gone.unlink()
+    rebuilt = build_index(index_path=index_path, roots=[(root, "chatworkspace")])
+
+    assert rebuilt["deleted_files"] == 1
+    with sqlite3.connect(index_path) as con:
+        paths = {row[0] for row in con.execute("SELECT path FROM files")}
+    assert str(keep) in paths
+    assert str(gone) not in paths
+    payload = json.loads(
+        memory_search_tool(
+            "espresso grinder",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+    assert payload["success"] is True
+    assert payload["results"] == []
+
+
+def test_hybrid_mode_merges_semantic_and_keyword_results(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "agent.md").write_text(
+        "# Agent evals\n\n"
+        "A disposable sandbox runs a configured agent with isolated tools and files.\n",
+        encoding="utf-8",
+    )
+    (root / "film.md").write_text("# Film\n\nRA-4 darkroom tray workflow.\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    hybrid = json.loads(
+        memory_search_tool(
+            "configured runtime",
+            mode="hybrid",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert hybrid["success"] is True
+    assert hybrid["mode"] == "hybrid"
+    assert hybrid["semantic"]["backend"].startswith("sklearn_")
+    assert hybrid["query_strategy"] == "semantic_lsa+keyword_rrf"
+    assert hybrid["results"]
+    assert hybrid["results"][0]["path"].endswith("agent.md")
+
+
+def test_semantic_observation_search_respects_category_and_path_filter(tmp_path):
+    index_path, root = _write_observation_corpus(tmp_path)
+    payload = json.loads(
+        memory_search_tool(
+            "production batch",
+            mode="semantic",
+            granularity="observation",
+            category="status",
+            path_filter="mamiya",
+            index_path=index_path,
+            roots=[(str(root), "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["mode"] == "semantic"
+    assert payload["granularity"] == "observation"
+    assert payload["category"] == "status"
+    assert payload["results"]
+    assert all(hit["category"] == "status" for hit in payload["results"])
+    assert "v5 batch" in payload["results"][0]["text"]
+
+
+def test_search_rejects_unknown_mode(tmp_path):
+    payload = json.loads(
+        memory_search_tool("RA-4", index_path=tmp_path / "idx.sqlite", mode="magic")
+    )
+
+    assert payload["success"] is False
+    assert "mode" in payload["error"]

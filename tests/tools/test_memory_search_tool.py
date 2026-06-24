@@ -391,7 +391,9 @@ def test_default_search_mode_is_hybrid(tmp_path):
 
     assert payload["success"] is True
     assert payload["mode"] == "hybrid"
-    assert payload["semantic"]["backend"] == "sklearn_lsa_v1"
+    assert payload["semantic"]["requested_backend"] == "gemini"
+    assert payload["semantic"]["fallback"] == "sklearn"
+    assert payload["semantic"]["backend"].startswith("sklearn_")
     assert payload["results"]
 
 
@@ -441,6 +443,7 @@ def test_hybrid_mode_merges_semantic_and_keyword_results(tmp_path):
         memory_search_tool(
             "configured runtime",
             mode="hybrid",
+            semantic_backend="sklearn",
             index_path=index_path,
             roots=[(root, "chatworkspace")],
             freshness_seconds=9999,
@@ -449,10 +452,43 @@ def test_hybrid_mode_merges_semantic_and_keyword_results(tmp_path):
 
     assert hybrid["success"] is True
     assert hybrid["mode"] == "hybrid"
-    assert hybrid["semantic"]["backend"] == "sklearn_lsa_v1"
+    assert hybrid["semantic"]["backend"].startswith("sklearn_")
     assert hybrid["query_strategy"] == "semantic+keyword_rrf"
     assert hybrid["results"]
     assert hybrid["results"][0]["path"].endswith("agent.md")
+
+
+def test_default_hybrid_skips_cold_gemini_rebuild_for_large_corpus(tmp_path, monkeypatch):
+    import tools.memory_search_tool as mst
+
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    for idx in range(4):
+        (root / f"note-{idx}.md").write_text(
+            f"# Note {idx}\n\nAlpha beta project context {idx}.\n",
+            encoding="utf-8",
+        )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    monkeypatch.setattr(mst, "_GEMINI_DEFAULT_MAX_COLD_ROWS", 1)
+    monkeypatch.setattr(mst, "_SKLEARN_DEFAULT_MAX_COLD_ROWS", 1)
+
+    payload = json.loads(
+        memory_search_tool(
+            "alpha beta",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["mode"] == "hybrid"
+    assert payload["semantic"]["requested_backend"] == "gemini"
+    assert payload["semantic"]["fallback"] == "keyword"
+    assert "refusing live rebuild" in payload["semantic"]["error"]
+    assert "refusing live rebuild" in payload["semantic"]["fallback_error"]
+    assert payload["results"]
 
 
 def test_semantic_observation_search_respects_category_and_path_filter(tmp_path):

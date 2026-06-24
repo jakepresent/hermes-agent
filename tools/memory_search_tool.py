@@ -766,19 +766,47 @@ def _prepare_gemini_embedding_text(text: str, *, is_query: bool, title: str = "n
     return f"title: {clean_title} | text: {text}"
 
 
+_GEMINI_REQUEST_TIMEOUT_MS = 8000
+# Default memory_search runs inside a live chat turn. Rebuilding a full Gemini
+# vector cache can mean thousands of network calls, so keep the default path
+# bounded and fall back instead of turning retrieval into a background indexing job.
+# The google-genai embed_content call currently returns one embedding per request
+# for a list input, so cold Gemini rebuilds above this small threshold are too
+# slow for foreground chat turns.
+_GEMINI_DEFAULT_MAX_COLD_ROWS = 16
+_SKLEARN_DEFAULT_MAX_COLD_ROWS = 5000
+
+
 def _embed_gemini_texts(texts: Sequence[str], *, model: str) -> list[list[float]]:
     api_key = _gemini_api_key()
     if not api_key:
         raise RuntimeError("Gemini semantic search requires GEMINI_API_KEY or GOOGLE_API_KEY in the environment or ~/.hermes/.env")
     try:
         from google import genai
+        from google.genai import types
     except Exception as exc:  # pragma: no cover - optional dependency
         raise RuntimeError("Gemini semantic search requires the google-genai package") from exc
 
-    client = genai.Client(api_key=api_key)
+    timeout_ms = int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_TIMEOUT_MS", str(_GEMINI_REQUEST_TIMEOUT_MS)))
+    client = genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            timeout=timeout_ms,
+            retry_options=types.HttpRetryOptions(attempts=1),
+        ),
+    )
     vectors: list[list[float]] = []
     for text in texts:
-        response = client.models.embed_content(model=model, contents=text)
+        response = client.models.embed_content(
+            model=model,
+            contents=text,
+            config=types.EmbedContentConfig(
+                http_options=types.HttpOptions(
+                    timeout=timeout_ms,
+                    retry_options=types.HttpRetryOptions(attempts=1),
+                ),
+            ),
+        )
         embeddings = getattr(response, "embeddings", None) or []
         if not embeddings:
             vectors.append([])
@@ -844,6 +872,7 @@ def _load_or_build_semantic_cache(
     granularity: str,
     backend: str,
     model_name: str,
+    allow_build: bool = True,
 ) -> tuple[dict[str, Any], bool, str]:
     backend_id = f"gemini:{model_name}" if backend == "gemini" else "sklearn_lsa_v1"
     cache_path = _semantic_index_path(index_path, granularity, backend_id)
@@ -860,6 +889,10 @@ def _load_or_build_semantic_cache(
     except Exception:
         pass
 
+    if not allow_build:
+        raise RuntimeError(
+            f"{backend} semantic cache is cold for {len(rows)} candidates; refusing live rebuild"
+        )
     if backend == "gemini":
         model = _build_gemini_semantic_model(rows, granularity, model=model_name)
     else:
@@ -896,6 +929,7 @@ def _search_semantic_rows(
     category: str,
     backend: str,
     model_name: str,
+    live_rebuild: bool = True,
 ) -> tuple[list[tuple[sqlite3.Row, float]], dict[str, Any]]:
     with _connect(index_path) as con:
         _ensure_schema(con)
@@ -908,12 +942,19 @@ def _search_semantic_rows(
         )
     if not rows:
         return [], {"backend": None, "rebuilt": False, "candidate_count": 0}
+    max_cold_rows = int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_MAX_COLD_ROWS", str(_GEMINI_DEFAULT_MAX_COLD_ROWS)))
+    if backend == "gemini":
+        allow_backend_build = live_rebuild or len(rows) <= max_cold_rows
+    else:
+        sklearn_max_cold_rows = int(os.getenv("HERMES_MEMORY_SEARCH_SKLEARN_MAX_COLD_ROWS", str(_SKLEARN_DEFAULT_MAX_COLD_ROWS)))
+        allow_backend_build = live_rebuild or len(rows) <= sklearn_max_cold_rows
     cache, rebuilt, cache_path = _load_or_build_semantic_cache(
         index_path=index_path,
         rows=rows,
         granularity=granularity,
         backend=backend,
         model_name=model_name,
+        allow_build=allow_backend_build,
     )
     scores = _query_semantic_model(cache["model"], query)
     ranked = sorted(zip(rows, scores), key=lambda item: item[1], reverse=True)
@@ -1076,19 +1117,52 @@ def search_index(
                 category=category,
                 backend=semantic_backend,
                 model_name=semantic_model,
+                live_rebuild=(mode == "semantic"),
             )
         except Exception as exc:  # noqa: BLE001 - semantic backend is best-effort in hybrid mode
             if mode == "semantic":
                 return {"success": False, "error": f"semantic search failed: {exc}"}
-            semantic_rows = []
-            fallback_backend = "sklearn_lsa_v1" if semantic_backend == "gemini" else semantic_backend
-            semantic_meta = {
-                "backend": fallback_backend,
-                "requested_backend": semantic_backend,
-                "model": semantic_model,
-                "error": str(exc),
-                "fallback": "keyword",
-            }
+            if semantic_backend == "gemini":
+                try:
+                    # Large unfiltered searches should remain responsive even when
+                    # the Gemini cache is cold. Local LSA over the full corpus can
+                    # also be a multi-second rebuild, so only use it as a live
+                    # fallback for bounded candidate sets or an existing cache.
+                    semantic_rows, semantic_meta = _search_semantic_rows(
+                        query,
+                        index_path=index_path,
+                        limit=limit,
+                        source=source,
+                        path_filter=path_filter,
+                        granularity=granularity,
+                        category=category,
+                        backend="sklearn",
+                        model_name=semantic_model,
+                        live_rebuild=False,
+                    )
+                    semantic_meta["requested_backend"] = semantic_backend
+                    semantic_meta["requested_model"] = semantic_model
+                    semantic_meta["fallback"] = "sklearn"
+                    semantic_meta["error"] = str(exc)
+                except Exception as fallback_exc:  # noqa: BLE001 - keep hybrid search usable
+                    semantic_rows = []
+                    semantic_meta = {
+                        "backend": None,
+                        "requested_backend": semantic_backend,
+                        "model": semantic_model,
+                        "error": str(exc),
+                        "fallback_error": str(fallback_exc),
+                        "fallback": "keyword",
+                    }
+            else:
+                semantic_rows = []
+                semantic_meta = {
+                    "backend": None,
+                    "requested_backend": semantic_backend,
+                    "model": semantic_model,
+                    "error": str(exc),
+                    "fallback": "keyword",
+                }
         if granularity == "observation":
             semantic_results = [
                 _observation_result_from_row(row, score=score)

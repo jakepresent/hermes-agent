@@ -100,8 +100,10 @@ def test_model_picker_provider_view_shows_current_model():
         allowed_user_ids=set(),
     )
 
-    embed = view._build_provider_embed()
+    content = view._build_provider_content()
 
-    assert embed.title == "⚙ Model Configuration"
-    assert "Current: `gpt-5.5`" in embed.description
-    assert "Select a provider to switch models:" in embed.description
+    assert "⚙ **Model Configuration**" in content
+    assert "Current: `gpt-5.5`" in content
+    assert "Select a provider to switch models:" in content
+    select = next(child for child in view.children if getattr(child, "custom_id", None) == "model_provider_select")
+    assert select.placeholder == "Current: gpt-5.5 | choose provider..."

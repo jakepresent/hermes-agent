@@ -4645,9 +4645,8 @@ class DiscordAdapter(BasePlatformAdapter):
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
             )
-            embed = view._build_provider_embed()
 
-            msg = await channel.send(embed=embed, view=view)
+            msg = await channel.send(content=view._build_provider_content(), view=view)
             view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
 
@@ -5733,20 +5732,17 @@ def _define_discord_view_classes() -> None:
 
             self._build_provider_select()
 
-        def _build_provider_embed(self):
+        def _build_provider_content(self) -> str:
             try:
                 from hermes_cli.providers import get_label
                 provider_label = get_label(self.current_provider)
             except Exception:
                 provider_label = self.current_provider
-            return discord.Embed(
-                title="⚙ Model Configuration",
-                description=(
-                    f"Current: `{self.current_model or 'unknown'}`\n"
-                    f"Provider: {provider_label}\n\n"
-                    f"Select a provider to switch models:"
-                ),
-                color=discord.Color.blue(),
+            return (
+                "⚙ **Model Configuration**\n"
+                f"Current: `{self.current_model or 'unknown'}`\n"
+                f"Provider: {provider_label}\n\n"
+                "Select a provider to switch models:"
             )
 
         def _check_auth(self, interaction: discord.Interaction) -> bool:
@@ -5772,8 +5768,11 @@ def _define_discord_view_classes() -> None:
             if not options:
                 return
 
+            current_preview = self.current_model or "unknown"
+            if len(current_preview) > 80:
+                current_preview = current_preview[:77] + "..."
             select = discord.ui.Select(
-                placeholder="Choose a provider...",
+                placeholder=f"Current: {current_preview} | choose provider...",
                 options=options[:25],
                 custom_id="model_provider_select",
             )
@@ -5909,7 +5908,8 @@ def _define_discord_view_classes() -> None:
             self._build_provider_select()
 
             await interaction.response.edit_message(
-                embed=self._build_provider_embed(),
+                content=self._build_provider_content(),
+                embed=None,
                 view=self,
             )
 

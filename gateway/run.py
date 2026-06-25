@@ -7750,6 +7750,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     adapter._pending_messages[_quick_key] = queued_event
                 return "No active agent — /steer queued for the next turn."
 
+            # /busy changes the control-plane behavior for future messages and
+            # is safe while the agent is running. It should not itself be
+            # queued/interrupted by the busy-message path.
+            if _cmd_def_inner and _cmd_def_inner.name == "busy":
+                return await self._handle_busy_command(event)
+
             # /model must not be used while the agent is running.
             if _cmd_def_inner and _cmd_def_inner.name == "model":
                 return "Agent is running — wait or /stop first, then switch models."
@@ -8130,6 +8136,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         if canonical == "yolo":
             return await self._handle_yolo_command(event)
+
+        if canonical == "busy":
+            return await self._handle_busy_command(event)
 
         if canonical == "model":
             return await self._handle_model_command(event)
@@ -12802,6 +12811,37 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return prefix
         return user_text
 
+    async def _persist_voice_transcript(
+        self,
+        transcript: str,
+        audio_path: str,
+    ) -> None:
+        """Persist an inbound voice transcript to a daily searchable markdown log."""
+        if not getattr(self.config, "persist_voice_transcripts", False):
+            return
+        transcript = (transcript or "").strip()
+        if not transcript:
+            return
+        try:
+            configured_dir = getattr(self.config, "voice_transcripts_dir", "") or ""
+            out_dir = Path(configured_dir).expanduser() if configured_dir else (
+                _hermes_home / "memories" / "memory-media" / "transcripts"
+            )
+            out_dir.mkdir(parents=True, exist_ok=True)
+            today = datetime.now().strftime("%Y-%m-%d")
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S %Z")
+            audio_name = os.path.basename(audio_path or "")
+            # Keep the transcript text verbatim, but keep metadata minimal and local.
+            entry = f"\n## {timestamp}\n\n- Audio file: `{audio_name}`\n- Transcript: {transcript}\n"
+            target = out_dir / f"{today}.md"
+            if not target.exists():
+                target.write_text(f"# Voice transcripts - {today}\n", encoding="utf-8")
+            with target.open("a", encoding="utf-8") as f:
+                f.write(entry)
+            logger.info("Persisted voice transcript to %s", target)
+        except Exception as e:
+            logger.warning("Failed to persist voice transcript: %s", e)
+
     async def _enrich_message_with_transcription(
         self,
         user_text: str,
@@ -12855,6 +12895,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 result = await asyncio.to_thread(transcribe_audio, path)
                 if result["success"]:
                     transcript = result["transcript"]
+                    await self._persist_voice_transcript(transcript, path)
                     successful_transcripts.append(transcript)
                     enriched_parts.append(
                         f'[The user sent a voice message~ '

@@ -15,6 +15,16 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _clear_aux_unhealthy_cache():
+    import agent.auxiliary_client as aux
+
+    aux._reset_aux_unhealthy_cache()
+    yield
+    aux._reset_aux_unhealthy_cache()
 
 
 # ── Text aux tasks — _resolve_auto ──────────────────────────────────────────

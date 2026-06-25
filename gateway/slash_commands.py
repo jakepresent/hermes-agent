@@ -2354,6 +2354,57 @@ class GatewaySlashCommandsMixin:
             return t("gateway.fast.saved", label=label)
         return t("gateway.fast.session_only", label=label)
 
+    async def _handle_busy_command(self, event: MessageEvent) -> str:
+        """Handle /busy — control gateway busy-input behavior."""
+        from gateway.run import _hermes_home
+        import yaml
+
+        args = event.get_command_args().strip().lower()
+        config_path = _hermes_home / "config.yaml"
+
+        def _behavior(mode: str) -> str:
+            if mode == "queue":
+                return "new messages queue for the next turn while Hermes is busy"
+            if mode == "steer":
+                return "new messages steer into the current run after the next tool call"
+            return "new messages interrupt the current run while Hermes is busy"
+
+        if not args or args == "status":
+            current = getattr(self, "_busy_input_mode", "interrupt") or "interrupt"
+            return (
+                f"Busy input mode: `{current}`\n"
+                f"Behavior: {_behavior(current)}.\n"
+                "Usage: `/busy queue`, `/busy steer`, `/busy interrupt`, or `/busy status`."
+            )
+
+        if args not in {"queue", "steer", "interrupt"}:
+            return (
+                f"Unknown busy mode: `{args}`\n"
+                "Usage: `/busy queue`, `/busy steer`, `/busy interrupt`, or `/busy status`."
+            )
+
+        try:
+            user_config = {}
+            if config_path.exists():
+                with open(config_path, encoding="utf-8") as f:
+                    user_config = yaml.safe_load(f) or {}
+            if "display" not in user_config or not isinstance(user_config.get("display"), dict):
+                user_config["display"] = {}
+            user_config["display"]["busy_input_mode"] = args
+            atomic_yaml_write(config_path, user_config)
+        except Exception as exc:
+            logger.error("Failed to save busy input mode: %s", exc)
+            self._busy_input_mode = args
+            return (
+                f"Busy input mode set to `{args}` for this gateway process, "
+                f"but saving to config failed: {exc}"
+            )
+
+        self._busy_input_mode = args
+        if hasattr(self, "_busy_ack_ts"):
+            self._busy_ack_ts.clear()
+        return f"✓ Busy input mode set to `{args}`. {_behavior(args).capitalize()}."
+
     async def _handle_yolo_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /yolo — toggle dangerous command approval bypass for this session only."""
         from tools.approval import (

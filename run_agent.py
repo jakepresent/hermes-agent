@@ -4935,12 +4935,21 @@ class AIAgent:
         else:
             requested_effort = "medium"
 
-        if requested_effort == "xhigh" and "high" in supported_efforts:
+        if requested_effort == "minimal" and "low" in supported_efforts:
+            requested_effort = "low"
+        elif requested_effort == "max" and "max" not in supported_efforts:
+            if "xhigh" in supported_efforts:
+                requested_effort = "xhigh"
+            elif "high" in supported_efforts:
+                requested_effort = "high"
+        elif (
+            requested_effort == "xhigh"
+            and "xhigh" not in supported_efforts
+            and "high" in supported_efforts
+        ):
             requested_effort = "high"
-        elif requested_effort not in supported_efforts:
-            if requested_effort == "minimal" and "low" in supported_efforts:
-                requested_effort = "low"
-            elif "medium" in supported_efforts:
+        if requested_effort not in supported_efforts:
+            if "medium" in supported_efforts:
                 requested_effort = "medium"
             else:
                 requested_effort = supported_efforts[0]

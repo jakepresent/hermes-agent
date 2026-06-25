@@ -26,7 +26,6 @@ Design:
 import json
 import logging
 import os
-import re
 import tempfile
 import time
 from contextlib import contextmanager
@@ -58,8 +57,6 @@ def get_memory_dir() -> Path:
     return get_hermes_home() / "memories"
 
 ENTRY_DELIMITER = "\n§\n"
-BACKGROUND_REVIEW_DURABLE_NOTE_THRESHOLD = 0.90
-DURABLE_NOTES_FILENAME = "DURABLE_NOTES.md"
 
 
 # ---------------------------------------------------------------------------
@@ -252,151 +249,6 @@ class MemoryStore:
             return mem_dir / "USER.md"
         return mem_dir / "MEMORY.md"
 
-    @staticmethod
-    def _durable_notes_path() -> Path:
-        """Profile-scoped durable note sink for non-injected background notes."""
-        return get_memory_dir() / DURABLE_NOTES_FILENAME
-
-    def _durable_topic_for_content(self, target: str, content: str) -> str:
-        """Map a background-review note to a coarse durable-note topic."""
-        text = content.lower()
-        topic_rules = [
-            ("autofilmcrop", ("autofilmcrop", "lightroom", "preview cache", "crop bounds")),
-            ("ngng", ("no grain no gain", "ngng", "c-41", "ecn-2", "film chemistry")),
-            ("mamiya", ("mamiya", "mamiyapan", "645 half-frame", "half frame")),
-            ("microsoft", ("microsoft", "coreai", "responsible ai", "teams")),
-            ("hermes", ("hermes", "background review", "durable notes", "memory", "provider", "copilot", "codex")),
-            ("health", ("health", "training", "bloodwork", "hormone", "diet")),
-            ("dating", ("dating", "texting", "hinge", "date")),
-            ("hardware", ("p520", "mac", "smb", "ethernet", "final cut", "fcp")),
-            ("travel", ("travel", "flight", "hotel", "trip")),
-        ]
-        for topic, needles in topic_rules:
-            if any(needle in text for needle in needles):
-                return topic
-        if target == "user":
-            return "user-profile"
-        return "general"
-
-    @staticmethod
-    def _durable_topic_pointer(topic: str) -> str:
-        return (
-            f"Durable notes/{topic} → memories/{DURABLE_NOTES_FILENAME}"
-            f"#topic-{topic} (pending compaction)."
-        )
-
-    @staticmethod
-    def _append_note_to_topic(existing: str, topic: str, preamble: str, entry: str) -> str:
-        """Append ``entry`` under ``## Topic: <topic>`` while preserving groups."""
-        heading = f"## Topic: {topic}"
-        if not existing.strip():
-            return preamble.rstrip() + f"\n\n{heading}" + entry
-        if heading not in existing:
-            return existing.rstrip() + f"\n\n{heading}" + entry
-
-        start = existing.index(heading)
-        next_heading = existing.find("\n## Topic: ", start + len(heading))
-        if next_heading == -1:
-            return existing.rstrip() + entry
-        return existing[:next_heading].rstrip() + entry + "\n" + existing[next_heading:].lstrip("\n")
-
-    def _ensure_durable_topic_pointer(self, target: str, topic: str) -> tuple[bool, str, str]:
-        """Add a short injected-memory pointer for a durable-note topic if safe."""
-        pointer_entry = self._durable_topic_pointer(topic)
-        entries = self._entries_for(target)
-        if any(e == pointer_entry for e in entries):
-            return False, "already_exists", pointer_entry
-
-        limit = self._char_limit(target)
-        candidate_entries = entries + [pointer_entry]
-        new_total = len(ENTRY_DELIMITER.join(candidate_entries))
-        if new_total > limit:
-            return False, "skipped_full", pointer_entry
-
-        entries.append(pointer_entry)
-        self._set_entries(target, entries)
-        self.save_to_disk(target)
-        return True, "added", pointer_entry
-
-    def _durable_note_reason(self, target: str, new_total: int) -> str:
-        limit = self._char_limit(target)
-        if limit <= 0 or new_total > limit:
-            return "over_limit"
-        current = self._char_count(target)
-        if (
-            current / limit >= BACKGROUND_REVIEW_DURABLE_NOTE_THRESHOLD
-            or new_total / limit >= BACKGROUND_REVIEW_DURABLE_NOTE_THRESHOLD
-        ):
-            return "near_limit"
-        return "background_default"
-
-    def _save_background_review_durable_note(
-        self,
-        target: str,
-        content: str,
-        *,
-        new_total: int,
-    ) -> Dict[str, Any]:
-        """Append a background-review note outside injected MEMORY.md/USER.md."""
-        from agent.redact import redact_sensitive_text
-
-        current = self._char_count(target)
-        limit = self._char_limit(target)
-        reason = self._durable_note_reason(target, new_total)
-        topic = self._durable_topic_for_content(target, content)
-        pointer_updated, pointer_status, pointer_entry = self._ensure_durable_topic_pointer(
-            target,
-            topic,
-        )
-        timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        safe_content = redact_sensitive_text(content, force=True)
-        safe_content = re.sub(
-            r"(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{2,}\.\.\.[A-Za-z0-9_-]{2,}(?![A-Za-z0-9_-])",
-            "[REDACTED]",
-            safe_content,
-        )
-        path = self._durable_notes_path()
-        preamble = (
-            "# Durable Notes\n\n"
-            "Background self-improvement review writes here when built-in "
-            "MEMORY.md / USER.md is near its prompt-injected character cap. "
-            "These notes are durable and searchable, but they are not injected "
-            "into every system prompt.\n"
-        )
-        entry = (
-            f"\n\n### {timestamp} — background_review\n"
-            f"- target: {target}\n"
-            f"- reason: {reason.replace('_', ' ')}\n"
-            f"- usage: {current:,}/{limit:,} chars\n"
-            f"- attempted_entry_chars: {len(content):,}\n"
-            f"- pointer_status: {pointer_status}\n"
-            "- injected_memory_updated: false\n\n"
-            f"{safe_content}\n"
-        )
-
-        with self._file_lock(path):
-            path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                existing = path.read_text(encoding="utf-8") if path.exists() else ""
-            except (OSError, IOError):
-                existing = ""
-            next_text = self._append_note_to_topic(existing, topic, preamble, entry)
-            self._write_text_file(path, next_text)
-
-        return {
-            "success": True,
-            "target": target,
-            "storage": "durable_notes",
-            "message": "Durable notes updated.",
-            "durable_note_path": str(path),
-            "durable_topic": topic,
-            "pointer_entry": pointer_entry,
-            "pointer_status": pointer_status,
-            "injected_memory_updated": pointer_updated,
-            "usage": f"{current:,}/{limit:,}",
-            "reason": reason,
-        }
-
     def _reload_target(self, target: str) -> Optional[str]:
         """Re-read entries from disk into in-memory state.
 
@@ -442,50 +294,7 @@ class MemoryStore:
             return self.user_char_limit
         return self.memory_char_limit
 
-    @staticmethod
-    def _entry_summaries(entries: List[str], *, limit: int = 5, preview_chars: int = 120) -> List[Dict[str, Any]]:
-        """Return compact summaries of the largest entries for full-store errors."""
-        summaries: List[Dict[str, Any]] = []
-        for idx, entry in sorted(
-            enumerate(entries), key=lambda item: len(item[1]), reverse=True
-        )[:limit]:
-            preview = entry.replace("\n", " / ")
-            if len(preview) > preview_chars:
-                preview = preview[:preview_chars].rstrip() + "..."
-            summaries.append({"index": idx, "chars": len(entry), "preview": preview})
-        return summaries
-
-    def _full_store_error(
-        self,
-        target: str,
-        content: str,
-        current: int,
-        limit: int,
-        entries: List[str],
-    ) -> Dict[str, Any]:
-        """Build a compact over-limit response without dumping the whole store."""
-        return {
-            "success": False,
-            "target": target,
-            "error_code": "memory_store_full",
-            "error": (
-                f"Memory at {current:,}/{limit:,} chars. "
-                f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                "Replace or remove existing entries first."
-            ),
-            "usage": f"{current}/{limit}",
-            "attempted_entry_chars": len(content),
-            "largest_entries": self._entry_summaries(entries),
-            "recommended_action": "replace_or_remove_existing_entry",
-        }
-
-    def add(
-        self,
-        target: str,
-        content: str,
-        *,
-        write_origin: str = "assistant_tool",
-    ) -> Dict[str, Any]:
+    def add(self, target: str, content: str) -> Dict[str, Any]:
         """Append a new entry. Returns error if it would exceed the char limit."""
         content = content.strip()
         if not content:
@@ -516,16 +325,20 @@ class MemoryStore:
             new_entries = entries + [content]
             new_total = len(ENTRY_DELIMITER.join(new_entries))
 
-            if write_origin == "background_review":
-                return self._save_background_review_durable_note(
-                    target,
-                    content,
-                    new_total=new_total,
-                )
-
             if new_total > limit:
                 current = self._char_count(target)
-                return self._full_store_error(target, content, current, limit, entries)
+                return {
+                    "success": False,
+                    "error": (
+                        f"Memory at {current:,}/{limit:,} chars. "
+                        f"Adding this entry ({len(content)} chars) would exceed the limit. "
+                        f"Consolidate now: use 'replace' to merge overlapping entries into "
+                        f"shorter ones or 'remove' stale or less important entries (see "
+                        f"current_entries below), then retry this add — all in this turn."
+                    ),
+                    "current_entries": entries,
+                    "usage": f"{current:,}/{limit:,}",
+                }
 
             entries.append(content)
             self._set_entries(target, entries)
@@ -579,12 +392,17 @@ class MemoryStore:
             new_total = len(ENTRY_DELIMITER.join(test_entries))
 
             if new_total > limit:
+                current = self._char_count(target)
                 return {
                     "success": False,
                     "error": (
                         f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
-                        f"Shorten the new content or remove other entries first."
+                        f"Shorten the new content, or 'remove' other stale or less important "
+                        f"entries to make room (see current_entries below), then retry — all "
+                        f"in this turn."
                     ),
+                    "current_entries": entries,
+                    "usage": f"{current:,}/{limit:,}",
                 }
 
             entries[idx] = new_content
@@ -629,6 +447,124 @@ class MemoryStore:
 
         return self._success_response(target, "Entry removed.")
 
+    def apply_batch(self, target: str, operations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Apply a sequence of add/replace/remove ops to one target atomically.
+
+        All operations are validated and applied against the FINAL budget --
+        intermediate overflow is irrelevant. This lets the model free space
+        (remove/replace) and add new entries in a SINGLE tool call instead of
+        the multi-turn consolidate-then-retry dance that re-sends the whole
+        conversation context several times.
+
+        Semantics: all-or-nothing. If any op is malformed, doesn't match, or
+        the net result would exceed the char limit, NOTHING is written and an
+        error is returned describing the first failure plus the live state.
+        """
+        if not operations:
+            return {"success": False, "error": "operations list is empty."}
+
+        # Scan every add/replace content for injection/exfil BEFORE touching
+        # disk -- a single poisoned op rejects the whole batch.
+        for i, op in enumerate(operations):
+            act = (op or {}).get("action")
+            new_content = (op or {}).get("content")
+            if act in {"add", "replace"} and new_content:
+                scan_error = _scan_memory_content(new_content)
+                if scan_error:
+                    return {"success": False, "error": f"Operation {i + 1}: {scan_error}"}
+
+        with self._file_lock(self._path_for(target)):
+            bak = self._reload_target(target)
+            if bak:
+                return _drift_error(self._path_for(target), bak)
+
+            # Work on a copy; only commit if the whole batch validates.
+            working: List[str] = list(self._entries_for(target))
+            limit = self._char_limit(target)
+
+            for i, op in enumerate(operations):
+                op = op or {}
+                act = op.get("action")
+                content = (op.get("content") or "").strip()
+                old_text = (op.get("old_text") or "").strip()
+                pos = f"Operation {i + 1} ({act or 'unknown'})"
+
+                if act == "add":
+                    if not content:
+                        return self._batch_error(target, f"{pos}: content is required.")
+                    if content in working:
+                        continue  # idempotent -- skip duplicate, don't fail the batch
+                    working.append(content)
+
+                elif act == "replace":
+                    if not old_text:
+                        return self._batch_error(target, f"{pos}: old_text is required.")
+                    if not content:
+                        return self._batch_error(
+                            target,
+                            f"{pos}: content is required (use action='remove' to delete).",
+                        )
+                    matches = [j for j, e in enumerate(working) if old_text in e]
+                    if not matches:
+                        return self._batch_error(target, f"{pos}: no entry matched '{old_text}'.")
+                    if len({working[j] for j in matches}) > 1:
+                        return self._batch_error(
+                            target,
+                            f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.",
+                        )
+                    working[matches[0]] = content
+
+                elif act == "remove":
+                    if not old_text:
+                        return self._batch_error(target, f"{pos}: old_text is required.")
+                    matches = [j for j, e in enumerate(working) if old_text in e]
+                    if not matches:
+                        return self._batch_error(target, f"{pos}: no entry matched '{old_text}'.")
+                    if len({working[j] for j in matches}) > 1:
+                        return self._batch_error(
+                            target,
+                            f"{pos}: '{old_text}' matched multiple distinct entries -- be more specific.",
+                        )
+                    working.pop(matches[0])
+
+                else:
+                    return self._batch_error(
+                        target,
+                        f"{pos}: unknown action. Use add, replace, or remove.",
+                    )
+
+            # Budget check against the FINAL state only.
+            new_total = len(ENTRY_DELIMITER.join(working)) if working else 0
+            if new_total > limit:
+                current = self._char_count(target)
+                return {
+                    "success": False,
+                    "error": (
+                        f"After applying all {len(operations)} operations, memory would be at "
+                        f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
+                        f"entries in the same batch (see current_entries below), then retry."
+                    ),
+                    "current_entries": self._entries_for(target),
+                    "usage": f"{current:,}/{limit:,}",
+                }
+
+            # Commit.
+            self._set_entries(target, working)
+            self.save_to_disk(target)
+
+        return self._success_response(target, f"Applied {len(operations)} operation(s).")
+
+    def _batch_error(self, target: str, message: str) -> Dict[str, Any]:
+        """Build a batch-abort error that reports live (uncommitted) state."""
+        current = self._char_count(target)
+        limit = self._char_limit(target)
+        return {
+            "success": False,
+            "error": message + " No operations were applied (batch is all-or-nothing).",
+            "current_entries": self._entries_for(target),
+            "usage": f"{current:,}/{limit:,}",
+        }
+
     def format_for_system_prompt(self, target: str) -> Optional[str]:
         """
         Return the frozen snapshot for system prompt injection.
@@ -650,15 +586,23 @@ class MemoryStore:
         limit = self._char_limit(target)
         pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
 
+        # The success response is intentionally TERMINAL: it confirms the write
+        # landed and tells the model to stop. We do NOT echo the full entries
+        # list here -- dumping it invites the model to "find more to fix" and
+        # re-issue the same operations (observed thrash: the correct batch on
+        # call 1, then 5 redundant repeats). Entries are only shown on the
+        # error/over-budget paths, where the model genuinely needs them to
+        # decide what to consolidate.
         resp = {
             "success": True,
+            "done": True,
             "target": target,
-            "entries": entries,
             "usage": f"{pct}% — {current:,}/{limit:,} chars",
             "entry_count": len(entries),
         }
         if message:
             resp["message"] = message
+        resp["note"] = "Write saved. This update is complete — do not repeat it."
         return resp
 
     def _render_block(self, target: str, entries: List[str]) -> str:
@@ -787,39 +731,126 @@ class MemoryStore:
         except (OSError, IOError) as e:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
 
-    @staticmethod
-    def _write_text_file(path: Path, content: str):
-        """Write a free-form text file using atomic temp-file + rename."""
-        try:
-            fd, tmp_path = tempfile.mkstemp(
-                dir=str(path.parent), suffix=".tmp", prefix=".notes_"
-            )
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as f:
-                    f.write(content)
-                    f.flush()
-                    os.fsync(f.fileno())
-                atomic_replace(tmp_path, path)
-            except BaseException:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
-                raise
-        except (OSError, IOError) as e:
-            raise RuntimeError(f"Failed to write durable notes file {path}: {e}")
+
+def _apply_write_gate(action: str, target: str, content: Optional[str],
+                      old_text: Optional[str]) -> Optional[str]:
+    """Evaluate the memory write gate. Returns a JSON tool-result string when
+    the write should NOT proceed normally (blocked or staged), or None when the
+    caller should perform the real write.
+
+    Only the mutating actions (add/replace/remove) are gated.
+    """
+    if action not in {"add", "replace", "remove"}:
+        return None
+
+    try:
+        from tools import write_approval as wa
+    except Exception:
+        # If the gate module can't load, fail open (current behaviour) rather
+        # than blocking all memory writes.
+        return None
+
+    # Build a small inline summary/detail for the foreground approval prompt.
+    label = "user profile" if target == "user" else "memory"
+    if action == "add":
+        summary = f"add to {label}"
+        detail = content or ""
+    elif action == "replace":
+        summary = f"replace in {label}"
+        detail = f"old: {old_text}\nnew: {content}"
+    else:  # remove
+        summary = f"remove from {label}"
+        detail = old_text or ""
+
+    decision = wa.evaluate_gate(wa.MEMORY, inline_summary=summary, inline_detail=detail)
+
+    if decision.allow:
+        return None
+
+    if decision.blocked:
+        return tool_error(decision.message, success=False)
+
+    # stage
+    payload = {
+        "action": action,
+        "target": target,
+        "content": content,
+        "old_text": old_text,
+    }
+    record = wa.stage_write(
+        wa.MEMORY, payload,
+        summary=f"{summary}: {detail[:120]}",
+        origin=wa.current_origin(),
+    )
+    return json.dumps(
+        {"success": True, "staged": True, "pending_id": record["id"],
+         "message": decision.message},
+        ensure_ascii=False,
+    )
+
+
+def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Optional[str]:
+    """Evaluate the write gate for a batch of memory operations.
+
+    Returns a JSON tool-result string when the batch should NOT proceed
+    (blocked or staged), or None when the caller should perform the real
+    batch write. The whole batch is gated as a single unit.
+    """
+    try:
+        from tools import write_approval as wa
+    except Exception:
+        return None
+
+    label = "user profile" if target == "user" else "memory"
+    summary = f"apply {len(operations)} op(s) to {label}"
+    detail_lines = []
+    for op in operations:
+        op = op or {}
+        act = op.get("action", "?")
+        if act == "remove":
+            detail_lines.append(f"- remove: {op.get('old_text', '')}")
+        elif act == "replace":
+            detail_lines.append(f"- replace: {op.get('old_text', '')} -> {op.get('content', '')}")
+        else:
+            detail_lines.append(f"- {act}: {op.get('content', '')}")
+    detail = "\n".join(detail_lines)
+
+    decision = wa.evaluate_gate(wa.MEMORY, inline_summary=summary, inline_detail=detail)
+
+    if decision.allow:
+        return None
+
+    if decision.blocked:
+        return tool_error(decision.message, success=False)
+
+    payload = {"action": "batch", "target": target, "operations": operations}
+    record = wa.stage_write(
+        wa.MEMORY, payload,
+        summary=f"{summary}: {detail[:120]}",
+        origin=wa.current_origin(),
+    )
+    return json.dumps(
+        {"success": True, "staged": True, "pending_id": record["id"],
+         "message": decision.message},
+        ensure_ascii=False,
+    )
 
 
 def memory_tool(
-    action: str,
+    action: str = None,
     target: str = "memory",
     content: str = None,
     old_text: str = None,
+    operations: Optional[List[Dict[str, Any]]] = None,
     store: Optional[MemoryStore] = None,
-    write_origin: str = "assistant_tool",
 ) -> str:
     """
     Single entry point for the memory tool. Dispatches to MemoryStore methods.
+
+    Two shapes:
+      - Single op: action + (content / old_text).
+      - Batch:     operations=[{action, content?, old_text?}, ...] applied
+                   atomically against the final char budget in ONE call.
 
     Returns JSON string with results.
     """
@@ -829,25 +860,40 @@ def memory_tool(
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
 
+    # --- Batch path -------------------------------------------------------
+    if operations:
+        if not isinstance(operations, list):
+            return tool_error("operations must be a list of {action, content?, old_text?} objects.", success=False)
+        gate_result = _apply_batch_write_gate(target, operations)
+        if gate_result is not None:
+            return gate_result
+        result = store.apply_batch(target, operations)
+        return json.dumps(result, ensure_ascii=False)
+
+    # --- Single-op path ---------------------------------------------------
+    # Validate required params BEFORE the gate so an invalid write is rejected
+    # immediately instead of being staged and only failing at approve time.
+    if action == "add" and not content:
+        return tool_error("Content is required for 'add' action.", success=False)
+    if action == "replace" and (not old_text or not content):
+        missing = "old_text" if not old_text else "content"
+        return tool_error(f"{missing} is required for 'replace' action.", success=False)
+    if action == "remove" and not old_text:
+        return tool_error("old_text is required for 'remove' action.", success=False)
+
+    # Approval gate: when on, stages the write (background/gateway) or prompts
+    # inline (interactive CLI); when off (default) passes straight through.
+    gate_result = _apply_write_gate(action, target, content, old_text)
+    if gate_result is not None:
+        return gate_result
+
     if action == "add":
-        if not content:
-            return tool_error("Content is required for 'add' action.", success=False)
-        result = store.add(
-            target,
-            content,
-            write_origin=write_origin or "assistant_tool",
-        )
+        result = store.add(target, content)
 
     elif action == "replace":
-        if not old_text:
-            return tool_error("old_text is required for 'replace' action.", success=False)
-        if not content:
-            return tool_error("content is required for 'replace' action.", success=False)
         result = store.replace(target, old_text, content)
 
     elif action == "remove":
-        if not old_text:
-            return tool_error("old_text is required for 'remove' action.", success=False)
         result = store.remove(target, old_text)
 
     else:
@@ -861,34 +907,51 @@ def check_memory_requirements() -> bool:
     return True
 
 
-# =============================================================================
+def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[str, Any]:
+    """Replay a staged memory write directly against the store, bypassing the
+    write gate. Called by the /memory approve handler.
+
+    Returns the store's result dict.
+    """
+    action = payload.get("action")
+    target = payload.get("target", "memory")
+    content = payload.get("content") or ""
+    old_text = payload.get("old_text") or ""
+    if action == "batch":
+        return store.apply_batch(target, payload.get("operations") or [])
+    if action == "add":
+        return store.add(target, content)
+    if action == "replace":
+        return store.replace(target, old_text, content)
+    if action == "remove":
+        return store.remove(target, old_text)
+    return {"success": False, "error": f"Unknown staged action '{action}'."}
 # OpenAI Function-Calling Schema
 # =============================================================================
 
 MEMORY_SCHEMA = {
     "name": "memory",
     "description": (
-        "Save durable information to persistent memory that survives across sessions. "
-        "Memory is injected into future turns, so keep it compact and focused on facts "
-        "that will still matter later.\n\n"
-        "WHEN TO SAVE (do this proactively, don't wait to be asked):\n"
-        "- User corrects you or says 'remember this' / 'don't do that again'\n"
-        "- User shares a preference, habit, or personal detail (name, role, timezone, coding style)\n"
-        "- You discover something about the environment (OS, installed tools, project structure)\n"
-        "- You learn a convention, API quirk, or workflow specific to this user's setup\n"
-        "- You identify a stable fact that will be useful again in future sessions\n\n"
-        "PRIORITY: User preferences and corrections > environment facts > procedural knowledge. "
-        "The most valuable memory prevents the user from having to repeat themselves.\n\n"
-        "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-        "state to memory; use session_search to recall those from past transcripts.\n"
-        "If you've discovered a new way to do something, solved a problem that could be "
-        "necessary later, save it as a skill with the skill tool.\n\n"
-        "TWO TARGETS:\n"
-        "- 'user': who the user is -- name, role, preferences, communication style, pet peeves\n"
-        "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
-        "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
-        "remove (delete -- old_text identifies it).\n\n"
-        "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
+        "Save durable facts to persistent memory that survive across sessions. Memory is "
+        "injected into every future turn, so keep entries compact and high-signal.\n\n"
+        "HOW: make ALL your changes in ONE call via an 'operations' array (each item: "
+        "{action, content?, old_text?}). The batch applies atomically and the char limit is "
+        "checked only on the FINAL result — so a single call can remove/replace stale entries "
+        "to free room AND add new ones, even when an add alone would overflow. The response "
+        "reports current/limit chars and confirms completion; one batch call finishes the "
+        "update, so don't repeat it. Use the bare action/content/old_text fields only for a "
+        "single lone change.\n\n"
+        "WHEN: save proactively when the user states a preference, correction, or personal "
+        "detail, or you learn a stable fact about their environment, conventions, or workflow. "
+        "Priority: user preferences & corrections > environment facts > procedures. The best "
+        "memory stops the user repeating themselves.\n\n"
+        "IF FULL: an add is rejected with the current entries shown. Reissue as ONE batch that "
+        "removes or shortens enough stale entries and adds the new one together.\n\n"
+        "TARGETS: 'user' = who the user is (name, role, preferences, style). 'memory' = your "
+        "notes (environment, conventions, tool quirks, lessons).\n\n"
+        "SKIP: trivial/obvious info, easily re-discovered facts, raw data dumps, task progress, "
+        "completed-work logs, temporary TODO state (use session_search for those). Reusable "
+        "procedures belong in a skill, not memory."
     ),
     "parameters": {
         "type": "object",
@@ -896,7 +959,7 @@ MEMORY_SCHEMA = {
             "action": {
                 "type": "string",
                 "enum": ["add", "replace", "remove"],
-                "description": "The action to perform."
+                "description": "The action to perform (single-op shape). Omit when using 'operations'."
             },
             "target": {
                 "type": "string",
@@ -905,14 +968,31 @@ MEMORY_SCHEMA = {
             },
             "content": {
                 "type": "string",
-                "description": "The entry content. Required for 'add' and 'replace'."
+                "description": "The entry content. Required for 'add' and 'replace' (single-op shape)."
             },
             "old_text": {
                 "type": "string",
-                "description": "Short unique substring identifying the entry to replace or remove."
+                "description": "Short unique substring identifying the entry to replace or remove (single-op shape)."
+            },
+            "operations": {
+                "type": "array",
+                "description": (
+                    "Batch shape: a list of operations applied atomically in one call "
+                    "against the final char budget. Preferred when making multiple changes "
+                    "or consolidating to make room. Each item is {action, content?, old_text?}."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string", "enum": ["add", "replace", "remove"]},
+                        "content": {"type": "string", "description": "Entry content for add/replace."},
+                        "old_text": {"type": "string", "description": "Substring identifying the entry for replace/remove."},
+                    },
+                    "required": ["action"],
+                },
             },
         },
-        "required": ["action", "target"],
+        "required": ["target"],
     },
 }
 
@@ -929,8 +1009,8 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
-        store=kw.get("store"),
-        write_origin=kw.get("write_origin", "assistant_tool")),
+        operations=args.get("operations"),
+        store=kw.get("store")),
     check_fn=check_memory_requirements,
     emoji="🧠",
 )

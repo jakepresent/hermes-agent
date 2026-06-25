@@ -54,7 +54,7 @@ async def test_model_picker_clears_controls_before_running_switch_callback():
         current_provider="copilot",
         session_key="session-1",
         on_model_selected=on_model_selected,
-        allowed_user_ids=set(),
+        allowed_user_ids={"123"},  # matches the interaction user; empty = fail-closed
     )
     view._selected_provider = "copilot"
 
@@ -82,28 +82,89 @@ async def test_model_picker_clears_controls_before_running_switch_callback():
     interaction.edit_original_response.assert_awaited_once()
 
 
-def test_model_picker_provider_view_shows_current_model():
+@pytest.mark.asyncio
+async def test_expensive_model_requires_confirmation(monkeypatch):
+    events: list[object] = []
+
+    async def on_model_selected(chat_id: str, model_id: str, provider_slug: str) -> str:
+        events.append(("switch", chat_id, model_id, provider_slug))
+        return "Model switched"
+
+    async def edit_message(**kwargs):
+        events.append(
+            (
+                "edit",
+                kwargs["embed"].title,
+                kwargs["embed"].description,
+                kwargs["view"],
+            )
+        )
+
+    async def edit_original_response(**kwargs):
+        events.append((
+            "final-edit",
+            kwargs["embed"].title,
+            kwargs["embed"].description,
+            kwargs["view"],
+        ))
+
+    monkeypatch.setattr(
+        "hermes_cli.model_cost_guard.expensive_model_warning",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            message="!!! EXPENSIVE MODEL WARNING !!!\ndid you mean to select openai/gpt-5.5?"
+        ),
+    )
+
     view = ModelPickerView(
         providers=[
             {
-                "slug": "copilot",
-                "name": "GitHub Copilot",
-                "models": ["gpt-5.5"],
+                "slug": "openrouter",
+                "name": "OpenRouter",
+                "models": ["openai/gpt-5.5-pro"],
                 "total_models": 1,
                 "is_current": True,
             }
         ],
-        current_model="gpt-5.5",
-        current_provider="copilot",
+        current_model="openai/gpt-5.5",
+        current_provider="openrouter",
         session_key="session-1",
-        on_model_selected=lambda *_args: "",
-        allowed_user_ids=set(),
+        on_model_selected=on_model_selected,
+        allowed_user_ids={"123"},  # matches the interaction user; empty = fail-closed
+    )
+    view._selected_provider = "openrouter"
+
+    interaction = SimpleNamespace(
+        user=SimpleNamespace(id=123),
+        channel_id=456,
+        data={"values": ["openai/gpt-5.5-pro"]},
+        response=SimpleNamespace(
+            send_message=AsyncMock(),
+            edit_message=AsyncMock(side_effect=edit_message),
+        ),
+        edit_original_response=AsyncMock(side_effect=edit_original_response),
     )
 
-    content = view._build_provider_content()
+    await view._on_model_selected(interaction)
 
-    assert "⚙ **Model Configuration**" in content
-    assert "Current: `gpt-5.5`" in content
-    assert "Select a provider to switch models:" in content
-    select = next(child for child in view.children if getattr(child, "custom_id", None) == "model_provider_select")
-    assert select.placeholder == "Current: gpt-5.5 | choose provider..."
+    assert events == [
+        (
+            "edit",
+            "⚠ Expensive Model Warning",
+            "!!! EXPENSIVE MODEL WARNING !!!\ndid you mean to select openai/gpt-5.5?",
+            view,
+        ),
+    ]
+    assert view.resolved is False
+
+    await view._on_expensive_confirm(interaction)
+
+    assert events[1:] == [
+        (
+            "edit",
+            "⚙ Switching Model",
+            "Switching to `openai/gpt-5.5-pro`...",
+            None,
+        ),
+        ("switch", "456", "openai/gpt-5.5-pro", "openrouter"),
+        ("final-edit", "⚙ Model Switched", "Model switched", None),
+    ]

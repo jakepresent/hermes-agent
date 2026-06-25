@@ -168,3 +168,34 @@ async def test_expensive_model_requires_confirmation(monkeypatch):
         ("switch", "456", "openai/gpt-5.5-pro", "openrouter"),
         ("final-edit", "⚙ Model Switched", "Model switched", None),
     ]
+
+
+def test_model_picker_provider_view_shows_current_model():
+    view = ModelPickerView(
+        providers=[
+            {
+                "slug": "copilot",
+                "name": "GitHub Copilot",
+                "models": ["gpt-5.5"],
+                "total_models": 1,
+                "is_current": True,
+            }
+        ],
+        current_model="gpt-5.5",
+        current_provider="copilot",
+        session_key="session-1",
+        on_model_selected=lambda *_args: "",
+        allowed_user_ids=set(),
+    )
+
+    content = view._build_provider_content()
+
+    assert "⚙ **Model Configuration**" in content
+    assert "Current: `gpt-5.5`" in content
+    assert "Select a provider to switch models:" in content
+    select = next(
+        child
+        for child in view.children
+        if getattr(child, "custom_id", None) == "model_provider_select"
+    )
+    assert select.placeholder == "Current: gpt-5.5 | choose provider..."

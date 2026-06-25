@@ -4,6 +4,10 @@ Instructions for AI coding assistants and developers working on the hermes-agent
 
 **Never give up on the right solution.**
 
+## Jake fork divergence manifest
+
+When making Jake-specific Hermes fork changes in this repo, update `docs/jake-fork-divergence-manifest.md` as part of the work unless Jake explicitly says not to. Treat this as automatic, not optional cleanup: add or update the feature section, commit ledger entry, and preservation checks before the final commit, or make an immediate docs follow-up commit if the code commit already exists. Future upgrade sessions depend on this manifest to preserve fork-only behavior.
+
 ## What Hermes Is
 
 Hermes is a personal AI agent that runs the same agent core across a CLI, a

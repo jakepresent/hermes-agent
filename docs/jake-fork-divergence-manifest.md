@@ -11,7 +11,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
 Current branch audited:
 
 - Branch: `jake/integrate-v2026.6.19-20260624-234414`
-- Audited HEAD: `b89de5b558959ccd30392711cf714be428a9c3e0`
+- Audited feature/code HEAD: `438431705` (`fix(dashboard): default sessions to recent activity`). This manifest may live in a later docs-only commit.
 - Current live branch at audit time: `jake/live-stable-v2026.6.5-refresh` at `f7e43b8c5d4b8f5b0ca8c0c38abee19febaf548a`
 - Upstream release integrated: `v2026.6.19`
   - tag object: `681cd638d`
@@ -563,7 +563,46 @@ Preservation checks:
 python -m pytest tests/tools/test_command_guards.py tests/tools/test_approval.py -o 'addopts=' -q
 ```
 
-### 16. Test/environment cleanup and no-net-change commits
+### 16. Dashboard sessions recent-activity ordering
+
+Purpose: keep the dashboard Sessions page useful by ordering conversations by the most recently messaged / active session rather than original creation time.
+
+Core behavior:
+
+- `/api/sessions` defaults to `order=recent`.
+- `order=recent` sorts by latest message/activity across compression chains, so an old but newly-used conversation returns to the first page.
+- `order=created` remains available for original-start-time ordering.
+- The dashboard frontend API client also defaults to `recent`, so `/sessions` asks for the intended ordering explicitly.
+
+Key files:
+
+- `hermes_cli/web_server.py`
+- `web/src/lib/api.ts`
+- `tests/hermes_cli/test_web_server.py`
+
+Commits:
+
+- `438431705` - default dashboard sessions to recent activity.
+
+Preservation checks:
+
+```bash
+python -m pytest \
+  tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_get_sessions_defaults_to_recent_message_order \
+  tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_get_sessions_order_recent_surfaces_compression_tip \
+  tests/hermes_cli/test_web_server.py::TestWebServerEndpoints::test_get_sessions_rejects_unknown_order_value \
+  -o 'addopts=' -q
+npm --workspace web run typecheck
+npm --workspace web run build
+```
+
+Live smoke:
+
+- Restart the dashboard process/service after rebuilding `web` into `hermes_cli/web_dist`.
+- Fetch `/api/sessions?limit=N` and `/api/sessions?limit=N&order=recent` with the dashboard session token; their session id order should match.
+- Fetch `/api/sessions?limit=N&order=created`; it may differ and should preserve the explicit old behavior.
+
+### 17. Test/environment cleanup and no-net-change commits
 
 Purpose: track commits that matter for future archaeology but are not independent product features.
 
@@ -657,6 +696,10 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `89389b4df` `2026-05-28` - `fix: skip GitHub Responses message item replay`
 - `ab4568296` `2026-06-02` - `feat: add fast OCR extraction tool`
 
+### Dashboard sessions UI
+
+- `438431705` `2026-06-25` - `fix(dashboard): default sessions to recent activity`
+
 ### Test-only / no-net-change / integration bookkeeping
 
 - `cd719b5a9` `2026-05-29` - `test: isolate Discord reaction env`
@@ -718,6 +761,7 @@ python -m pytest \
   tests/gateway/test_model_command_status.py \
   tests/gateway/test_discord_model_picker.py \
   tests/gateway/test_api_server.py \
+  tests/hermes_cli/test_web_server.py \
   tests/hermes_cli/test_model_validation.py \
   tests/hermes_cli/test_model_switch_copilot_api_mode.py \
   tests/hermes_cli/test_runtime_provider_resolution.py \
@@ -752,4 +796,4 @@ git show -s --format='%H%n%P%n%s' 6f7057a93
 
 ## Maintenance rule
 
-When a future session adds, drops, or upstreams a fork-only behavior, update this file in the same commit as the relevant code or in a small follow-up docs commit. The file should stay boring and inspectable: feature name, behavior, key files, commit pointers, and verification.
+When a future session adds, drops, or upstreams a fork-only behavior, update this file in the same commit as the relevant code or in a small follow-up docs commit. For Jake-specific Hermes modifications, agents should treat this as automatic work, not optional cleanup: before finalizing, add or update the relevant feature section, commit ledger entry, and preservation check unless Jake explicitly says not to. If the code commit already exists, reference its hash; if the code is still being committed, write the manifest entry before the final commit or make an immediate docs follow-up commit. The file should stay boring and inspectable: feature name, behavior, key files, commit pointers, and verification.

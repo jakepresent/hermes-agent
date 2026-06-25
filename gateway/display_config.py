@@ -45,6 +45,7 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "on_final": True,
         "on_approval": True,
+        "elapsed_seconds": None,
         "rules": [],
     },
     # When true, delete tool-progress / "⏳ Working — N min" / status bubbles

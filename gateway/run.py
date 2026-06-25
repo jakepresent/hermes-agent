@@ -371,6 +371,146 @@ def _sanitize_gateway_final_response(platform: Any, text: str) -> str:
     return redacted
 
 
+def _truthy_config_value(value: Any, *, default: bool = False) -> bool:
+    """Coerce common config boolean spellings."""
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _nonnegative_float(value: Any) -> Optional[float]:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0:
+        return None
+    return number
+
+
+def _long_turn_mention_policy(user_config: dict, platform_key: str) -> dict:
+    """Resolve the opt-in Discord mention policy.
+
+    Final-response mentions are time-only: configure one elapsed threshold via
+    ``elapsed_seconds`` / ``ping_after_seconds`` / ``min_elapsed_seconds`` or via
+    the first rule with one of those keys. Approval prompts ignore elapsed time:
+    when enabled and ``on_approval`` is true, every approval request mentions the
+    requesting user immediately.
+    """
+    if not isinstance(user_config, dict):
+        return {"enabled": False, "elapsed_seconds": None}
+    display_cfg = user_config.get("display") or {}
+    if not isinstance(display_cfg, dict):
+        return {"enabled": False, "elapsed_seconds": None}
+
+    policy: dict = {}
+    global_cfg = display_cfg.get("long_turn_mention")
+    if isinstance(global_cfg, bool):
+        policy["enabled"] = global_cfg
+    elif isinstance(global_cfg, dict):
+        policy.update(global_cfg)
+
+    platforms_cfg = display_cfg.get("platforms") or {}
+    platform_cfg = platforms_cfg.get(platform_key) if isinstance(platforms_cfg, dict) else None
+    platform_policy = platform_cfg.get("long_turn_mention") if isinstance(platform_cfg, dict) else None
+    if isinstance(platform_policy, bool):
+        policy["enabled"] = platform_policy
+    elif isinstance(platform_policy, dict):
+        policy.update(platform_policy)
+
+    elapsed = _nonnegative_float(
+        policy.get("elapsed_seconds", policy.get("ping_after_seconds", policy.get("min_elapsed_seconds")))
+    )
+    rules_raw = policy.get("rules")
+    if elapsed is None:
+        if isinstance(rules_raw, dict):
+            rules_iter = [rules_raw]
+        elif isinstance(rules_raw, list):
+            rules_iter = rules_raw
+        else:
+            rules_iter = []
+        for raw_rule in rules_iter:
+            if not isinstance(raw_rule, dict):
+                continue
+            elapsed = _nonnegative_float(
+                raw_rule.get("elapsed_seconds", raw_rule.get("ping_after_seconds", raw_rule.get("min_elapsed_seconds")))
+            )
+            if elapsed is not None:
+                break
+
+    return {
+        **policy,
+        "enabled": _truthy_config_value(policy.get("enabled"), default=False),
+        "on_final": _truthy_config_value(policy.get("on_final"), default=True),
+        "on_approval": _truthy_config_value(policy.get("on_approval"), default=True),
+        "elapsed_seconds": elapsed,
+    }
+
+
+def _discord_user_mention_from_policy(source: Any, policy: dict) -> str:
+    configured = str(policy.get("mention") or "").strip()
+    if configured:
+        if configured in {"@everyone", "@here"}:
+            return ""
+        if re.fullmatch(r"<@!?\d+>", configured):
+            return configured
+    user_id = str(policy.get("mention_user_id") or getattr(source, "user_id", "") or "").strip()
+    if re.fullmatch(r"\d{5,25}", user_id):
+        return f"<@{user_id}>"
+    return ""
+
+
+def _long_turn_mention_text_for_source(
+    source: Any,
+    user_config: dict,
+    platform_key: str,
+    *,
+    elapsed_seconds: float = 0.0,
+    tool_calls: int = 0,  # accepted for compatibility; no longer part of policy
+    surface: str,
+) -> str:
+    """Return explicit Discord mention text for long final replies or approvals."""
+    platform_value = _gateway_platform_value(getattr(source, "platform", platform_key)) or platform_key
+    if platform_value != "discord":
+        return ""
+    policy = _long_turn_mention_policy(user_config, platform_key)
+    if not policy.get("enabled"):
+        return ""
+    if surface == "approval":
+        return _discord_user_mention_from_policy(source, policy) if policy.get("on_approval", True) else ""
+    if surface == "final":
+        if not policy.get("on_final", True):
+            return ""
+        threshold = policy.get("elapsed_seconds")
+        if threshold is None or max(0.0, float(elapsed_seconds or 0.0)) < float(threshold):
+            return ""
+        return _discord_user_mention_from_policy(source, policy)
+    return ""
+
+
+def _apply_long_turn_mention_to_response(response: str, mention_text: str) -> str:
+    """Prefix a final response with a mention exactly once."""
+    if not response or not mention_text:
+        return response
+    text = str(response)
+    mention = str(mention_text).strip()
+    if not mention:
+        return text
+    if text.lstrip().startswith(mention):
+        return text
+    return f"{mention} {text}"
+
+
+def _metadata_with_long_turn_mention(metadata: Optional[Dict[str, Any]], mention_text: str) -> Optional[Dict[str, Any]]:
+    if not mention_text:
+        return metadata
+    merged = dict(metadata or {})
+    merged["mention_text"] = mention_text
+    return merged
+
+
 def _prepare_gateway_status_message(platform: Any, event_type: str, message: str) -> Optional[str]:
     """Filter/sanitize agent status callbacks before platform delivery."""
     text = str(message or "").strip()
@@ -9464,6 +9604,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             agent_messages = agent_result.get("messages", [])
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
+            _long_turn_final_mention = str(agent_result.get("mention_text") or "").strip()
+            if not _long_turn_final_mention:
+                try:
+                    _long_turn_final_mention = _long_turn_mention_text_for_source(
+                        source,
+                        _load_gateway_config(),
+                        _platform_config_key(source.platform),
+                        elapsed_seconds=_response_time,
+                        surface="final",
+                    )
+                except Exception as _mention_err:
+                    logger.debug("long-turn final mention resolution failed: %s", _mention_err)
+                    _long_turn_final_mention = ""
             _resp_len = len(response)
             logger.info(
                 "response ready: platform=%s chat=%s time=%.1fs api_calls=%d response=%d chars",
@@ -9879,6 +10032,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         logger.debug("trailing footer send failed: %s", _e)
                 return None
 
+            response = _apply_long_turn_mention_to_response(response, _long_turn_final_mention)
             return response
             
         except Exception as e:
@@ -14248,6 +14402,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         
         user_config = _load_gateway_config()
         platform_key = _platform_config_key(source.platform)
+        _turn_start_time = time.time()
+        _long_turn_mentions_enabled = bool(
+            _long_turn_mention_policy(user_config, platform_key).get("enabled")
+        )
 
         from hermes_cli.tools_config import _get_platform_tools
         enabled_toolsets = sorted(_get_platform_tools(user_config, platform_key))
@@ -14404,7 +14562,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
-            if not progress_queue or not _run_still_current():
+            if not _run_still_current():
+                return
+            if not progress_queue:
                 return
 
             # First-touch onboarding: the first time a tool takes longer than
@@ -15313,7 +15473,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
-            agent.tool_progress_callback = progress_callback if tool_progress_enabled else None
+            agent.tool_progress_callback = (
+                progress_callback if (tool_progress_enabled or _long_turn_mentions_enabled) else None
+            )
             # Discord voice verbal-ack hook (fires once per turn on first tool
             # call; armed only when in a voice channel with the mixer running).
             agent.tool_start_callback = (
@@ -15574,6 +15736,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 cmd = approval_data.get("command", "")
                 desc = approval_data.get("description", "dangerous command")
 
+                approval_mention = ""
+                try:
+                    approval_mention = _long_turn_mention_text_for_source(
+                        source,
+                        user_config,
+                        platform_key,
+                        elapsed_seconds=time.time() - _turn_start_time,
+                        surface="approval",
+                    )
+                except Exception as _mention_err:
+                    logger.debug("approval mention resolution failed: %s", _mention_err)
+                    approval_mention = ""
+                approval_metadata = _metadata_with_long_turn_mention(
+                    _status_thread_metadata,
+                    approval_mention,
+                )
+
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids
                 # false positives from MagicMock auto-attribute creation in tests.
@@ -15585,7 +15764,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 command=cmd,
                                 session_key=_approval_session_key,
                                 description=desc,
-                                metadata=_status_thread_metadata,
+                                metadata=approval_metadata,
                             ),
                             _loop_for_step,
                             logger=logger,
@@ -15611,8 +15790,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Slack threads and reserved by Matrix clients.
                 _p = getattr(_status_adapter, "typed_command_prefix", "/")
                 cmd_preview = cmd[:200] + "..." if len(cmd) > 200 else cmd
+                prefix = f"{approval_mention} " if approval_mention else ""
                 msg = (
-                    f"⚠️ **Dangerous command requires approval:**\n"
+                    f"{prefix}⚠️ **Dangerous command requires approval:**\n"
                     f"```\n{cmd_preview}\n```\n"
                     f"Reason: {desc}\n\n"
                     f"Reply `{_p}approve` to execute, `{_p}approve session` to approve this pattern "
@@ -15623,7 +15803,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _status_adapter.send(
                             _status_chat_id,
                             msg,
-                            metadata=_status_thread_metadata,
+                            metadata=approval_metadata,
                         ),
                         _loop_for_step,
                         logger=logger,
@@ -15972,8 +16152,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception:
                     pass
 
+            _run_agent_mention_text = ""
+            try:
+                _run_agent_mention_text = _long_turn_mention_text_for_source(
+                    source,
+                    user_config,
+                    platform_key,
+                    elapsed_seconds=time.time() - _turn_start_time,
+                    surface="final",
+                )
+            except Exception as _mention_err:
+                logger.debug("long-turn _run_agent mention resolution failed: %s", _mention_err)
+                _run_agent_mention_text = ""
+
             return {
                 "final_response": final_response,
+                "mention_text": _run_agent_mention_text,
                 "last_reasoning": result.get("last_reasoning"),
                 "messages": result_holder[0].get("messages", []) if result_holder[0] else [],
                 "api_calls": result_holder[0].get("api_calls", 0) if result_holder[0] else 0,
@@ -16581,7 +16775,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         or _previewed
                         or (_sc and getattr(_sc, "final_content_delivered", False))
                     )
-                    first_response = result.get("final_response", "")
+                    first_response = _apply_long_turn_mention_to_response(
+                        result.get("final_response", ""),
+                        str(result.get("mention_text") or "").strip(),
+                    )
                     if first_response and not _already_streamed:
                         try:
                             logger.info(

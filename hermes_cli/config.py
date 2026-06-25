@@ -1612,11 +1612,15 @@ DEFAULT_CONFIG = {
             "last_lines": 2,
         },
         "interim_assistant_messages": True,  # Gateway: show natural mid-turn assistant status messages
+        # Default shape is time-only for final replies. Approval prompts do not
+        # need a threshold once mention policy is enabled: they are blocking
+        # user-attention requests, so they should ping immediately.
         "long_turn_mention": {
-            "enabled": False,  # Gateway: opt-in explicit user mention after long turns
+            "enabled": False,
             "on_final": True,
             "on_approval": True,
-            "rules": [],  # OR of rules; each rule ANDs elapsed_seconds/tool_calls thresholds
+            "elapsed_seconds": None,
+            "rules": [],  # Back-compat: first elapsed_seconds-like rule is used
         },
         "tool_progress_command": False,  # Enable /verbose command in messaging gateway
         "tool_progress_overrides": {},  # DEPRECATED — use display.platforms instead

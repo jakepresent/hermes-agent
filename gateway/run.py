@@ -1591,6 +1591,11 @@ if _config_path.exists():
                 os.environ["HERMES_AUTO_CONTINUE_FRESHNESS"] = str(
                     _agent_cfg["gateway_auto_continue_freshness"]
                 )
+        _stt_cfg = _cfg.get("stt", {})
+        if isinstance(_stt_cfg, dict) and "echo_voice_transcripts" in _stt_cfg:
+            os.environ["HERMES_ECHO_VOICE_TRANSCRIPTS"] = str(
+                _stt_cfg["echo_voice_transcripts"]
+            ).lower()
         _display_cfg = _cfg.get("display", {})
         if _display_cfg and isinstance(_display_cfg, dict):
             if "busy_input_mode" in _display_cfg:
@@ -1737,6 +1742,23 @@ from gateway.whatsapp_identity import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _should_echo_voice_transcripts(config: Any) -> bool:
+    """Return whether successful STT transcripts should be echoed to chat."""
+    try:
+        value = getattr(config, "echo_voice_transcripts", None)
+        if value is not None:
+            return bool(value)
+    except Exception:
+        pass
+    return os.getenv("HERMES_ECHO_VOICE_TRANSCRIPTS", "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _voice_transcript_echo_message(transcript: str) -> str:
+    return f'🎙️ "{transcript}"'
 
 
 # Sentinel placed into _running_agents immediately when a session starts
@@ -8632,9 +8654,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     audio_paths,
                 )
                 # Successful transcripts are injected into the agent turn and,
-                # when enabled, persisted to the local transcript log. Do not
-                # echo the raw transcript back into the chat; it duplicates the
-                # user's voice note and clutters Discord history.
+                # when enabled, persisted to the local transcript log. The raw
+                # transcript can also be echoed back into chat as an opt-in STT
+                # verification aid.
+                if _successful_transcripts and _should_echo_voice_transcripts(self.config):
+                    _echo_adapter = self.adapters.get(source.platform)
+                    _echo_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                    if _echo_adapter:
+                        for _tx in _successful_transcripts:
+                            try:
+                                await _echo_adapter.send(
+                                    source.chat_id,
+                                    _voice_transcript_echo_message(_tx),
+                                    metadata=_echo_meta,
+                                )
+                            except Exception as _echo_exc:
+                                logger.debug(
+                                    "Transcript echo failed (non-fatal): %s", _echo_exc,
+                                )
                 _stt_fail_markers = (
                     "No STT provider",
                     "STT is disabled",
@@ -12948,8 +12985,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         This helper fills that gap: when the dequeued event has audio media,
         we transcribe inline and return enriched text. The transcript is
-        injected into the agent turn and optionally persisted locally, but it is
-        not echoed back into the chat.
+        injected into the agent turn and optionally persisted locally. It can
+        also be echoed back into chat when stt.echo_voice_transcripts is true.
         Non-audio events fall back to _build_media_placeholder, matching the
         original _dequeue_pending_text behavior.
         """
@@ -12975,6 +13012,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             enriched_text, successful_transcripts = await self._enrich_message_with_transcription(
                 text, audio_paths,
             )
+            if successful_transcripts and _should_echo_voice_transcripts(self.config):
+                echo_adapter = self.adapters.get(source.platform)
+                echo_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                if echo_adapter:
+                    for tx in successful_transcripts:
+                        try:
+                            await echo_adapter.send(
+                                source.chat_id,
+                                _voice_transcript_echo_message(tx),
+                                metadata=echo_meta,
+                            )
+                        except Exception as echo_exc:
+                            logger.debug(
+                                "Transcript echo failed (non-fatal): %s", echo_exc,
+                            )
             return enriched_text or None
 
         # Non-audio fallback: preserve original _dequeue_pending_text semantics.
@@ -16316,6 +16368,20 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                             pending_text, _audio_paths,
                                         )
                                         pending_text = _enriched
+                                        if _transcripts and _should_echo_voice_transcripts(self.config):
+                                            _echo_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                                            for _tx in _transcripts:
+                                                try:
+                                                    await _adapter.send(
+                                                        source.chat_id,
+                                                        _voice_transcript_echo_message(_tx),
+                                                        metadata=_echo_meta,
+                                                    )
+                                                except Exception as _echo_exc:
+                                                    logger.debug(
+                                                        "Voice-interrupt echo failed (non-fatal): %s",
+                                                        _echo_exc,
+                                                    )
                                     except Exception as _trans_exc:
                                         logger.warning(
                                             "Voice-interrupt transcription failed: %s", _trans_exc,
@@ -16649,9 +16715,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Transcribe audio media on the dequeued event BEFORE it is
                     # handed back as the next user turn, so queued/interrupting
                     # voice messages drain with the real transcript instead of
-                    # a file-path placeholder. Do not echo the transcript back
-                    # into chat; it is already in the voice note, the agent
-                    # turn, and the optional local transcript log.
+                    # a file-path placeholder. The transcript may also be
+                    # echoed into chat if stt.echo_voice_transcripts is true.
                     _pending_text = pending_event.text or ""
                     _media_urls = getattr(pending_event, "media_urls", None) or []
                     _media_types = getattr(pending_event, "media_types", None) or []
@@ -16670,6 +16735,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                                 _pending_text, _audio_paths,
                             )
                             pending = _enriched or None
+                            if _transcripts and _should_echo_voice_transcripts(self.config):
+                                _echo_meta = {"thread_id": source.thread_id} if source.thread_id else None
+                                for _tx in _transcripts:
+                                    try:
+                                        await adapter.send(
+                                            source.chat_id,
+                                            _voice_transcript_echo_message(_tx),
+                                            metadata=_echo_meta,
+                                        )
+                                    except Exception as _echo_exc:
+                                        logger.debug(
+                                            "Voice-drain echo failed (non-fatal): %s", _echo_exc,
+                                        )
                         except Exception as _trans_exc:
                             logger.warning(
                                 "Voice-drain transcription failed: %s", _trans_exc,

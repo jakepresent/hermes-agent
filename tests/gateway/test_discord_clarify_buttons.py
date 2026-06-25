@@ -90,12 +90,11 @@ class TestClarifyChoiceViewConstruction:
             clarify_id="cidX",
             allowed_user_ids={"42"},
         )
-        # 3 numeric + 1 "Other"
+        # 3 compact numeric buttons + 1 "Other". Full choice text belongs in
+        # the prompt body, not in truncation-prone Discord button labels.
         assert len(view.children) == 4
         labels = [b.label for b in view.children]
-        assert labels[0].startswith("1. apple")
-        assert labels[1].startswith("2. banana")
-        assert labels[2].startswith("3. cherry")
+        assert labels[:3] == ["1", "2", "3"]
         assert "Other" in labels[3]
         # custom_ids encode clarify_id + index/other
         ids = [b.custom_id for b in view.children]
@@ -115,62 +114,16 @@ class TestClarifyChoiceViewConstruction:
         assert len(view.children) == 25
         assert "Other" in view.children[-1].label
 
-    def test_truncates_long_choice_label(self):
+    def test_long_choice_button_label_stays_compact(self):
         long_choice = "x" * 200
         view = ClarifyChoiceView(
             choices=[long_choice],
             clarify_id="cidZ",
             allowed_user_ids=set(),
         )
-        # 78 chars + single-char ellipsis in the body, plus "1. " prefix.
-        # Uses U+2026 (…) instead of "..." to fit the 80-char Discord cap.
-        first_label = view.children[0].label
-        assert first_label.startswith("1. ")
-        assert first_label.endswith("\u2026")
-        # Final label total <= 80 (Discord cap on button labels)
-        assert len(first_label) <= 80
-
-    def test_truncates_long_choice_label_breaks_on_word_boundary(self):
-        # Long choice with spaces — should cut at the last whole word so the
-        # trailing text stays readable on Discord mobile.
-        long_choice = (
-            "Tight, well-illustrated, covers all 3 audiences "
-            "(patients, families, curious general readers)"
-        )
-        view = ClarifyChoiceView(
-            choices=[long_choice],
-            clarify_id="cidW",
-            allowed_user_ids=set(),
-        )
-        first_label = view.children[0].label
-        assert first_label.startswith("1. ")
-        assert first_label.endswith("\u2026")
-        # No mid-word fragment before the ellipsis.
-        assert not first_label.rstrip("\u2026").endswith("(")
-
-    def test_truncates_long_no_space_choice_on_soft_boundary(self):
-        # A long choice with soft boundaries (commas, hyphens) but no spaces
-        # should still cut on a soft boundary, not mid-word. We use an input
-        # where position 76 is NOT a soft boundary — the test only passes
-        # if the renderer actively searches backward for a soft char
-        # rather than blindly cutting at the budget limit.
-        long_choice = "a" * 30 + "-" + "b" * 30 + "-" + "c" * 30 + "-" + "d" * 30
-        # 30a-30b-30c-30d = 30 + 1 + 30 + 1 + 30 + 1 + 30 = 123 chars
-        # Position 76 is 'b' (a mid-word alpha). The renderer must look back
-        # for a '-' to cut on.
-        view = ClarifyChoiceView(
-            choices=[long_choice],
-            clarify_id="cidSB",
-            allowed_user_ids=set(),
-        )
-        first_label = view.children[0].label
-        assert first_label.endswith("\u2026")
-        assert len(first_label) <= 80
-        body = first_label[len("1. "):].rstrip("\u2026")
-        last_char = body[-1]
-        assert last_char in {"-", ",", ".", ")", " "}, (
-            f"Label cuts mid-word at {last_char!r}: {first_label!r}"
-        )
+        label = getattr(view.children[0], "label")
+        assert label == "1"
+        assert len(label) <= 80
 
 
 # ===========================================================================
@@ -358,14 +311,26 @@ class TestDiscordSendClarify:
 
         assert result.success is True
         assert result.message_id == "123456"
-        # Verify channel.send was called with embed + view kwargs
+        # Verify channel.send was called with visible content + view kwargs.
         channel.send.assert_called_once()
         kwargs = channel.send.call_args.kwargs
-        assert "embed" in kwargs
+        assert "content" in kwargs
+        assert "embed" not in kwargs
         assert "view" in kwargs
+        content = kwargs["content"]
+        assert "Clarification needed" in content
+        assert "**Question:**" in content
+        assert "Pick a color" in content
+        assert "**Choices:**" in content
+        assert "1. red" in content
+        assert "2. green" in content
+        assert "3. blue" in content
         assert isinstance(kwargs["view"], ClarifyChoiceView)
-        # 3 choice buttons + 1 Other
+        # 3 compact choice buttons + 1 Other
         assert len(kwargs["view"].children) == 4
+        labels = [getattr(button, "label") for button in kwargs["view"].children]
+        assert labels[:3] == ["1", "2", "3"]
+        assert "Other" in labels[3]
 
     @pytest.mark.asyncio
     async def test_open_ended_omits_view(self):
@@ -387,9 +352,14 @@ class TestDiscordSendClarify:
         assert result.success is True
         channel.send.assert_called_once()
         kwargs = channel.send.call_args.kwargs
-        # Open-ended path renders embed but no view (text-capture handles reply)
-        assert "embed" in kwargs
+        # Open-ended path renders visible content but no view; text-capture handles reply.
+        assert "content" in kwargs
+        assert "embed" not in kwargs
         assert "view" not in kwargs
+        assert "Clarification needed" in kwargs["content"]
+        assert "**Question:**" in kwargs["content"]
+        assert "What is your name?" in kwargs["content"]
+        assert "Reply in this channel with your answer." in kwargs["content"]
 
     @pytest.mark.asyncio
     async def test_routes_to_thread_when_metadata_thread_id_set(self):
@@ -446,7 +416,8 @@ class TestDiscordSendClarify:
         view = kwargs["view"]
         # Only 1 real choice + 1 Other = 2 children
         assert len(view.children) == 2
-        assert "real-choice" in view.children[0].label
+        assert "1. real-choice" in kwargs["content"]
+        assert getattr(view.children[0], "label") == "1"
 
     @pytest.mark.asyncio
     async def test_unwraps_dict_choices_to_description(self):
@@ -475,16 +446,18 @@ class TestDiscordSendClarify:
         )
         kwargs = channel.send.call_args.kwargs
         view = kwargs["view"]
+        content = kwargs["content"]
         labels = [b.label for b in view.children[:-1]]  # exclude Other
-        # No raw Python repr should leak onto any label.
-        for label in labels:
-            assert "{'" not in label
-            assert "':" not in label
-        # Each dict unwrapped to its inner string.
-        assert any("Tight, well-illustrated" in lbl for lbl in labels)
-        assert any("Use label key" in lbl for lbl in labels)
-        assert any("Use text key" in lbl for lbl in labels)
-        assert any("normal-string" in lbl for lbl in labels)
+        # No raw Python repr should leak onto labels or visible content.
+        for rendered in [*labels, content]:
+            assert "{'" not in rendered
+            assert "':" not in rendered
+        assert labels == ["1", "2", "3", "4"]
+        # Each dict unwrapped to its inner string in visible content.
+        assert "1. Tight, well-illustrated" in content
+        assert "2. Use label key" in content
+        assert "3. Use text key" in content
+        assert "4. normal-string" in content
 
     @pytest.mark.asyncio
     async def test_unwrap_prefers_description_over_name_in_multi_key_dict(self):
@@ -508,11 +481,12 @@ class TestDiscordSendClarify:
         )
         kwargs = channel.send.call_args.kwargs
         view = kwargs["view"]
+        content = kwargs["content"]
         choice_label = view.children[0].label
-        assert "Tight, well-illustrated" in choice_label
+        assert choice_label == "1"
+        assert "1. Tight, well-illustrated" in content
         # The 'name' value (a short identifier) must NOT have leaked.
-        body = choice_label.split("1. ", 1)[1].rstrip("\u2026")
-        assert "tight" not in body, f"'name' leaked onto button: {choice_label!r}"
+        assert "tight" not in content, f"'name' leaked into prompt: {content!r}"
 
     @pytest.mark.asyncio
     async def test_unwrap_prefers_label_over_description(self):
@@ -535,11 +509,13 @@ class TestDiscordSendClarify:
         )
         kwargs = channel.send.call_args.kwargs
         view = kwargs["view"]
+        content = kwargs["content"]
         choice_label = view.children[0].label
-        assert "Short" in choice_label
+        assert choice_label == "1"
+        assert "1. Short" in content
         # The longer description must NOT have leaked.
-        assert "Long verbose" not in choice_label, (
-            f"'description' leaked over 'label': {choice_label!r}"
+        assert "Long verbose" not in content, (
+            f"'description' leaked over 'label': {content!r}"
         )
 
     @pytest.mark.asyncio
@@ -569,12 +545,69 @@ class TestDiscordSendClarify:
         )
         kwargs = channel.send.call_args.kwargs
         view = kwargs["view"]
+        content = kwargs["content"]
         choice_labels = [b.label for b in view.children[:-1]]  # exclude Other
         # Only the well-formed dict survives.
-        assert len(choice_labels) == 1, (
-            f"Expected 1 choice, got {len(choice_labels)}: {choice_labels!r}"
+        assert choice_labels == ["1"]
+        assert "1. real choice" in content
+        assert "only_name_here" not in content, f"name leaked: {content!r}"
+        assert "only_value_here" not in content, f"value leaked: {content!r}"
+
+    @pytest.mark.asyncio
+    async def test_long_question_and_choices_are_visible_in_content(self):
+        adapter = _make_adapter()
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 999
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        long_question = (
+            "Mic-gate brain is built + Mac-validated. Before live capture, "
+            "two things need your call. "
+            + "hardware-only detail " * 20
         )
-        assert "real choice" in choice_labels[0]
-        for label in choice_labels:
-            assert "only_name_here" not in label, f"name leaked: {label!r}"
-            assert "only_value_here" not in label, f"value leaked: {label!r}"
+        long_choice = (
+            "Auto-arm ON by default: "
+            + "mic records only during real meeting app usage " * 10
+        ).strip()
+
+        result = await adapter.send_clarify(
+            chat_id="9001",
+            question=long_question,
+            choices=[long_choice, "Ship passive indicator first"],
+            clarify_id="cidLong",
+            session_key="sk-long",
+        )
+
+        assert result.success is True
+        kwargs = channel.send.call_args.kwargs
+        content = kwargs["content"]
+        assert "Mic-gate brain is built + Mac-validated" in content
+        assert "hardware-only detail hardware-only detail" in content
+        assert f"1. {long_choice}" in content
+        assert "2. Ship passive indicator first" in content
+        labels = [getattr(button, "label") for button in kwargs["view"].children]
+        assert labels[:2] == ["1", "2"]
+
+    @pytest.mark.asyncio
+    async def test_invisible_unicode_is_visible_in_question_and_choices(self):
+        adapter = _make_adapter()
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 1000
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        result = await adapter.send_clarify(
+            chat_id="9001",
+            question="Approve hidden char hello️?",
+            choices=["Use hello️", "Skip"],
+            clarify_id="cidUnicode",
+            session_key="sk-unicode",
+        )
+
+        assert result.success is True
+        content = channel.send.call_args.kwargs["content"]
+        assert "hello[U+FE0F]" in content
+        assert "hello️" not in content

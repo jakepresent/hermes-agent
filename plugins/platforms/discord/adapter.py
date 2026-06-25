@@ -298,6 +298,49 @@ def _make_invisible_unicode_visible(text: str) -> str:
     return "".join(rendered)
 
 
+def _truncate_discord_content(text: str, max_length: int) -> str:
+    """Fit plain Discord message content under the platform limit."""
+    body = str(text)
+    if len(body) <= max_length:
+        return body
+    marker = "\n... [truncated]"
+    if max_length <= len(marker):
+        return body[:max_length]
+    return body[: max_length - len(marker)] + marker
+
+
+def _build_discord_clarify_content(
+    question: str,
+    choices: Optional[List[str]],
+    max_length: int,
+) -> str:
+    """Build a self-contained, content-first Discord clarify prompt."""
+    visible_question = _make_invisible_unicode_visible(str(question or "").strip())
+    lines = [
+        "❓ **Clarification needed**",
+        "",
+        "**Question:**",
+        visible_question,
+    ]
+
+    visible_choices = [
+        _make_invisible_unicode_visible(str(choice))
+        for choice in (choices or [])
+    ]
+    if visible_choices:
+        lines.extend(["", "**Choices:**"])
+        for index, choice in enumerate(visible_choices, start=1):
+            lines.append(f"{index}. {choice}")
+        lines.extend([
+            "",
+            "Pick one below, or click ✏️ Other to type a custom answer.",
+        ])
+    else:
+        lines.extend(["", "Reply in this channel with your answer."])
+
+    return _truncate_discord_content("\n".join(lines), max_length)
+
+
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available.
 
@@ -4879,15 +4922,16 @@ class DiscordAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Render a clarify prompt with one Discord button per choice.
 
-        Multi-choice mode (``choices`` non-empty): renders a button per option
-        plus a final "✏️ Other (type answer)" button. Picking "Other" flips
-        the clarify entry into text-capture mode so the next user message in
-        the session becomes the response. Numeric clicks resolve immediately
-        via ``resolve_gateway_clarify(clarify_id, choice_text)``.
+        Multi-choice mode (``choices`` non-empty): sends a self-contained
+        plain-content prompt with the full question and full choices visible
+        above compact numeric buttons. Picking "Other" flips the clarify entry
+        into text-capture mode so the next user message in the session becomes
+        the response. Numeric clicks resolve immediately via
+        ``resolve_gateway_clarify(clarify_id, choice_text)``.
 
-        Open-ended mode (``choices`` empty/None): renders the question as
-        plain embed text — no buttons. The gateway's text-intercept captures
-        the next message in this session and resolves the clarify.
+        Open-ended mode (``choices`` empty/None): sends a self-contained
+        plain-content prompt with no buttons. The gateway's text-intercept
+        captures the next message in this session and resolves the clarify.
 
         Choice normalisation: ``choices`` may contain bare strings OR dicts
         (LLMs sometimes emit ``[{"description": "..."}]`` instead of bare
@@ -4908,21 +4952,9 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            # Discord embed description limit is 4096; trim conservatively.
-            max_desc = 4088
-            body = str(question or "").strip()
-            if len(body) > max_desc:
-                body = body[: max_desc - 3] + "..."
-
-            embed = discord.Embed(
-                title="❓ Hermes needs your input",
-                description=body,
-                color=discord.Color.orange(),
-            )
-
             # Normalise choices: LLMs sometimes emit `[{"description": "..."}]`
             # instead of bare strings, which would render as raw Python repr on
-            # the button label. Unwrap the common shapes, then stringify.
+            # the prompt. Unwrap the common shapes, then stringify.
             def _flatten_choice(c):
                 if c is None:
                     return ""
@@ -4936,10 +4968,10 @@ class DiscordAdapter(BasePlatformAdapter):
                     # dicts that aren't meant to be choices (e.g., a
                     # developer-error wiring that passes a Button-shaped
                     # object). Picking them would leak raw enum values
-                    # or 4-char model identifiers onto user-facing buttons.
+                    # or 4-char model identifiers onto user-facing prompts.
                     # If a dict has none of the canonical keys, drop it
                     # rather than picking some random field — a garbage
-                    # button label is worse than no button at all.
+                    # choice is worse than no button at all.
                     for key in ("label", "description", "text", "title"):
                         v = c.get(key)
                         if isinstance(v, str) and v.strip():
@@ -4956,27 +4988,25 @@ class DiscordAdapter(BasePlatformAdapter):
             # We reserve one slot for the "Other" button, so cap at 24 choices.
             clean_choices = clean_choices[:24]
 
+            content = _build_discord_clarify_content(
+                question=question,
+                choices=clean_choices,
+                max_length=self.MAX_MESSAGE_LENGTH,
+            )
+            view = None
             if clean_choices:
-                embed.add_field(
-                    name="Choices",
-                    value="Pick one below, or click ✏️ Other to type a custom answer.",
-                    inline=False,
-                )
                 view = ClarifyChoiceView(
                     choices=clean_choices,
                     clarify_id=clarify_id,
                     allowed_user_ids=self._allowed_user_ids,
                     allowed_role_ids=self._allowed_role_ids,
                 )
-            else:
-                embed.add_field(
-                    name="Reply",
-                    value="Reply in this channel with your answer.",
-                    inline=False,
-                )
-                view = None
 
-            msg = await channel.send(embed=embed, view=view) if view else await channel.send(embed=embed)
+            send_kwargs: Dict[str, Any] = {"content": content}
+            if view:
+                send_kwargs["view"] = view
+
+            msg = await channel.send(**send_kwargs)
             if view:
                 view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))
@@ -6502,47 +6532,11 @@ def _define_discord_view_classes() -> None:
             self.resolved = False
 
             for index, choice in enumerate(self.choices):
-                # Discord button labels are capped at 80 chars. On mobile the
-                # visible width is much narrower (often <40 chars before it
-                # wraps to 2 lines and the second line gets cut off), so we
-                # cap aggressively and cut at a word boundary when possible
-                # to keep the trailing text readable.
-                #
-                # Cut strategy (most-preferred to least-preferred):
-                #   1. Last space in the trailing half of the budget
-                #      (cleanest word boundary)
-                #   2. Last soft boundary in the trailing half of the
-                #      budget (hyphen, comma, period, paren)
-                #   3. Hard cut at the budget limit (last resort)
-                prefix = f"{index + 1}. "
-                budget = 80 - len(prefix)
-                if len(choice) <= budget:
-                    label_body = choice
-                else:
-                    truncated = choice[: budget - 1].rstrip()
-                    cut_at = -1
-                    # 1. Last space in the trailing half of the budget.
-                    space = truncated.rfind(" ")
-                    if space >= budget // 2:
-                        cut_at = space
-                    # 2. Soft boundary — only if no word boundary found.
-                    # Find the latest soft boundary in the trailing half
-                    # of the budget; that maximizes preserved text length.
-                    # Cut AT the soft boundary (inclusive) so the label
-                    # ends on the soft char (e.g. "-" or ",") rather than
-                    # on the alpha char that followed it.
-                    if cut_at < 0:
-                        latest_soft = max(
-                            (truncated.rfind(s) for s in ("-", ",", ".", ")")),
-                            default=-1,
-                        )
-                        if latest_soft >= budget // 2:
-                            cut_at = latest_soft + 1
-                    if cut_at > 0:
-                        truncated = truncated[:cut_at]
-                    label_body = truncated.rstrip() + "…"
                 button = discord.ui.Button(
-                    label=f"{prefix}{label_body}",
+                    # Keep buttons compact and put full choice text in the
+                    # prompt body. Discord truncates long button labels, which
+                    # made users unable to tell what they were selecting.
+                    label=str(index + 1),
                     style=discord.ButtonStyle.primary,
                     custom_id=f"clarify:{clarify_id}:{index}",
                 )

@@ -300,7 +300,9 @@ Core behavior:
 - Security-scan approvals show detected suspicious strings, command preview, and visible rendering for invisible Unicode characters.
 - Sensitive home-path detection is restored.
 - Command context remains visible in security approvals.
-- Discord clarify prompts are content-first.
+- Discord clarify prompts are content-first: full question and full numbered choices appear in message content, while buttons are compact selectors (`1`, `2`, `3`, etc.) plus `Other`.
+- Clarify open-ended prompts use plain message content with a reply instruction, not embed-only text.
+- Clarify question/choice text renders invisible/format Unicode visibly (for example `[U+FE0F]`).
 - Approval pings still work when configured and should prepend/augment the rich prompt rather than replacing it.
 
 Key files:
@@ -324,6 +326,7 @@ Commits:
 - `0546e28ca` - make Discord clarify prompts content-first.
 - `f9ac959d3` - restore sensitive home-path detection after upstream merge.
 - `ce08ddbcf` - restore rich approval prompt after UI regression.
+- `7129a764b` - restore content-first Discord clarify prompt after v0.17.0 merge regression.
 
 Preservation checks:
 
@@ -336,6 +339,7 @@ Live smoke:
 - Trigger a shell command that requires approval.
 - Confirm Discord content asks whether to run it, shows the command in a code block, shows the reason, and keeps buttons under that content.
 - Trigger a security-scan approval and confirm suspicious evidence is visible.
+- Trigger a Discord `clarify` call with a long question and long choices. Confirm the full question and numbered choices are visible in message content, buttons are compact numeric selectors, and `Other` switches to typed-response mode.
 
 ### 9. Long-turn mentions and attention behavior
 

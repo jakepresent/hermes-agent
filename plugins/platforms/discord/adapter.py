@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from collections import defaultdict
 from contextlib import suppress
 from typing import Callable, Dict, List, Optional, Any, Tuple
@@ -259,6 +260,42 @@ def _clean_discord_id(entry: str) -> str:
     if entry.lower().startswith("user:"):
         entry = entry[5:]
     return entry.strip()
+
+
+def _remove_discord_button_by_label(view: Any, label: str) -> None:
+    """Best-effort removal of a button from discord.py or the test mock view."""
+    children = getattr(view, "children", None)
+    if not isinstance(children, list):
+        return
+    target = str(label or "").lower()
+    for child in list(children):
+        if str(getattr(child, "label", "")).lower() != target:
+            continue
+        remove_item = getattr(view, "remove_item", None)
+        if callable(remove_item):
+            remove_item(child)
+        else:
+            try:
+                children.remove(child)
+            except ValueError:
+                pass
+
+
+def _make_invisible_unicode_visible(text: str) -> str:
+    """Render invisible/format Unicode as visible codepoint markers."""
+    rendered: list[str] = []
+    for ch in str(text):
+        codepoint = ord(ch)
+        category = unicodedata.category(ch)
+        if (
+            category in {"Cf", "Mn", "Me"}
+            or 0xFE00 <= codepoint <= 0xFE0F
+            or 0xE0100 <= codepoint <= 0xE01EF
+        ):
+            rendered.append(f"[U+{codepoint:04X}]")
+        else:
+            rendered.append(ch)
+    return "".join(rendered)
 
 
 def check_discord_requirements() -> bool:
@@ -4681,6 +4718,8 @@ class DiscordAdapter(BasePlatformAdapter):
         self, chat_id: str, command: str, session_key: str,
         description: str = "dangerous command",
         metadata: Optional[dict] = None,
+        allow_permanent: bool = True,
+        detected_strings: Optional[List[str]] = None,
     ) -> SendResult:
         """
         Send a button-based exec approval prompt for a dangerous command.
@@ -4701,48 +4740,88 @@ class DiscordAdapter(BasePlatformAdapter):
             if not channel:
                 channel = await self._client.fetch_channel(int(target_id))
 
-            # Discord embed descriptions allow 4096 chars. Put the actual
-            # approval question in the prompt itself (not just in the button
-            # labels) and spend the remaining budget on the requested command.
+            if isinstance(metadata, dict):
+                if "allow_permanent" in metadata:
+                    allow_permanent = bool(metadata.get("allow_permanent"))
+                if detected_strings is None and metadata.get("detected_strings"):
+                    raw_detected = metadata.get("detected_strings")
+                    if isinstance(raw_detected, (list, tuple)):
+                        detected_strings = [str(item) for item in raw_detected if str(item).strip()]
+                    else:
+                        detected_strings = [str(raw_detected)]
+            detected_strings = detected_strings or []
+
+            # Keep the approval request self-contained in plain message
+            # content. Discord embeds can be visually easy to miss or feel
+            # detached from the button row when progress/tool messages are
+            # nearby, so the actual question, command, and reason must be
+            # visible in the same content block as the buttons.
+            visible_command = _make_invisible_unicode_visible(command)
+            use_detected_subject = bool(detected_strings) and not allow_permanent
+            if use_detected_subject:
+                subject_label = "**Security scanner flagged:**\n```text\n"
+                subject_text = "\n".join(
+                    _make_invisible_unicode_visible(str(item))[:180]
+                    for item in detected_strings[:8]
+                )
+                command_label = "\n```\n**Command preview:**\n```bash\n"
+                security_note = "\n\nPermanent approval is disabled for security-scan findings."
+            else:
+                subject_label = "**Requested command:**\n```bash\n"
+                subject_text = visible_command
+                command_label = "\n```"
+                security_note = ""
             prompt_prefix = (
+                "⚠️ **Permission needed**\n\n"
                 "Do you want Hermes to run this command?\n\n"
-                "**Requested command:**\n```\n"
+                f"{subject_label}"
             )
-            prompt_suffix = "\n```"
+            reason_label = "\n**Reason:** "
             truncated_suffix = "\n... [truncated]"
-            max_desc = 4096
-            command_budget = max_desc - len(prompt_prefix) - len(prompt_suffix)
-            cmd_display = command
-            if len(cmd_display) > command_budget:
-                cmd_display = cmd_display[: max(0, command_budget - len(truncated_suffix))] + truncated_suffix
-            embed = discord.Embed(
-                title="⚠️ Permission needed",
-                description=f"{prompt_prefix}{cmd_display}{prompt_suffix}",
-                color=discord.Color.orange(),
-            )
-            embed.add_field(name="Reason", value=description, inline=False)
-            embed.add_field(
-                name="Choices",
-                value=(
-                    "Allow Once runs only this request. Allow Session remembers "
-                    "this kind of command until the session resets. Always Allow "
-                    "saves it permanently. Deny blocks it."
-                ),
-                inline=False,
-            )
+            max_content = self.MAX_MESSAGE_LENGTH
+            reason_budget = 300
+            reason_display = description
+            if len(reason_display) > reason_budget:
+                reason_display = reason_display[: max(0, reason_budget - 15)] + "... [truncated]"
+            if use_detected_subject:
+                # Keep the suspicious string primary, but include a concise
+                # command preview so the user still knows what action is being
+                # approved. Split remaining budget between both code blocks.
+                prompt_tail = f"\n```{reason_label}{reason_display}{security_note}"
+                command_preview = visible_command
+                fixed_budget = len(prompt_prefix) + len(command_label) + len(prompt_tail)
+                variable_budget = max(0, max_content - fixed_budget)
+                subject_budget = max(120, min(600, variable_budget // 2))
+                subject_display = subject_text
+                if len(subject_display) > subject_budget:
+                    subject_display = subject_display[: max(0, subject_budget - len(truncated_suffix))] + truncated_suffix
+                command_budget = max(0, variable_budget - len(subject_display))
+                if len(command_preview) > command_budget:
+                    command_preview = command_preview[: max(0, command_budget - len(truncated_suffix))] + truncated_suffix
+                content = f"{prompt_prefix}{subject_display}{command_label}{command_preview}{prompt_tail}"
+            else:
+                prompt_tail = f"{command_label}{reason_label}{reason_display}"
+                fixed_budget = len(prompt_prefix) + len(prompt_tail)
+                subject_budget = max_content - fixed_budget
+                subject_display = subject_text
+                if len(subject_display) > subject_budget:
+                    subject_display = subject_display[: max(0, subject_budget - len(truncated_suffix))] + truncated_suffix
+                content = f"{prompt_prefix}{subject_display}{prompt_tail}"
 
             view = ExecApprovalView(
                 session_key=session_key,
                 allowed_user_ids=self._allowed_user_ids,
                 allowed_role_ids=self._allowed_role_ids,
             )
+            if not allow_permanent:
+                _remove_discord_button_by_label(view, "Always Allow")
 
-            send_kwargs = {"embed": embed, "view": view}
+            send_kwargs = {"content": content, "view": view}
             mention_text = ""
             if isinstance(metadata, dict):
                 mention_text = str(metadata.get("mention_text") or "").strip()
             if mention_text:
-                send_kwargs["content"] = mention_text
+                send_kwargs["content"] = f"{mention_text}\n{content}"
             msg = await channel.send(**send_kwargs)
             view._message = msg  # store for on_timeout expiration editing
             return SendResult(success=True, message_id=str(msg.id))

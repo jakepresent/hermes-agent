@@ -15764,6 +15764,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _status_thread_metadata,
                     approval_mention,
                 )
+                if approval_metadata is None:
+                    approval_metadata = {}
+                else:
+                    approval_metadata = dict(approval_metadata)
+                approval_metadata["allow_permanent"] = bool(
+                    approval_data.get("allow_permanent", True)
+                )
+                detected_strings = approval_data.get("detected_strings") or []
+                if detected_strings:
+                    approval_metadata["detected_strings"] = detected_strings
 
                 # Prefer button-based approval when the adapter supports it.
                 # Check the *class* for the method, not the instance — avoids

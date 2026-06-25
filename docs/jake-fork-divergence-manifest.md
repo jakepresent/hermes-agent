@@ -326,7 +326,7 @@ Commits:
 - `0546e28ca` - make Discord clarify prompts content-first.
 - `f9ac959d3` - restore sensitive home-path detection after upstream merge.
 - `ce08ddbcf` - restore rich approval prompt after UI regression.
-- `7129a764b` - restore content-first Discord clarify prompt after v0.17.0 merge regression.
+- `bf59e0464` - restore content-first Discord clarify prompt after v0.17.0 merge regression.
 
 Preservation checks:
 

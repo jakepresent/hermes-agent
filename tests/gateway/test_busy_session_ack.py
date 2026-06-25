@@ -266,6 +266,45 @@ class TestBusySessionAck:
         adapter._send_with_retry.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_steer_mode_transcribes_voice_before_agent_steer(self):
+        """Voice notes in steer mode should inject transcribed text, not an empty placeholder."""
+        runner, sentinel = _make_runner()
+        runner._busy_input_mode = "steer"
+        adapter = _make_adapter()
+
+        event = _make_event(text="(The user sent a message with no text content)")
+        event.message_type = MessageType.VOICE
+        event.media_urls = ["/tmp/voice.ogg"]
+        event.media_types = ["audio/ogg"]
+        sk = build_session_key(event.source)
+        runner.adapters[event.source.platform] = adapter
+
+        agent = MagicMock()
+        agent.steer = MagicMock(return_value=True)
+        runner._running_agents[sk] = agent
+        runner._persist_voice_transcript = AsyncMock()
+
+        with patch(
+            "tools.transcription_tools.transcribe_audio",
+            return_value={
+                "success": True,
+                "transcript": "voice steer payload",
+                "provider": "local_command",
+            },
+        ), patch("gateway.run.merge_pending_message_event") as mock_merge:
+            await runner._handle_active_session_busy_message(event, sk)
+
+        agent.steer.assert_called_once()
+        steer_payload = agent.steer.call_args.args[0]
+        assert "voice steer payload" in steer_payload
+        assert "no text content" not in steer_payload
+        agent.interrupt.assert_not_called()
+        mock_merge.assert_not_called()
+        adapter._send_with_retry.assert_called_once()
+        ack = adapter._send_with_retry.call_args.kwargs.get("content", "")
+        assert "Steered" in ack
+
+    @pytest.mark.asyncio
     async def test_steer_mode_calls_agent_steer_no_interrupt_no_queue(self):
         """busy_input_mode='steer' injects via agent.steer() and skips queueing."""
         runner, sentinel = _make_runner()

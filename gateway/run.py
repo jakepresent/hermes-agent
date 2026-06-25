@@ -135,6 +135,15 @@ _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"(?i)\b(Bearer\s+)[A-Za-z0-9._\-]{20,}\b"),
 )
 
+_VOICE_STEER_PLACEHOLDERS = {
+    "(the user sent a message with no text content)",
+    "(no text content)",
+}
+
+
+def _is_voice_steer_placeholder(text: str) -> bool:
+    return str(text or "").strip().lower() in _VOICE_STEER_PLACEHOLDERS
+
 
 def _ensure_windows_gateway_venv_imports() -> None:
     """Make detached Windows gateway runs see the Hermes venv packages.
@@ -1725,6 +1734,8 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
     _reply_anchor_for_event,
+    cache_audio_from_url,
+    cache_audio_from_bytes,
     merge_pending_message_event,
 )
 from gateway.restart import (
@@ -1748,7 +1759,11 @@ def _should_echo_voice_transcripts(config: Any) -> bool:
     """Return whether successful STT transcripts should be echoed to chat."""
     try:
         value = getattr(config, "echo_voice_transcripts", None)
-        if value is not None:
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
             return bool(value)
     except Exception:
         pass
@@ -1759,6 +1774,93 @@ def _should_echo_voice_transcripts(config: Any) -> bool:
 
 def _voice_transcript_echo_message(transcript: str) -> str:
     return f'🎙️ "{transcript}"'
+
+
+async def _cache_audio_from_event_source(path_or_url: str, mime_type: str = "") -> str:
+    """Return a local audio cache path for an event media entry.
+
+    Platform adapters normally cache attachments before building MessageEvent,
+    but active-session steer can receive an event before the normal inbound
+    preprocessing path runs. This helper keeps steer-time transcription robust
+    for either an existing local path or a raw attachment URL.
+    """
+    if not path_or_url:
+        return path_or_url
+    if str(path_or_url).startswith(("http://", "https://")):
+        ext = ""
+        if mime_type and "/" in mime_type:
+            ext = "." + mime_type.split("/", 1)[1].split(";", 1)[0].lower()
+        if ext not in {".ogg", ".mp3", ".wav", ".webm", ".m4a", ".opus"}:
+            ext = os.path.splitext(path_or_url.split("?", 1)[0])[1].lower() or ".ogg"
+        if ext == ".opus":
+            ext = ".ogg"
+        try:
+            return await cache_audio_from_url(path_or_url, ext=ext)
+        except Exception:
+            pass
+    try:
+        source_path = Path(str(path_or_url)).expanduser()
+        if source_path.exists():
+            ext = source_path.suffix.lower()
+            if ext not in {".ogg", ".mp3", ".wav", ".webm", ".m4a", ".opus"}:
+                ext = ".ogg"
+            if ext == ".opus":
+                ext = ".ogg"
+            return cache_audio_from_bytes(source_path.read_bytes(), ext=ext)
+    except Exception:
+        pass
+    return path_or_url
+
+
+async def _prepare_voice_steer_text(runner: Any, event: MessageEvent) -> Optional[str]:
+    """Transcribe voice/audio media for active-run steer before agent.steer()."""
+    audio_paths: List[str] = []
+    media_urls = getattr(event, "media_urls", None) or []
+    media_types = getattr(event, "media_types", None) or []
+    for index, media_path in enumerate(media_urls):
+        media_type = media_types[index] if index < len(media_types) else ""
+        is_audio = (
+            getattr(event, "message_type", None) == MessageType.VOICE
+            or (
+                str(media_type).startswith("audio/")
+                and getattr(event, "message_type", None) != MessageType.AUDIO
+            )
+        )
+        if not is_audio:
+            continue
+        audio_paths.append(
+            await _cache_audio_from_event_source(str(media_path), str(media_type))
+        )
+    if not audio_paths:
+        return None
+    try:
+        base_text = event.text or ""
+        if _is_voice_steer_placeholder(base_text):
+            base_text = ""
+        enriched, transcripts = await runner._enrich_message_with_transcription(
+            base_text,
+            audio_paths,
+        )
+    except Exception as exc:
+        logger.warning("Voice steer transcription failed: %s", exc)
+        return None
+    if transcripts and _should_echo_voice_transcripts(getattr(runner, "config", None)):
+        adapter = getattr(runner, "adapters", {}).get(event.source.platform)
+        if adapter:
+            echo_meta = runner._thread_metadata_for_source(
+                event.source,
+                runner._reply_anchor_for_event(event),
+            )
+            for tx in transcripts:
+                try:
+                    await adapter.send(
+                        event.source.chat_id,
+                        _voice_transcript_echo_message(tx),
+                        metadata=echo_meta,
+                    )
+                except Exception as echo_exc:
+                    logger.debug("Voice steer echo failed (non-fatal): %s", echo_exc)
+    return (enriched or "").strip() or None
 
 
 # Sentinel placed into _running_agents immediately when a session starts
@@ -4317,6 +4419,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         steered = False
         if effective_mode == "steer":
             steer_text = (event.text or "").strip()
+            voice_steer_text = await _prepare_voice_steer_text(self, event)
+            if voice_steer_text:
+                steer_text = voice_steer_text
             can_steer = (
                 steer_text
                 and running_agent is not None
@@ -7950,6 +8055,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # agent.steer().  Falls back to queue semantics if the payload
                 # is empty, the agent lacks steer(), or steer() rejects.
                 steer_text = (event.text or "").strip()
+                voice_steer_text = await _prepare_voice_steer_text(self, event)
+                if voice_steer_text:
+                    steer_text = voice_steer_text
                 steered = False
                 if steer_text and hasattr(running_agent, "steer"):
                     try:

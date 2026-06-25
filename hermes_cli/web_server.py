@@ -2845,7 +2845,7 @@ async def get_sessions(
     offset: int = 0,
     min_messages: int = 0,
     archived: str = "exclude",
-    order: str = "created",
+    order: str = "recent",
     source: str = None,
     exclude_sources: str = None,
     profile: Optional[str] = None,
@@ -2857,10 +2857,11 @@ async def get_sessions(
     (used by the desktop "Archived sessions" settings panel), and ``include``
     returns both.
 
-    ``order`` controls pagination order: ``created`` (default, by original
-    start time) or ``recent`` (by latest activity across the compression
-    chain). ``recent`` keeps a long-running conversation on the first page
-    after it auto-compresses into a fresh continuation id.
+    ``order`` controls pagination order: ``recent`` (default, by latest
+    message/activity across the compression chain) or ``created`` (by original
+    start time). ``recent`` keeps an old but newly-messaged conversation on
+    the first page, including after it auto-compresses into a fresh
+    continuation id.
     """
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(

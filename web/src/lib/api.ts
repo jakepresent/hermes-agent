@@ -348,7 +348,7 @@ export const api = {
     limit = 20,
     offset = 0,
     profile = getManagementProfile(),
-    order: "created" | "recent" = "created",
+    order: "created" | "recent" = "recent",
   ) =>
     fetchJSON<PaginatedSessions>(
       appendProfileParam(

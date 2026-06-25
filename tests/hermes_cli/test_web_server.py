@@ -733,6 +733,49 @@ class TestWebServerEndpoints:
         resp = self.client.get("/api/sessions?order=sideways")
         assert resp.status_code == 400
 
+    def test_get_sessions_defaults_to_recent_message_order(self):
+        """The dashboard sessions page defaults to the most recently messaged
+        conversations, not original creation time."""
+        import time as _time
+
+        from hermes_state import SessionDB
+
+        now = _time.time()
+        db = SessionDB()
+        try:
+            db.create_session(session_id="newer-start-stale-message", source="cli")
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (now - 10, "newer-start-stale-message"),
+            )
+            db.append_message(
+                session_id="newer-start-stale-message",
+                role="user",
+                content="started recently but messaged earlier",
+                timestamp=now - 500,
+            )
+
+            db.create_session(session_id="older-start-fresh-message", source="cli")
+            db._conn.execute(
+                "UPDATE sessions SET started_at = ? WHERE id = ?",
+                (now - 1000, "older-start-fresh-message"),
+            )
+            db.append_message(
+                session_id="older-start-fresh-message",
+                role="user",
+                content="started earlier but messaged just now",
+                timestamp=now,
+            )
+            db._conn.commit()
+        finally:
+            db.close()
+
+        rows = self.client.get("/api/sessions?limit=5").json()["sessions"]
+        ids = [r["id"] for r in rows]
+        assert ids.index("older-start-fresh-message") < ids.index(
+            "newer-start-stale-message"
+        )
+
     def test_get_sessions_order_recent_surfaces_compression_tip(self):
         """A long-running conversation that auto-compresses must stay on the
         first page by recency, listed under its live continuation id."""

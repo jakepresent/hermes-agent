@@ -3556,12 +3556,22 @@ def _normalize_mcp_input_schema(schema: dict | None) -> dict:
     if not schema:
         return {"type": "object", "properties": {}}
 
-    def _rewrite_local_refs(node):
+    def _rewrite_local_refs(node, *, in_properties_map: bool = False):
         if isinstance(node, dict):
             normalized = {}
             for key, value in node.items():
-                out_key = "$defs" if key == "definitions" else key
-                normalized[out_key] = _rewrite_local_refs(value)
+                # ``definitions`` is a JSON Schema keyword only on schema
+                # objects.  Inside a ``properties`` map, keys are tool
+                # argument names and must be preserved verbatim.  The Azure
+                # DevOps MCP build-list tool has a legitimate parameter named
+                # ``definitions``; rewriting that property to ``$defs`` makes
+                # Copilot reject the entire tool schema because ``$defs`` is
+                # not a valid function-argument property name.
+                out_key = key if in_properties_map else ("$defs" if key == "definitions" else key)
+                normalized[out_key] = _rewrite_local_refs(
+                    value,
+                    in_properties_map=(not in_properties_map and key == "properties" and isinstance(value, dict)),
+                )
             ref = normalized.get("$ref")
             if isinstance(ref, str) and ref.startswith("#/definitions/"):
                 normalized["$ref"] = "#/$defs/" + ref[len("#/definitions/"):]

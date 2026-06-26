@@ -606,7 +606,32 @@ Live smoke:
 - Fetch `/api/sessions?limit=N` and `/api/sessions?limit=N&order=recent` with the dashboard session token; their session id order should match.
 - Fetch `/api/sessions?limit=N&order=created`; it may differ and should preserve the explicit old behavior.
 
-### 17. Test/environment cleanup and no-net-change commits
+### 17. MCP schema normalization for provider-compatible function schemas
+
+Purpose: keep external MCP tools usable across strict tool-schema validators, especially Copilot/Anthropic-style providers that reject invalid function argument property names.
+
+Core behavior:
+
+- Preserve JSON Schema `definitions` keywords as `$defs` only when they are schema keywords.
+- Preserve a tool argument literally named `definitions` under a `properties` map instead of rewriting it to `$defs`.
+- Keep Azure DevOps MCP `pipelines_get_builds` available; its `definitions` parameter means build definition IDs and must remain model-callable.
+
+Key files:
+
+- `tools/mcp_tool.py`
+- `tests/tools/test_mcp_tool.py`
+
+Commits:
+
+- pending current change - preserve MCP properties named `definitions`.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/tools/test_mcp_tool.py::TestSchemaConversion -o 'addopts=' -q
+```
+
+### 18. Test/environment cleanup and no-net-change commits
 
 Purpose: track commits that matter for future archaeology but are not independent product features.
 

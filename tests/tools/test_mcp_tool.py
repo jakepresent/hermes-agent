@@ -199,6 +199,32 @@ class TestSchemaConversion:
         assert "$defs" in schema["parameters"]
         assert "definitions" not in schema["parameters"]
 
+    def test_property_named_definitions_is_preserved(self):
+        """Argument properties named ``definitions`` are not schema ``definitions``."""
+        from tools.mcp_tool import _convert_mcp_schema
+
+        mcp_tool = _make_mcp_tool(
+            name="pipelines_get_builds",
+            description="List builds",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "definitions": {
+                        "type": "array",
+                        "items": {"type": "number", "minimum": 1},
+                        "description": "Array of build definition IDs to filter builds",
+                    },
+                },
+                "required": ["project"],
+            },
+        )
+
+        schema = _convert_mcp_schema("ado", mcp_tool)
+
+        assert "definitions" in schema["parameters"]["properties"]
+        assert "$defs" not in schema["parameters"]["properties"]
+
     def test_nested_definition_refs_are_rewritten_recursively(self):
         from tools.mcp_tool import _convert_mcp_schema
 

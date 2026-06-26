@@ -417,16 +417,21 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
 
     # ── Logging / callbacks ──────────────────────────────────────────
     tool_names_str = ", ".join(name for _, name, _, _, _, _ in parsed_calls)
+    def _display_args_preview(tool_name: str, args: dict) -> str:
+        preview = _build_tool_preview(tool_name, args, max_len=agent.log_prefix_chars)
+        if preview:
+            return preview
+        args_str = json.dumps(args, ensure_ascii=False)
+        return args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
+
     if not agent.quiet_mode and getattr(agent, "tool_progress_mode", "all") != "off":
         print(f"  ⚡ Concurrent: {num_tools} tool calls — {tool_names_str}")
         for i, (tc, name, args, middleware_trace, block_result, blocked_by_guardrail) in enumerate(parsed_calls, 1):
-            args_str = json.dumps(args, ensure_ascii=False)
             if agent.verbose_logging:
                 print(f"  📞 Tool {i}: {name}({list(args.keys())})")
                 print(agent._wrap_verbose("Args: ", json.dumps(args, indent=2, ensure_ascii=False)))
             else:
-                args_preview = args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
-                print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {args_preview}")
+                print(f"  📞 Tool {i}: {name}({list(args.keys())}) - {_display_args_preview(name, args)}")
 
     for tc, name, args, middleware_trace, block_result, blocked_by_guardrail in parsed_calls:
         if block_result is not None:
@@ -867,13 +872,15 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._iters_since_skill = 0
 
         if not agent.quiet_mode and getattr(agent, "tool_progress_mode", "all") != "off":
-            args_str = json.dumps(function_args, ensure_ascii=False)
             if agent.verbose_logging:
                 print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())})")
                 print(agent._wrap_verbose("Args: ", json.dumps(function_args, indent=2, ensure_ascii=False)))
             else:
-                args_preview = args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
-                print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {args_preview}")
+                preview = _build_tool_preview(function_name, function_args, max_len=agent.log_prefix_chars)
+                if not preview:
+                    args_str = json.dumps(function_args, ensure_ascii=False)
+                    preview = args_str[:agent.log_prefix_chars] + "..." if len(args_str) > agent.log_prefix_chars else args_str
+                print(f"  📞 Tool {i}: {function_name}({list(function_args.keys())}) - {preview}")
 
         if not _execution_blocked:
             agent._current_tool = function_name

@@ -2081,19 +2081,30 @@ class BasePlatformAdapter(ABC):
         if not isinstance(event, ToolCallChunk):
             return None
 
-        from agent.display import get_tool_emoji
+        from agent.display import (
+            build_terminal_command_preview,
+            get_tool_display_label,
+            get_tool_emoji,
+        )
         emoji = get_tool_emoji(event.tool_name, default="⚙️")
+        label = get_tool_display_label(event.tool_name, event.args if isinstance(event.args, dict) else None)
 
         if mode == "verbose":
+            if event.tool_name == "terminal" and isinstance(event.args, dict):
+                terminal_preview = build_terminal_command_preview(
+                    event.args.get("command"), max_len=preview_max_len
+                )
+                if terminal_preview:
+                    return f"{emoji} {label}: \"{terminal_preview}\""
             if event.args:
                 import json
                 args_str = json.dumps(event.args, ensure_ascii=False, default=str)
                 if preview_max_len > 0 and len(args_str) > preview_max_len:
                     args_str = args_str[:preview_max_len - 3] + "..."
-                return f"{emoji} {event.tool_name}({list(event.args.keys())})\n{args_str}"
+                return f"{emoji} {label}({list(event.args.keys())})\n{args_str}"
             if event.preview:
-                return f"{emoji} {event.tool_name}: \"{event.preview}\""
-            return f"{emoji} {event.tool_name}..."
+                return f"{emoji} {label}: \"{event.preview}\""
+            return f"{emoji} {label}..."
 
         # "all" / "new": short preview, capped (default 40 to keep gateway
         # progress bubbles compact — they persist as permanent messages).
@@ -2102,8 +2113,8 @@ class BasePlatformAdapter(ABC):
             cap = preview_max_len if preview_max_len > 0 else 40
             if len(preview) > cap:
                 preview = preview[:cap - 3] + "..."
-            return f"{emoji} {event.tool_name}: \"{preview}\""
-        return f"{emoji} {event.tool_name}..."
+            return f"{emoji} {label}: \"{preview}\""
+        return f"{emoji} {label}..."
 
     @property
     def has_fatal_error(self) -> bool:

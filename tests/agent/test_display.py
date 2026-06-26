@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 
 from agent.display import (
     build_tool_preview,
+    build_terminal_command_preview,
+    clean_terminal_command_for_display,
     capture_local_edit_snapshot,
     extract_edit_diff,
     get_cute_tool_message,
@@ -40,6 +42,21 @@ class TestBuildToolPreview:
         result = build_tool_preview("terminal", {"command": "ls -la"})
         assert result is not None
         assert "ls -la" in result
+
+    def test_terminal_preview_skips_leading_strict_mode_line(self):
+        command = "set -euo pipefail\nprintf 'node: '; node --version\nnpm test"
+        assert build_tool_preview("terminal", {"command": command}) == "printf 'node: '; node --version ..."
+        cleaned = clean_terminal_command_for_display(command)
+        assert cleaned is not None
+        assert cleaned.startswith("printf 'node: '")
+
+    def test_terminal_preview_skips_inline_strict_mode_prefix(self):
+        command = "set -euo pipefail; npm install && npm test"
+        assert build_terminal_command_preview(command) == "npm install && npm test"
+
+    def test_terminal_preview_summarizes_python_heredoc_body(self):
+        command = "python - <<'PY'\nimport json\nfrom pathlib import Path\nprint(Path.cwd())\nPY"
+        assert build_terminal_command_preview(command) == "python: print(Path.cwd()) ..."
 
     def test_web_search_preview(self):
         result = build_tool_preview("web_search", {"query": "hello world"})

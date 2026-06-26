@@ -6,6 +6,7 @@ Used by AIAgent._execute_tool_calls for CLI feedback.
 
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -212,6 +213,142 @@ def _truncate_preview(text: str, max_len: int | None) -> str:
     return text
 
 
+_SHELL_STRICT_MODE_LINE_RE = re.compile(
+    r"^set\s+(?:(?:-[A-Za-z]+)(?:\s+pipefail)?|-o\s+pipefail)\s*;?$"
+)
+_SHELL_STRICT_MODE_PREFIX_RE = re.compile(
+    r"^\s*set\s+(?:(?:-[A-Za-z]+)(?:\s+pipefail)?|-o\s+pipefail)\s*(?:;|&&)\s*"
+)
+_HEREDOC_MARKER_RE = re.compile(
+    r"<<-?\s*(?:'(?P<sq>[A-Za-z_][A-Za-z0-9_]*)'|\"(?P<dq>[A-Za-z_][A-Za-z0-9_]*)\"|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def _strip_shell_strict_mode(command: str) -> tuple[str, bool]:
+    """Remove leading shell safety boilerplate from a displayed command."""
+    text = command.strip()
+    removed = False
+
+    # Same-line forms: ``set -euo pipefail; npm test`` or ``... && npm test``.
+    while True:
+        match = _SHELL_STRICT_MODE_PREFIX_RE.match(text)
+        if not match:
+            break
+        text = text[match.end():].lstrip()
+        removed = True
+
+    lines = text.splitlines()
+    while lines and _SHELL_STRICT_MODE_LINE_RE.match(lines[0].strip()):
+        lines.pop(0)
+        removed = True
+        while lines and not lines[0].strip():
+            lines.pop(0)
+
+    return "\n".join(lines).strip(), removed
+
+
+def _first_nonblank_line(lines: list[str]) -> tuple[str | None, int]:
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped:
+            return stripped, idx
+    return None, -1
+
+
+def _first_meaningful_script_line(
+    lines: list[str], *, language: str | None = None
+) -> tuple[str | None, int]:
+    """Return the best short preview line from a heredoc body."""
+    fallback, fallback_idx = _first_nonblank_line(lines)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if language == "python" and (
+            stripped.startswith("import ") or stripped.startswith("from ")
+        ):
+            continue
+        return stripped, idx
+    return fallback, fallback_idx
+
+
+def _extract_heredoc_preview(command: str) -> tuple[str | None, bool]:
+    """Summarize a ``python - <<'PY'``-style command by its script body."""
+    lines = command.splitlines()
+    first, first_idx = _first_nonblank_line(lines)
+    if first is None:
+        return None, False
+
+    marker = _HEREDOC_MARKER_RE.search(first)
+    if not marker:
+        return None, False
+
+    delimiter = marker.group("sq") or marker.group("dq") or marker.group("bare")
+    launcher = first[:marker.start()]
+    language = "python" if re.search(r"\bpython(?:3(?:\.\d+)?)?\b", launcher) else None
+
+    body: list[str] = []
+    for line in lines[first_idx + 1:]:
+        if line.strip() == delimiter:
+            break
+        body.append(line)
+
+    body_line, body_idx = _first_meaningful_script_line(body, language=language)
+    if not body_line:
+        return None, len(lines) > first_idx + 1
+
+    label = "python" if language == "python" else "script"
+    has_more = sum(1 for line in body if line.strip()) > 1
+    return f"{label}: {body_line}", has_more
+
+
+def clean_terminal_command_for_display(command: Any) -> str | None:
+    """Return a terminal command with leading display-only boilerplate removed."""
+    if command is None:
+        return None
+    text = str(command).strip()
+    if not text:
+        return None
+    text, _removed_boilerplate = _strip_shell_strict_mode(text)
+    return text or None
+
+
+def build_terminal_command_preview(
+    command: Any, max_len: int | None = None
+) -> str | None:
+    """Build a user-facing preview for a terminal command.
+
+    Show the first meaningful action rather than execution boilerplate.  This
+    hides leading ``set -euo pipefail`` safety lines and summarizes heredoc
+    scripts by their body instead of the unhelpful ``python - <<'PY'`` wrapper.
+    """
+    if command is None:
+        return None
+    if max_len is None:
+        max_len = _tool_preview_max_len
+
+    text = clean_terminal_command_for_display(command)
+    if not text:
+        return None
+
+    heredoc_preview, heredoc_has_more = _extract_heredoc_preview(text)
+    if heredoc_preview:
+        preview = _oneline(heredoc_preview)
+        if heredoc_has_more and not preview.endswith("..."):
+            preview += " ..."
+        return _truncate_preview(preview, max_len)
+
+    lines = text.splitlines()
+    first, first_idx = _first_nonblank_line(lines)
+    if first is None:
+        return None
+
+    preview = _oneline(first)
+    if any(line.strip() for line in lines[first_idx + 1:]) and not preview.endswith("..."):
+        preview += " ..."
+    return _truncate_preview(preview, max_len)
+
+
 def _delegate_task_goal_parts(tasks: Any, *, per_goal_len: int) -> tuple[int, list[str]]:
     if not isinstance(tasks, list):
         return 0, []
@@ -264,6 +401,9 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
             return None
         preview = _oneline(str(goal))
         return _truncate_preview(preview, max_len) if preview else None
+
+    if tool_name == "terminal":
+        return build_terminal_command_preview(args.get("command"), max_len=max_len)
 
     if tool_name == "process":
         action = args.get("action", "")
@@ -987,7 +1127,8 @@ def get_cute_tool_message(
             return _wrap(f"┊ 📄 fetch     {_trunc(domain, 35)}{extra}  {dur}")
         return _wrap(f"┊ 📄 fetch     pages  {dur}")
     if tool_name == "terminal":
-        return _wrap(f"┊ 💻 $         {_trunc(args.get('command', ''), 42)}  {dur}")
+        command_preview = build_terminal_command_preview(args.get("command"), max_len=_tool_preview_max_len) or ""
+        return _wrap(f"┊ 💻 $         {command_preview}  {dur}")
     if tool_name == "process":
         action = args.get("action", "?")
         sid = args.get("session_id", "")[:12]

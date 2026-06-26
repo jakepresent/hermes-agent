@@ -1397,11 +1397,11 @@ async def test_terminal_progress_renders_fenced_code_block(monkeypatch, tmp_path
     # Bare fenced block, no language tag (no '```bash').
     assert "```" in all_content
     assert "```bash" not in all_content
-    # Non-verbose collapses to the first line + truncation marker — the later
-    # command lines must NOT appear (this was the "huge block" regression).
-    assert "set -euo pipefail" in all_content
+    # Non-verbose skips the boilerplate strict-mode line and shows the first
+    # meaningful command line + truncation marker.
+    assert "set -euo pipefail" not in all_content
+    assert "printf 'node: '; node --version" in all_content
     assert "npm install -g hyperframes@latest" not in all_content
-    assert "node --version" not in all_content
     # No truncated quoted preview for the terminal command.
     assert 'terminal: "' not in all_content
 
@@ -1449,9 +1449,11 @@ async def test_terminal_progress_verbose_shows_full_command(monkeypatch, tmp_pat
     all_content += " ".join(call["content"] for call in adapter.edits)
     assert "```" in all_content
     assert "```bash" not in all_content
-    # Full command body present — verbose is uncapped.
+    # Full cleaned command body present — verbose is uncapped, but still hides
+    # the low-signal strict-mode prologue.
+    assert "set -euo pipefail" not in all_content
+    assert "printf 'node: '; node --version" in all_content
     assert "npm install -g hyperframes@latest" in all_content
-    assert "node --version" in all_content
 
 
 @pytest.mark.asyncio
@@ -1564,4 +1566,4 @@ async def test_consecutive_terminal_progress_collapses_headers(monkeypatch, tmp_
         assert cmd in final
     # Exactly TWO terminal headers: one for the first run of three calls,
     # one for the terminal call after web_search broke the streak.
-    assert final.count("terminal\n```") == 2
+    assert final.count("Terminal\n```") == 2

@@ -90,7 +90,7 @@ def test_tool_call_chunk_renders_default_chrome():
     )
     d.dispatch(ToolCallChunk(tool_name="terminal", preview="ls -la"))
     assert len(lines) == 1
-    assert "terminal" in lines[0]
+    assert "Terminal" in lines[0]
     assert "ls -la" in lines[0]
 
 
@@ -104,6 +104,29 @@ def test_tool_preview_truncated_to_cap():
     # capped at 10 → 7 chars + "..." (then wrapped in quotes by the renderer)
     assert '"0123456..."' in lines[0]
     assert "89ABCDEF" not in lines[0]
+
+
+def test_terminal_verbose_default_chrome_uses_meaningful_preview():
+    lines = []
+    d = GatewayEventDispatcher(
+        _base_adapter(), _FakeSink(),
+        enqueue_tool_line=lines.append, tool_mode="verbose", preview_max_len=80,
+    )
+    command = "python - <<'PY'\nimport os\nprint(os.getcwd())\nPY"
+    d.dispatch(ToolCallChunk(tool_name="terminal", preview=command, args={"command": command}))
+    assert lines == ['⚙️ Terminal: "python: print(os.getcwd()) ..."']
+
+
+def test_terminal_verbose_default_chrome_hides_strict_mode():
+    lines = []
+    d = GatewayEventDispatcher(
+        _base_adapter(), _FakeSink(),
+        enqueue_tool_line=lines.append, tool_mode="verbose", preview_max_len=80,
+    )
+    command = "set -euo pipefail\npython -m pytest tests/agent/test_display.py -q"
+    d.dispatch(ToolCallChunk(tool_name="terminal", preview=command, args={"command": command}))
+    assert "set -euo pipefail" not in lines[0]
+    assert "python -m pytest tests/agent/test_display.py -q" in lines[0]
 
 
 def test_new_mode_dedups_same_tool():

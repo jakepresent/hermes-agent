@@ -14813,8 +14813,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             last_tool[0] = tool_name
             
             # Build progress message with primary argument preview
-            from agent.display import get_tool_emoji
+            from agent.display import get_tool_display_label, get_tool_emoji
             emoji = get_tool_emoji(tool_name, default="⚙️")
+            tool_label = get_tool_display_label(tool_name, args if isinstance(args, dict) else None)
 
             # Markdown-capable platforms render a terminal command as a fenced
             # code block instead of the compact `terminal: "cmd…"` preview.
@@ -14842,25 +14843,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 and isinstance(args.get("command"), str)
                 and args["command"].strip()
             ):
-                from agent.display import get_tool_preview_max_len
-                _cmd_full = args["command"].rstrip()
+                from agent.display import (
+                    build_terminal_command_preview,
+                    clean_terminal_command_for_display,
+                    get_tool_preview_max_len,
+                )
+                _cmd_full = clean_terminal_command_for_display(args["command"])
+                if not _cmd_full:
+                    _cmd_full = args["command"].strip()
                 # Consecutive terminal calls: drop the repeated
                 # "💻 terminal" header so back-to-back commands render as
                 # adjacent code blocks under a single header.
                 _block_header = (
-                    "" if last_was_terminal_block[0] else f"{emoji} {tool_name}\n"
+                    "" if last_was_terminal_block[0] else f"{emoji} {tool_label}\n"
                 )
                 _code_block_full = f"{_block_header}```\n{_cmd_full}\n```"
-                # Single-line, capped preview for non-verbose modes.
-                _pl = get_tool_preview_max_len()
-                _cap = _pl if _pl > 0 else 40
-                _lines = _cmd_full.splitlines()
-                _cmd_short = _lines[0] if _lines else _cmd_full
-                _multiline = len(_lines) > 1
-                if len(_cmd_short) > _cap:
-                    _cmd_short = _cmd_short[:_cap - 3] + "..."
-                elif _multiline:
-                    _cmd_short = _cmd_short + " ..."
+                if progress_mode == "verbose":
+                    _cmd_short = _cmd_full
+                else:
+                    _cmd_short = build_terminal_command_preview(
+                        _cmd_full, max_len=get_tool_preview_max_len() or 40
+                    ) or _cmd_full.splitlines()[0]
                 _code_block_short = f"{_block_header}```\n{_cmd_short}\n```"
 
             # Verbose mode: show detailed arguments, respects tool_preview_length
@@ -14879,11 +14882,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # detail.  Platform message-length limits handle the rest.
                     if _pl > 0 and len(args_str) > _pl:
                         args_str = args_str[:_pl - 3] + "..."
-                    msg = f"{emoji} {tool_name}({list(args.keys())})\n{args_str}"
+                    msg = f"{emoji} {tool_label}({list(args.keys())})\n{args_str}"
                 elif preview:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    msg = f"{emoji} {tool_label}: \"{preview}\""
                 else:
-                    msg = f"{emoji} {tool_name}..."
+                    msg = f"{emoji} {tool_label}..."
                 progress_queue.put(msg)
                 return
             
@@ -14901,10 +14904,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _cap = _pl if _pl > 0 else 40
                 if len(preview) > _cap:
                     preview = preview[:_cap - 3] + "..."
-                msg = f"{emoji} {tool_name}: \"{preview}\""
+                msg = f"{emoji} {tool_label}: \"{preview}\""
                 last_was_terminal_block[0] = False
             else:
-                msg = f"{emoji} {tool_name}..."
+                msg = f"{emoji} {tool_label}..."
                 last_was_terminal_block[0] = False
             
             # Dedup: collapse consecutive identical progress messages.

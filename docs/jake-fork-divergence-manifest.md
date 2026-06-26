@@ -183,12 +183,15 @@ Purpose: make long-running gateway/tool work legible without noisy or misleading
 Core behavior:
 
 - Better gateway tool progress labels.
+- Terminal progress previews hide low-signal shell safety prologues like `set -euo pipefail` and show the first meaningful command line instead.
+- Terminal heredoc previews summarize script bodies (for example `python - <<'PY'`) rather than showing only the wrapper line.
 - Avoid chat chunk pagination markers leaking into assistant-visible or user-facing content.
 - Retry/memory-full/provider-status noise reduced so the user sees signal rather than internal churn.
 
 Key files:
 
 - `agent/display.py`
+- `agent/tool_executor.py`
 - `gateway/display_config.py`
 - `gateway/platforms/api_server.py`
 - `gateway/platforms/base.py`
@@ -197,6 +200,8 @@ Key files:
 - `tests/agent/test_display.py`
 - `tests/gateway/test_display_config.py`
 - `tests/gateway/test_platform_base.py`
+- `tests/gateway/test_run_progress_topics.py`
+- `tests/gateway/test_stream_events.py`
 - `tests/run_agent/test_retry_status_buffer.py`
 
 Commits:
@@ -204,11 +209,12 @@ Commits:
 - `6adab27d8` - omit chat chunk pagination markers.
 - `feabad30f` - improve gateway tool progress labels.
 - `7731faed9` - reduce retry and memory-full noise.
+- `d321360c6` - make terminal command previews show meaningful command bodies.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/agent/test_display.py tests/gateway/test_display_config.py tests/gateway/test_platform_base.py tests/run_agent/test_retry_status_buffer.py -o 'addopts=' -q
+python -m pytest tests/agent/test_display.py tests/gateway/test_display_config.py tests/gateway/test_platform_base.py tests/gateway/test_run_progress_topics.py tests/gateway/test_stream_events.py tests/run_agent/test_retry_status_buffer.py -o 'addopts=' -q
 ```
 
 ### 6. Voice note transcription, transcript persistence, transcript echo, and active-run voice steering

@@ -673,7 +673,7 @@ Key files:
 
 Commits:
 
-- pending current change - MCP self-healing standby reconnect.
+- `890a012db` - MCP self-healing standby reconnect.
 
 Preservation checks:
 
@@ -769,7 +769,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 ### MCP resilience and schema compatibility
 
 - pending - `fix(mcp): preserve tool properties literally named definitions` (section 17)
-- pending - `fix(mcp): self-heal reconnect via standby retry instead of permanent give-up` (section 19)
+- `890a012db` `2026-06-27` - `fix(mcp): self-heal reconnect via standby retry instead of permanent give-up` (section 19)
 
 ### Dashboard sessions UI
 

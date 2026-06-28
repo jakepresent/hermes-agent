@@ -1595,7 +1595,7 @@ PATCH_SCHEMA = {
 
 SEARCH_FILES_SCHEMA = {
     "name": "search_files",
-    "description": "Search file contents or find files by name. Use this instead of grep/rg/find/ls in terminal. Ripgrep-backed, faster than shell equivalents.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Also use this instead of ls — results sorted by modification time.",
+    "description": "Search the live filesystem: file contents or file names in the current workspace. Use this for source code, repo files, generated outputs, and current on-disk state — not for durable project memory or prior conversation recall (use memory_search/session_search for those). Prefer this over shell grep/rg/find/ls when the goal is bounded, paginated agent-visible output. Ripgrep-backed when available.\n\nContent search (target='content'): Regex search inside files. Output modes: full matches with line numbers, file paths only, or match counts.\n\nFile search (target='files'): Find files by glob pattern (e.g., '*.py', '*config*'). Results are sorted by modification time.",
     "parameters": {
         "type": "object",
         "properties": {

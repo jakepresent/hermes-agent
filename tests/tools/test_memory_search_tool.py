@@ -137,6 +137,14 @@ def test_schema_lists_all_default_indexed_sources():
     assert "legacy_sessions" in source_schema["enum"]
 
 
+def test_schema_description_positions_memory_as_durable_context_cache():
+    desc = MEMORY_SEARCH_SCHEMA["description"]
+
+    assert "cache tier" in desc
+    assert "prior/project context" in desc
+    assert "ChatWorkspace" in desc
+
+
 def test_default_roots_include_localops_operator_notes():
     root_strings = {(str(path), source) for path, source in DEFAULT_ROOTS}
 

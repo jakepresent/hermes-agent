@@ -47,6 +47,8 @@ Core behavior:
 
 - Search local durable memory without browser/web access.
 - Support source filters, path filters, chunk and observation granularity, and compact TOON rendering.
+- Prefer `memory_search` as the first recall layer for durable project/user context, preferences, setup facts, and prior decisions; use `session_search` for raw past-chat transcripts and `search_files`/`read_file` for live disk/source-code state.
+- Keep the coding/ACP toolsets exposing `memory_search` alongside file/search tools so project-context grounding remains available in code workspaces.
 - Keep Markdown files canonical; indexes are caches.
 - Preserve source/file/line provenance so results can be audited.
 - Preserve OpenClaw legacy session import paths.
@@ -54,9 +56,15 @@ Core behavior:
 Key files:
 
 - `tools/memory_search_tool.py`
+- `tools/session_search_tool.py`
+- `tools/file_tools.py`
+- `tools/code_execution_tool.py`
 - `tests/tools/test_memory_search_tool.py`
+- `tests/tools/test_session_search.py`
 - `toolsets.py`
 - `agent/prompt_builder.py`
+- `tests/agent/test_prompt_builder.py`
+- `tests/agent/test_coding_context.py`
 - `tools/toon_renderer.py`
 - `tests/tools/test_toon_renderer.py`
 - `scripts/spikes/toon_memory_render_benchmark.py`
@@ -72,6 +80,7 @@ Preservation checks:
 
 ```bash
 python -m pytest tests/tools/test_memory_search_tool.py tests/tools/test_toon_renderer.py -o 'addopts=' -q
+python -m pytest tests/agent/test_prompt_builder.py tests/agent/test_coding_context.py tests/tools/test_session_search.py tests/tools/test_memory_search_tool.py -o 'addopts=' -q
 ```
 
 Live smoke for Jake's profile:

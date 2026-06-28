@@ -98,6 +98,12 @@ class TestSchema:
         desc = SESSION_SEARCH_SCHEMA["description"].lower()
         assert "no llm" in desc
 
+    def test_description_routes_durable_context_to_memory_search_first(self):
+        desc = SESSION_SEARCH_SCHEMA["description"]
+        assert "use memory_search first" in desc
+        assert "raw transcript" in desc
+        assert "curated reusable context" in desc
+
 
 class TestHiddenSources:
     def test_tool_source_hidden(self):

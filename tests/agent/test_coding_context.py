@@ -98,8 +98,12 @@ class TestCodingSelection:
         from toolsets import resolve_toolset
 
         tools = resolve_toolset(cc.CODING_TOOLSET)
-        # Coding essentials present…
-        for t in ("read_file", "write_file", "patch", "search_files", "terminal", "todo"):
+        # Coding essentials present, including durable memory lookup for
+        # project-context grounding before live-file inspection.
+        for t in (
+            "read_file", "write_file", "patch", "search_files", "terminal",
+            "todo", "memory_search",
+        ):
             assert t in tools
         # …and the noise is gone.
         for t in ("send_message", "text_to_speech", "image_generate", "computer_use"):

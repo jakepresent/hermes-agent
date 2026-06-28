@@ -673,9 +673,14 @@ SESSION_SEARCH_SCHEMA = {
         "(`\"docker networking\"`), boolean (`python NOT java`), or prefix wildcards "
         "(`deploy*`).\n\n"
         "WHEN TO USE\n\n"
-        "  Reach for this on any \"what did we do about X\" / \"where did we leave Y\" / "
-        "\"find the session where Z\" question — before gh, web search, or filesystem "
-        "inspection. The session DB carries what was said when; external tools show "
+        "  Use this for questions about what was said or done in prior chats: "
+        "\"what did we do about X\", \"where did we leave Y\", \"find the session "
+        "where Z\", or an `@session:<profile>/<id>` link. For durable project "
+        "context, preferences, setup facts, or prior decisions that should have "
+        "been preserved, use memory_search first; then use session_search only "
+        "when the curated memory is missing, ambiguous, or the raw transcript is "
+        "the thing being asked for. The session DB carries what was said when; "
+        "memory_search carries curated reusable context; external tools show "
         "current world state."
     ),
     "parameters": {

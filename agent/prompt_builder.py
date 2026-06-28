@@ -165,16 +165,21 @@ MEMORY_GUIDANCE = (
 )
 
 SESSION_SEARCH_GUIDANCE = (
-    "When the user references something from a past conversation or you suspect "
-    "relevant cross-session context exists, use session_search to recall it before "
-    "asking them to repeat themselves. Use memory_search as the fast cache tier "
-    "for durable project/user context stored in ChatWorkspace or Hermes memory files. "
-    "Think of current session context as RAM, memory_search/web/search_files as cache, "
-    "and heavier Discord/session archive retrieval as disk. When memory_search or the "
-    "heavier disk tier recovers durable context that should have been saved already, "
-    "treat that as a cache miss and write back a tight summary to the relevant "
-    "ChatWorkspace context file or Hermes memory pointer so future sessions find it "
-    "at the cache tier."
+    "Use the right recall layer before asking the user to repeat context. "
+    "For durable project/user context, preferences, setup facts, and prior "
+    "decisions preserved in ChatWorkspace or Hermes memory files, use "
+    "memory_search first as the fast cache tier. For questions about what was "
+    "said or done in past conversations — e.g. 'what did we do about X', "
+    "'where did we leave Y', or a specific @session link — use session_search "
+    "against the transcript DB. Use search_files/read_file for live filesystem "
+    "or source-code state, and web tools for current external facts. Think of "
+    "current session context as RAM, memory_search as curated durable cache, "
+    "session_search as the chat archive, search_files/read_file as live disk, "
+    "and heavier Discord/session archive retrieval as deeper disk. When "
+    "memory_search or the heavier archive tier recovers durable context that "
+    "should have been saved already, treat that as a cache miss and write back "
+    "a tight summary to the relevant ChatWorkspace context file or Hermes "
+    "memory pointer so future sessions find it at the cache tier."
 )
 
 SKILLS_GUIDANCE = (

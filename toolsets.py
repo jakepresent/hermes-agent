@@ -225,7 +225,7 @@ TOOLSETS = {
     },
     
     "session_search": {
-        "description": "Search and recall past conversations with summarization",
+        "description": "Search and scroll past conversation transcripts from the local session DB",
         "tools": ["session_search"],
         "includes": []
     },
@@ -344,7 +344,7 @@ TOOLSETS = {
     # for while pairing on code and drops the rest (messaging, tts, image_gen,
     # spotify, home-assistant, cron, computer-use).
     "coding": {
-        "description": "Coding-focused toolset: files, terminal, search, web docs, skills, todo, delegate, vision, browser",
+        "description": "Coding-focused toolset: files, terminal, search, web docs, durable memory, skills, todo, delegate, vision, browser",
         "tools": [
             "web_search", "web_extract",
             "terminal", "process", "read_terminal",
@@ -355,7 +355,7 @@ TOOLSETS = {
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
-            "todo", "memory",
+            "todo", "memory", "memory_search",
             "session_search", "clarify",
             "execute_code", "delegate_task",
         ],
@@ -387,7 +387,7 @@ TOOLSETS = {
             "browser_type", "browser_scroll", "browser_back",
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
-            "todo", "memory",
+            "todo", "memory", "memory_search",
             "session_search",
             "execute_code", "delegate_task",
         ],
@@ -413,7 +413,7 @@ TOOLSETS = {
             "browser_press", "browser_get_images",
             "browser_vision", "browser_console", "browser_cdp", "browser_dialog",
             # Planning & memory
-            "todo", "memory",
+            "todo", "memory", "memory_search",
             # Session history search
             "session_search",
             # Code execution + delegation

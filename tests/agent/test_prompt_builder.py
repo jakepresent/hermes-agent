@@ -50,10 +50,12 @@ class TestGuidanceConstants:
         assert "like a diary" not in MEMORY_GUIDANCE
         assert ">80%" not in MEMORY_GUIDANCE
 
-    def test_session_search_guidance_is_simple_cross_session_recall(self):
-        assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
+    def test_session_search_guidance_routes_recall_layers(self):
+        assert "memory_search first as the fast cache tier" in SESSION_SEARCH_GUIDANCE
+        assert "session_search as the chat archive" in SESSION_SEARCH_GUIDANCE
+        assert "search_files/read_file as live disk" in SESSION_SEARCH_GUIDANCE
+        assert "web tools for current external facts" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
-        assert "memory_search as the fast cache tier" in SESSION_SEARCH_GUIDANCE
         assert "cache miss" in SESSION_SEARCH_GUIDANCE
 
 
@@ -1044,6 +1046,15 @@ class TestPromptBuilderConstants:
         assert "bullet" in lowered
         assert "numbered" in lowered
         # Local media delivery guidance must remain intact.
+        assert "include MEDIA:" in hint
+
+    def test_discord_hint_does_not_encourage_tables(self):
+        # Discord does not render Markdown tables. The platform hint should not
+        # import Telegram/Mattermost's table guidance into Discord sessions.
+        hint = PLATFORM_HINTS["discord"]
+        lowered = hint.lower()
+        assert "markdown table" not in lowered
+        assert "table" not in lowered
         assert "include MEDIA:" in hint
 
     def test_platform_hints_mattermost(self):

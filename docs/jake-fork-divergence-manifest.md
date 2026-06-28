@@ -651,6 +651,41 @@ Commits:
 
 Upgrade note: do not spend time preserving the reverted subtitle behavior unless a later branch explicitly revives it.
 
+### 19. MCP self-healing reconnect (standby retry instead of permanent give-up)
+
+Purpose: keep long-lived MCP servers (especially Jake's Windows Agency bridges — EngHub, Teams, M365 Copilot) usable in a long-running gateway after a multi-minute endpoint wedge/outage, without a manual `/reload-mcp` or gateway restart.
+
+Background / root cause: upstream `MCPServerTask.run()` permanently exits its reconnect loop (`return`) once the fast reconnect budget (`_MAX_RECONNECT_RETRIES = 5`) is exhausted. When an Agency MCP's HTTP bridge stays wedged long enough to burn those 5 attempts, the server's background task ends and the server stays dead in the gateway's tool registry even after the endpoint fully recovers — so brand-new sessions inherit a registry missing e.g. all `mcp_teams_*` tools. The only recovery was `/reload-mcp` (which reconnects every server and re-registers all tools) or a full gateway restart. `/reload-mcp` also invalidates the per-conversation prompt cache, so auto-firing it from an external watchdog is the wrong fix.
+
+Core behavior:
+
+- After the fast reconnect budget is exhausted, a previously-healthy HTTP/SSE server drops into a slow "standby" retry loop (`_RECONNECT_STANDBY_INTERVAL`, default 300s) instead of returning permanently.
+- Because `_run_http`/`_run_stdio` re-discover tools and `run()` re-registers them on every successful (re)entry, a standby reconnect self-heals AND re-registers the server's tools with no `/reload-mcp` and no prompt-cache invalidation.
+- On entering standby the fast-retry counter and backoff are reset, so a later transient blip still gets the full fast backoff ladder before returning to standby.
+- Shutdown is still honored promptly (checked after the standby sleep).
+- `_RECONNECT_STANDBY_INTERVAL = 0` restores the upstream give-up-permanently behavior (escape hatch / behavior contract for the legacy path).
+- Initial-connect failures and OAuth-auth failures are unchanged — they still fail fast (no standby), preserving fast startup and avoiding repeated browser prompts.
+
+Key files:
+
+- `tools/mcp_tool.py` (constant `_RECONNECT_STANDBY_INTERVAL`; standby branch in `MCPServerTask.run()` reconnect loop)
+- `tests/tools/test_mcp_tool.py` (`TestReconnection::test_standby_reconnect_self_heals_after_exhausting_retries`, `TestReconnection::test_standby_disabled_restores_give_up_behavior`)
+
+Commits:
+
+- pending current change - MCP self-healing standby reconnect.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/tools/test_mcp_tool.py::TestReconnection -o 'addopts=' -q
+```
+
+Live smoke for Jake's profile:
+
+- Wedge one Agency MCP endpoint (or stop its Windows bridge) long enough to exhaust the fast reconnect retries; confirm the gateway logs `entering standby, retrying every 300s`.
+- Bring the endpoint back; within one standby interval the gateway should log the server reconnecting and re-registering its tools, and a new session should see those tools (e.g. `mcp_teams_*`) without any `/reload-mcp`.
+
 ## Complete commit ledger by feature bucket
 
 This is the raw commit map from the audited branch, grouped as the recommended history-cleanup overlay. It intentionally avoids rewriting history on a published branch.
@@ -731,6 +766,11 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `89389b4df` `2026-05-28` - `fix: skip GitHub Responses message item replay`
 - `ab4568296` `2026-06-02` - `feat: add fast OCR extraction tool`
 
+### MCP resilience and schema compatibility
+
+- pending - `fix(mcp): preserve tool properties literally named definitions` (section 17)
+- pending - `fix(mcp): self-heal reconnect via standby retry instead of permanent give-up` (section 19)
+
 ### Dashboard sessions UI
 
 - `438431705` `2026-06-25` - `fix(dashboard): default sessions to recent activity`
@@ -810,6 +850,7 @@ python -m pytest \
   tests/run_agent/test_run_agent_codex_responses.py \
   tests/agent/test_codex_ttfb_watchdog.py \
   tests/run_agent/test_retry_status_buffer.py \
+  tests/tools/test_mcp_tool.py \
   -o 'addopts=' -q
 ```
 

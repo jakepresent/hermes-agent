@@ -280,6 +280,16 @@ _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
 
+# After the fast reconnect-retry budget (_MAX_RECONNECT_RETRIES) is exhausted,
+# a previously-healthy HTTP/SSE server does NOT give up permanently. Instead it
+# drops into a slow "standby" retry loop at this cadence, so a server whose
+# endpoint was wedged/down for a long stretch self-heals (reconnects AND
+# re-registers its tools) once the endpoint recovers — without requiring a
+# /reload-mcp or a full gateway restart. Set to 0 to restore the old
+# give-up-permanently behavior. (Jake fork: Agency MCP self-heal, see
+# docs/jake-fork-divergence-manifest.md.)
+_RECONNECT_STANDBY_INTERVAL = 300  # seconds between slow standby reconnect probes
+
 # Keepalive cadence for HTTP/SSE sessions. The MCP spec lets a server expire
 # idle sessions on any TTL it chooses (Streamable HTTP "Session Management"),
 # so a client that wants a session to survive idle periods MUST refresh faster
@@ -2339,12 +2349,37 @@ class MCPServerTask:
 
                 retries += 1
                 if retries > _MAX_RECONNECT_RETRIES:
+                    # Fast reconnect budget exhausted. Rather than killing the
+                    # server permanently (which leaves it dead in the gateway
+                    # until /reload-mcp or a full restart — even after its
+                    # endpoint recovers), drop into a slow standby retry loop.
+                    # A long-wedged Agency MCP whose HTTP bridge later comes
+                    # back will then reconnect and re-register its tools on its
+                    # own. _RECONNECT_STANDBY_INTERVAL == 0 restores the old
+                    # give-up behavior.
+                    if _RECONNECT_STANDBY_INTERVAL <= 0:
+                        logger.warning(
+                            "MCP server '%s' failed after %d reconnection "
+                            "attempts, giving up: %s",
+                            self.name, _MAX_RECONNECT_RETRIES, exc,
+                        )
+                        return
                     logger.warning(
-                        "MCP server '%s' failed after %d reconnection attempts, "
-                        "giving up: %s",
-                        self.name, _MAX_RECONNECT_RETRIES, exc,
+                        "MCP server '%s' failed after %d reconnection "
+                        "attempts; entering standby, retrying every %ds "
+                        "until the endpoint recovers: %s",
+                        self.name, _MAX_RECONNECT_RETRIES,
+                        _RECONNECT_STANDBY_INTERVAL, exc,
                     )
-                    return
+                    # Reset the fast-retry budget so that once the endpoint
+                    # comes back, a subsequent transient blip still gets the
+                    # full backoff ladder before returning to standby.
+                    retries = 0
+                    backoff = 1.0
+                    await asyncio.sleep(_RECONNECT_STANDBY_INTERVAL)
+                    if self._shutdown_event.is_set():
+                        return
+                    continue
 
                 logger.warning(
                     "MCP server '%s' connection lost (attempt %d/%d), "

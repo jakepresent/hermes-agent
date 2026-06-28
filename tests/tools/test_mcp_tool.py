@@ -1788,6 +1788,103 @@ class TestReconnection:
 
         asyncio.run(_test())
 
+    def test_standby_reconnect_self_heals_after_exhausting_retries(self):
+        """A previously-healthy server that blows through the fast reconnect
+        budget enters standby and self-heals when its endpoint recovers.
+
+        Regression for the Agency MCP "gives up forever" bug: before the fork
+        fix, run() returned permanently after _MAX_RECONNECT_RETRIES, leaving
+        the server dead in the gateway until /reload-mcp. Now it keeps slow-
+        retrying and reconnects (re-registering tools) once the endpoint is
+        back. (Jake fork — docs/jake-fork-divergence-manifest.md.)
+        """
+        from tools.mcp_tool import MCPServerTask, _MAX_RECONNECT_RETRIES
+
+        run_count = 0
+        target_server = None
+        # Connect #1 succeeds (sets _ready), then the endpoint stays down for
+        # the entire fast-retry budget + the first standby attempt, then heals.
+        heal_on_attempt = _MAX_RECONNECT_RETRIES + 2
+
+        original_run_stdio = MCPServerTask._run_stdio
+
+        async def patched_run_stdio(self_srv, config):
+            nonlocal run_count, target_server
+            run_count += 1
+            if target_server is not self_srv:
+                return await original_run_stdio(self_srv, config)
+            if run_count == 1:
+                # Initial healthy connect, then drop.
+                self_srv.session = MagicMock()
+                self_srv._tools = []
+                self_srv._ready.set()
+                raise ConnectionError("endpoint wedged")
+            if run_count < heal_on_attempt:
+                # Still down through fast retries AND into standby.
+                raise ConnectionError("endpoint still wedged")
+            # Endpoint recovered: reconnect succeeds, then shut down to exit.
+            self_srv.session = MagicMock()
+            self_srv._shutdown_event.set()
+            await self_srv._shutdown_event.wait()
+
+        async def _test():
+            nonlocal target_server
+            server = MCPServerTask("test_srv")
+            target_server = server
+
+            with patch.object(MCPServerTask, "_run_stdio", patched_run_stdio), \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+                await server.run({"command": "test"})
+
+            # It must have kept going PAST the old give-up point and recovered.
+            assert run_count >= heal_on_attempt
+            # Self-heal means no terminal error was latched.
+            assert server._error is None
+
+        asyncio.run(_test())
+
+    def test_standby_disabled_restores_give_up_behavior(self):
+        """With _RECONNECT_STANDBY_INTERVAL == 0, a server that exhausts the
+        fast reconnect budget gives up permanently (legacy behavior).
+        """
+        import tools.mcp_tool as mcp_mod
+        from tools.mcp_tool import MCPServerTask, _MAX_RECONNECT_RETRIES
+
+        run_count = 0
+        target_server = None
+
+        original_run_stdio = MCPServerTask._run_stdio
+
+        async def patched_run_stdio(self_srv, config):
+            nonlocal run_count, target_server
+            run_count += 1
+            if target_server is not self_srv:
+                return await original_run_stdio(self_srv, config)
+            if run_count == 1:
+                self_srv.session = MagicMock()
+                self_srv._tools = []
+                self_srv._ready.set()
+            raise ConnectionError("endpoint down")
+
+        async def _test():
+            nonlocal target_server
+            server = MCPServerTask("test_srv")
+            target_server = server
+
+            with patch.object(mcp_mod, "_RECONNECT_STANDBY_INTERVAL", 0), \
+                 patch.object(MCPServerTask, "_run_stdio", patched_run_stdio), \
+                 patch("asyncio.sleep", new_callable=AsyncMock):
+                await server.run({"command": "test"})
+
+            # Initial success (1) + reconnect attempts until the counter
+            # exceeds _MAX_RECONNECT_RETRIES, then permanent give-up — no
+            # standby continuation. The give-up check fires when retries first
+            # exceeds the budget, so the failing run that trips it is the
+            # _MAX_RECONNECT_RETRIES-th reconnect: 1 + _MAX_RECONNECT_RETRIES.
+            assert run_count == 1 + _MAX_RECONNECT_RETRIES
+
+        asyncio.run(_test())
+
     def test_initial_oauth_failure_does_not_retry(self):
         """Initial OAuth failures stop immediately to avoid repeated browser prompts."""
         from tools.mcp_tool import MCPServerTask

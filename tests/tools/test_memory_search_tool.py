@@ -371,7 +371,10 @@ def test_chunk_granularity_is_default_and_unchanged(tmp_path):
 def test_schema_exposes_granularity_category_and_mode_params():
     props = MEMORY_SEARCH_SCHEMA["parameters"]["properties"]
     assert "granularity" in props
-    assert props["granularity"]["enum"] == ["chunk", "observation"]
+    assert props["granularity"]["enum"] == ["chunk", "observation", "all"]
+    assert props["action"]["enum"] == ["search", "status", "preindex"]
+    assert "max_batches" in props
+    assert MEMORY_SEARCH_SCHEMA["parameters"]["required"] == []
     assert "category" in props
     assert props["mode"]["enum"] == ["keyword", "semantic", "hybrid"]
     assert props["semantic_backend"]["enum"] == ["sklearn", "gemini"]
@@ -621,6 +624,71 @@ def test_preindex_semantic_embeddings_processes_limited_batches(tmp_path, monkey
     with sqlite3.connect(index_path) as con:
         count = con.execute("SELECT COUNT(*) FROM semantic_embeddings").fetchone()[0]
     assert count == 2
+
+
+def test_memory_search_status_action_reports_missing_prefixes(tmp_path, monkeypatch):
+    import tools.memory_search_tool as mst
+
+    root = tmp_path / "ChatWorkspace"
+    work = root / "work" / "meeting_notes"
+    work.mkdir(parents=True)
+    (work / "note.md").write_text("# Meeting\n\nUnembedded cache health note.\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    monkeypatch.setattr(mst, "_GEMINI_DEFAULT_MAX_COLD_ROWS", 0)
+
+    payload = json.loads(
+        memory_search_tool(
+            action="status",
+            granularity="chunk",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["action"] == "status"
+    chunk_status = payload["granularities"][0]
+    assert chunk_status["missing_count"] == 1
+    assert chunk_status["needs_preindex"] is True
+    assert chunk_status["missing_by_prefix"][0]["value"] == "ChatWorkspace/work/meeting_notes"
+
+
+def test_memory_search_preindex_action_can_repair_all_granularities(tmp_path, monkeypatch):
+    import tools.memory_search_tool as mst
+
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "note.md").write_text(
+        "# Note\n\nContext for cache repair.\n- [decision] Cache repair should be one click #memory\n",
+        encoding="utf-8",
+    )
+    index_path = tmp_path / "memory_search.sqlite"
+    build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+
+    def fake_batch(texts, *, model, max_retries=0):
+        return [[1.0, 0.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(mst, "_embed_gemini_texts_batched", fake_batch)
+
+    payload = json.loads(
+        memory_search_tool(
+            action="preindex",
+            granularity="all",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+            retry_429=False,
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["action"] == "preindex"
+    assert {item["granularity"] for item in payload["granularities"]} == {"chunk", "observation"}
+    assert payload["remaining_estimate"] == 0
+    assert payload["processed"] >= 2
+
 
 def test_semantic_observation_search_respects_category_and_path_filter(tmp_path):
     index_path, root = _write_observation_corpus(tmp_path)

@@ -99,6 +99,8 @@ Core behavior:
 - Default retrieval is hybrid keyword + semantic.
 - Gemini embeddings are the default semantic backend for Jake's setup.
 - Normal search embeds only the query; document/chunk vectors are persisted.
+- `memory_search(action='status', granularity='all')` exposes semantic-cache coverage, missing counts, and top missing path prefixes so degradation is visible to the agent/user.
+- `memory_search(action='preindex', granularity='all')` is the one-call cache-regenerate path agents should use when status reports large missing chunks/observations; it is resumable and can be bounded with `max_batches`.
 - Cold rebuilds are bounded and explicit/background preindexing is preferred.
 - Vectors are stored as float32 blobs and queried via sqlite-vec when coverage is complete.
 
@@ -122,6 +124,13 @@ Preservation checks:
 
 ```bash
 python -m pytest tests/tools/test_memory_search_tool.py -o 'addopts=' -q
+```
+
+Live repair/status commands:
+
+```text
+memory_search action=status granularity=all
+memory_search action=preindex granularity=all
 ```
 
 Config/runtime facts to verify in Jake's live profile:

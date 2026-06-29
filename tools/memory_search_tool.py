@@ -2000,6 +2000,146 @@ def _compact_context_path(path: str, source: str) -> str:
         return path
 
 
+
+def _cache_status_prefix(path: str, source: str) -> str:
+    """Group cache-miss paths into compact, human-readable prefixes."""
+    compact = _compact_context_path(path, source)
+    parts = Path(compact).parts
+    if not parts:
+        return compact
+    # Keep enough path to reveal the moved folder/project without exploding the
+    # status payload on deep meeting-note trees.
+    return str(Path(*parts[: min(len(parts), 3)]))
+
+
+def _top_counts(values: Sequence[str], limit: int = 12) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return [
+        {"value": value, "count": count}
+        for value, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
+    ]
+
+
+def _semantic_cache_status_for_granularity(
+    *,
+    index_path: Path,
+    granularity: str,
+    source: str,
+    path_filter: str,
+    category: str,
+    backend_id: str,
+    semantic_model: str,
+) -> dict[str, Any]:
+    with _connect(index_path) as con:
+        _ensure_schema(con)
+        rows = _semantic_candidate_rows(
+            con,
+            granularity=granularity,
+            source=source,
+            path_filter=path_filter,
+            category=category,
+        )
+        refs, missing = _load_cached_persistent_embedding_refs(
+            con,
+            rows,
+            index_path=index_path,
+            granularity=granularity,
+            backend_id=backend_id,
+            model_name=semantic_model,
+            source=source,
+            path_filter=path_filter,
+            category=category,
+        )
+        con.commit()
+        embedded_count = sum(1 for ref in refs if ref is not None)
+        table_name = _vec_table_name(granularity, semantic_model)
+        vec_meta = _sqlite_vec_coverage(
+            con,
+            granularity=granularity,
+            backend_id=backend_id,
+            model_name=semantic_model,
+        )
+
+    total = len(rows)
+    missing_rows = [rows[i] for i in missing]
+    coverage = (embedded_count / total) if total else 1.0
+    min_partial = float(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_MIN_PARTIAL_COVERAGE", "0.95"))
+    return {
+        "granularity": granularity,
+        "backend": backend_id,
+        "model": semantic_model,
+        "candidate_count": total,
+        "embedded_count": embedded_count,
+        "missing_count": len(missing),
+        "coverage": coverage,
+        "coverage_percent": round(coverage * 100, 2),
+        "needs_preindex": bool(total and coverage < min_partial),
+        "min_broad_coverage": min_partial,
+        "sqlite_vec": {**vec_meta, "table": table_name},
+        "missing_by_source": _top_counts([str(row["source"]) for row in missing_rows]),
+        "missing_by_prefix": _top_counts([
+            _cache_status_prefix(str(row["path"]), str(row["source"]))
+            for row in missing_rows
+        ]),
+    }
+
+
+def semantic_cache_status(
+    *,
+    index_path: Path | str = DEFAULT_INDEX_PATH,
+    roots: Optional[Sequence[tuple[Path | str, str]]] = None,
+    source: str = "all",
+    path_filter: str = "",
+    granularity: str = "all",
+    category: str = "",
+    semantic_model: str = "gemini-embedding-2",
+    freshness_seconds: int = 60,
+) -> dict[str, Any]:
+    """Return semantic-cache coverage and repair hints without running a search."""
+    index_path = Path(index_path).expanduser()
+    roots_norm = _normalize_roots(roots)
+    indexed = None
+    if _index_is_stale(index_path, roots_norm, freshness_seconds):
+        indexed = build_index(index_path=index_path, roots=roots_norm)
+
+    granularity = (granularity or "all").strip().lower()
+    category = (category or "").strip().lower()
+    if category and granularity == "chunk":
+        granularity = "observation"
+    if granularity not in {"chunk", "observation", "all"}:
+        return {"success": False, "error": "granularity must be one of: chunk, observation, all"}
+
+    backend_id = f"gemini:{semantic_model}"
+    granularities = ["chunk", "observation"] if granularity == "all" else [granularity]
+    results = [
+        _semantic_cache_status_for_granularity(
+            index_path=index_path,
+            granularity=item,
+            source=source,
+            path_filter=path_filter,
+            category=category if item == "observation" else "",
+            backend_id=backend_id,
+            semantic_model=semantic_model,
+        )
+        for item in granularities
+    ]
+    return {
+        "success": True,
+        "action": "status",
+        "index_path": str(index_path),
+        "index_updated": indexed,
+        "backend": backend_id,
+        "model": semantic_model,
+        "source": source,
+        "path_filter": path_filter,
+        "category": category,
+        "granularities": results,
+        "needs_preindex": any(item.get("needs_preindex") for item in results),
+        "repair_action": "memory_search(action='preindex', granularity='all')",
+    }
+
 def _chunk_result_from_row(row: sqlite3.Row, query: str, *, score: float | None = None) -> dict[str, Any]:
     return {
         "source": row["source"],
@@ -2739,89 +2879,126 @@ def preindex_semantic_embeddings(
     category = (category or "").strip().lower()
     if category and granularity == "chunk":
         granularity = "observation"
-    if granularity not in {"chunk", "observation"}:
-        return {"success": False, "error": "granularity must be one of: chunk, observation"}
+    if granularity not in {"chunk", "observation", "all"}:
+        return {"success": False, "error": "granularity must be one of: chunk, observation, all"}
 
     backend_id = f"gemini:{semantic_model}"
-    with _connect(index_path) as con:
-        _ensure_schema(con)
-        rows = _semantic_candidate_rows(
-            con,
-            granularity=granularity,
-            source=source,
-            path_filter=path_filter,
-            category=category,
-        )
-        existing, missing = _load_persistent_embeddings(
-            con, rows, granularity=granularity, backend_id=backend_id, model_name=semantic_model
-        )
-        batch_size = max(1, min(int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_BATCH_SIZE", str(_GEMINI_BATCH_SIZE))), 100))
-        max_items = len(missing) if not max_batches else min(len(missing), max_batches * batch_size)
-        processed = 0
-        errors: list[str] = []
-        for start in range(0, max_items, batch_size):
-            batch_indices = missing[start:start + batch_size]
-            docs = _semantic_documents([rows[i] for i in batch_indices], granularity)
-            prepared = [
-                _prepare_gemini_embedding_text(text, is_query=False, title=str(rows[i]["path"]))
-                for text, i in zip(docs, batch_indices)
-            ]
-            try:
-                new_vectors = _embed_gemini_texts_batched(
-                    prepared, model=semantic_model, max_retries=(1 if retry_429 else 0)
-                )
-            except Exception as exc:  # noqa: BLE001 - return progress + blocker
-                errors.append(str(exc))
-                break
-            _store_persistent_embeddings(
-                con,
-                [rows[i] for i in batch_indices],
-                vectors=new_vectors,
-                granularity=granularity,
-                backend_id=backend_id,
-                model_name=semantic_model,
-            )
-            con.commit()
-            processed += len(batch_indices)
+    granularities = ["chunk", "observation"] if granularity == "all" else [granularity]
+    per_granularity: list[dict[str, Any]] = []
+    total_candidates = 0
+    total_missing_before = 0
+    total_processed = 0
+    total_embedded_after = 0
+    errors: list[str] = []
+    all_sqlite_vec_synced = True
 
-        embedded_after = con.execute(
-            """
-            SELECT COUNT(*) FROM semantic_embeddings
-            WHERE granularity = ? AND backend = ? AND model = ?
-            """,
-            (granularity, backend_id, semantic_model),
-        ).fetchone()[0]
-        table_name = _vec_table_name(granularity, semantic_model)
-        sqlite_vec_synced = False
-        sqlite_vec_meta: dict[str, Any] = {}
-        if int(embedded_after) > 0:
-            sqlite_vec_synced, sqlite_vec_meta = _sync_sqlite_vec_rows(
+    for current_granularity in granularities:
+        current_category = category if current_granularity == "observation" else ""
+        with _connect(index_path) as con:
+            _ensure_schema(con)
+            rows = _semantic_candidate_rows(
                 con,
-                granularity=granularity,
-                backend_id=backend_id,
-                model_name=semantic_model,
-                table_name=table_name,
+                granularity=current_granularity,
+                source=source,
+                path_filter=path_filter,
+                category=current_category,
             )
-            con.commit()
+            existing, missing = _load_persistent_embeddings(
+                con, rows, granularity=current_granularity, backend_id=backend_id, model_name=semantic_model
+            )
+            batch_size = max(1, min(int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_BATCH_SIZE", str(_GEMINI_BATCH_SIZE))), 100))
+            max_items = len(missing) if not max_batches else min(len(missing), max_batches * batch_size)
+            processed = 0
+            item_errors: list[str] = []
+            for start in range(0, max_items, batch_size):
+                batch_indices = missing[start:start + batch_size]
+                docs = _semantic_documents([rows[i] for i in batch_indices], current_granularity)
+                prepared = [
+                    _prepare_gemini_embedding_text(text, is_query=False, title=str(rows[i]["path"]))
+                    for text, i in zip(docs, batch_indices)
+                ]
+                try:
+                    new_vectors = _embed_gemini_texts_batched(
+                        prepared, model=semantic_model, max_retries=(1 if retry_429 else 0)
+                    )
+                except Exception as exc:  # noqa: BLE001 - return progress + blocker
+                    item_errors.append(str(exc))
+                    break
+                _store_persistent_embeddings(
+                    con,
+                    [rows[i] for i in batch_indices],
+                    vectors=new_vectors,
+                    granularity=current_granularity,
+                    backend_id=backend_id,
+                    model_name=semantic_model,
+                )
+                con.commit()
+                processed += len(batch_indices)
+
+            embedded_after = con.execute(
+                """
+                SELECT COUNT(*) FROM semantic_embeddings
+                WHERE granularity = ? AND backend = ? AND model = ?
+                """,
+                (current_granularity, backend_id, semantic_model),
+            ).fetchone()[0]
+            table_name = _vec_table_name(current_granularity, semantic_model)
+            sqlite_vec_synced = False
+            sqlite_vec_meta: dict[str, Any] = {}
+            if int(embedded_after) > 0:
+                sqlite_vec_synced, sqlite_vec_meta = _sync_sqlite_vec_rows(
+                    con,
+                    granularity=current_granularity,
+                    backend_id=backend_id,
+                    model_name=semantic_model,
+                    table_name=table_name,
+                )
+                con.commit()
+
+        remaining = max(0, len(missing) - processed)
+        total_candidates += len(rows)
+        total_missing_before += len(missing)
+        total_processed += processed
+        total_embedded_after += int(embedded_after)
+        all_sqlite_vec_synced = all_sqlite_vec_synced and bool(sqlite_vec_synced)
+        errors.extend(item_errors)
+        per_granularity.append({
+            "granularity": current_granularity,
+            "candidate_count": len(rows),
+            "missing_before": len(missing),
+            "processed": processed,
+            "embedded_after": int(embedded_after),
+            "remaining_estimate": remaining,
+            "sqlite_vec_synced": sqlite_vec_synced,
+            "sqlite_vec": sqlite_vec_meta,
+            "errors": item_errors,
+        })
+        if item_errors or (max_batches and total_processed >= max_batches * batch_size):
+            # Keep manual/agent-triggered repair bounded when requested.
+            break
+
+    sqlite_vec_meta = (per_granularity[0].get("sqlite_vec") if len(per_granularity) == 1 else {})
     return {
         "success": not errors,
+        "action": "preindex",
         "index_path": str(index_path),
         "index_updated": indexed,
         "granularity": granularity,
         "backend": backend_id,
         "model": semantic_model,
-        "candidate_count": len(rows),
-        "missing_before": len(missing),
-        "processed": processed,
-        "embedded_after": int(embedded_after),
-        "remaining_estimate": max(0, len(missing) - processed),
-        "sqlite_vec_synced": sqlite_vec_synced,
+        "candidate_count": total_candidates,
+        "missing_before": total_missing_before,
+        "processed": total_processed,
+        "embedded_after": total_embedded_after,
+        "remaining_estimate": max(0, total_missing_before - total_processed),
+        "sqlite_vec_synced": all_sqlite_vec_synced,
         "sqlite_vec": sqlite_vec_meta,
+        "granularities": per_granularity,
         "errors": errors,
     }
 
 def memory_search_tool(
-    query: str,
+    query: str = "",
     source: str = "all",
     path_filter: str = "",
     limit: int = 8,
@@ -2833,12 +3010,48 @@ def memory_search_tool(
     semantic_backend: str = "gemini",
     semantic_model: str = "gemini-embedding-2",
     semantic_rebuild: str = "auto",
+    action: str = "search",
+    max_batches: int = 0,
+    retry_429: bool = True,
     index_path: Path | str = DEFAULT_INDEX_PATH,
     roots: Optional[Sequence[tuple[Path | str, str]]] = None,
     task_id: str | None = None,
 ) -> str:
     del task_id
     try:
+        action = (action or "search").strip().lower()
+        if action == "status":
+            return json.dumps(
+                semantic_cache_status(
+                    index_path=index_path,
+                    roots=roots,
+                    source=source,
+                    path_filter=path_filter,
+                    granularity=granularity if granularity else "all",
+                    category=category,
+                    semantic_model=semantic_model,
+                    freshness_seconds=freshness_seconds,
+                ),
+                ensure_ascii=False,
+            )
+        if action == "preindex":
+            return json.dumps(
+                preindex_semantic_embeddings(
+                    index_path=index_path,
+                    roots=roots,
+                    source=source,
+                    path_filter=path_filter,
+                    granularity=granularity if granularity else "all",
+                    category=category,
+                    semantic_model=semantic_model,
+                    max_batches=max_batches,
+                    freshness_seconds=freshness_seconds,
+                    retry_429=retry_429,
+                ),
+                ensure_ascii=False,
+            )
+        if action not in {"search", ""}:
+            return json.dumps({"success": False, "error": "action must be one of: search, status, preindex"}, ensure_ascii=False)
         return json.dumps(
             search_index(
                 query,
@@ -2877,19 +3090,27 @@ MEMORY_SEARCH_SCHEMA = {
     "description": (
         "Search Jake's durable, auditable memory files without using the browser. "
         "Indexes ~/ChatWorkspace and ~/.hermes/memories into a rebuildable SQLite FTS cache. "
-        "Use this as the cache tier when current context is missing prior/project context. "
-        "If it finds durable context that should have been saved already, treat that as a cache miss "
-        "and write back a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer. "
-        "Two granularities: 'chunk' (default) returns heading-sized passages; 'observation' returns "
-        "individual fact lines written as '- [category] text #tags' with exact file line numbers. Use "
-        "observation granularity (or pass a category) to pull a specific fact or list all facts of a kind, "
-        "e.g. category='decision' to find decisions across every project without reading whole files. "
-        "Search mode defaults to 'hybrid' so normal calls use Gemini embeddings plus keyword ranking."
+        "Use action='search' (default) for retrieval, action='status' to inspect Gemini semantic-cache "
+        "coverage/missing path prefixes, and action='preindex' to regenerate missing semantic embeddings "
+        "when coverage drops after large file moves or new context imports. Use this as the cache tier "
+        "when current context is missing prior/project context. If it finds durable context that should "
+        "have been saved already, treat that as a cache miss and write back a tight summary to the "
+        "relevant ChatWorkspace context file or Hermes memory pointer. Two granularities: 'chunk' "
+        "(default) returns heading-sized passages; 'observation' returns individual fact lines written "
+        "as '- [category] text #tags' with exact file line numbers. Use observation granularity (or pass "
+        "a category) to pull a specific fact or list all facts of a kind, e.g. category='decision' to "
+        "find decisions across every project without reading whole files. Search mode defaults to "
+        "'hybrid' so normal calls use Gemini embeddings plus keyword ranking when cache coverage is high."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "Search terms. Optional when granularity='observation' and a category/source/path filter is given (lists matching facts)."},
+            "action": {
+                "type": "string",
+                "enum": ["search", "status", "preindex"],
+                "description": "Operation to run. 'search' retrieves context (default). 'status' reports semantic-cache coverage and missing prefixes. 'preindex' regenerates missing Gemini embeddings, optionally bounded by max_batches.",
+            },
+            "query": {"type": "string", "description": "Search terms. Required for action='search' except when granularity='observation' and a category/source/path filter is given. Ignored for status/preindex."},
             "source": {
                 "type": "string",
                 "enum": ["all", "chatworkspace", "memories", "localops", "openclaw_legacy", "legacy_sessions", "discord"],
@@ -2918,8 +3139,8 @@ MEMORY_SEARCH_SCHEMA = {
             },
             "granularity": {
                 "type": "string",
-                "enum": ["chunk", "observation"],
-                "description": "'chunk' (default) returns passages; 'observation' returns individual '- [category] ...' fact lines with exact line numbers.",
+                "enum": ["chunk", "observation", "all"],
+                "description": "For search: 'chunk' (default) returns passages; 'observation' returns individual '- [category] ...' fact lines with exact line numbers. For status/preindex, use 'all' to cover both chunk and observation caches.",
             },
             "category": {
                 "type": "string",
@@ -2930,8 +3151,16 @@ MEMORY_SEARCH_SCHEMA = {
                 "enum": ["json", "toon"],
                 "description": "Optional model-facing context format. Use 'toon' for compact retrieval context; default 'json' preserves the existing output shape.",
             },
+            "max_batches": {
+                "type": "integer",
+                "description": "Preindex only. Maximum Gemini embedding batches to process this call. Default 0 means process all missing candidates.",
+            },
+            "retry_429": {
+                "type": "boolean",
+                "description": "Preindex only. Retry once on Gemini 429/rate-limit responses. Defaults true.",
+            },
         },
-        "required": ["query"],
+        "required": [],
     },
 }
 
@@ -2942,6 +3171,7 @@ registry.register(
     schema=MEMORY_SEARCH_SCHEMA,
     handler=lambda args, **kw: memory_search_tool(
         query=args.get("query", ""),
+        action=args.get("action", "search"),
         source=args.get("source", "all"),
         path_filter=args.get("path_filter", ""),
         limit=args.get("limit", 8),
@@ -2952,6 +3182,8 @@ registry.register(
         semantic_backend=args.get("semantic_backend", "gemini"),
         semantic_model=args.get("semantic_model", "gemini-embedding-2"),
         semantic_rebuild=args.get("semantic_rebuild", "auto"),
+        max_batches=args.get("max_batches", 0),
+        retry_429=args.get("retry_429", True),
         task_id=kw.get("task_id"),
     ),
     check_fn=check_memory_search_requirements,

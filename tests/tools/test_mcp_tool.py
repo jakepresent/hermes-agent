@@ -623,6 +623,145 @@ class TestToolHandler:
         finally:
             _servers.pop("test_srv", None)
 
+    def test_disconnected_server_reconnects_and_retries_once(self, caplog):
+        from tools.mcp_tool import (
+            MCPServerTask,
+            _make_tool_handler,
+            _server_breaker_opened_at,
+            _server_error_counts,
+            _servers,
+        )
+
+        class FakeRecoverableServer(MCPServerTask):
+            def __init__(self):
+                super().__init__("test_srv")
+                self.session = None
+                self.reconnect_calls = 0
+
+            async def request_reconnect(self, reason, timeout=15.0):
+                self.reconnect_calls += 1
+                assert "tools/call recover_tool" in reason
+                self.session = MagicMock()
+                self.session.call_tool = AsyncMock(
+                    return_value=_make_call_result("recovered", is_error=False)
+                )
+                return True
+
+        server = FakeRecoverableServer()
+        _servers["test_srv"] = server
+        _server_error_counts.pop("test_srv", None)
+        _server_breaker_opened_at.pop("test_srv", None)
+
+        try:
+            caplog.set_level("INFO")
+            handler = _make_tool_handler("test_srv", "recover_tool", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"x": 1}))
+
+            assert result["result"] == "recovered"
+            assert server.reconnect_calls == 1
+            assert server.session is not None
+            server.session.call_tool.assert_called_once_with(
+                "recover_tool", arguments={"x": 1}
+            )
+            assert _server_error_counts.get("test_srv") == 0
+            assert (
+                "MCP server 'test_srv' disconnected during tools/call recover_tool; "
+                "attempting one bounded reconnect/retry"
+            ) in caplog.text
+        finally:
+            _servers.pop("test_srv", None)
+            _server_error_counts.pop("test_srv", None)
+            _server_breaker_opened_at.pop("test_srv", None)
+
+    def test_not_connected_exception_reconnects_and_retries_once(self):
+        from tools.mcp_tool import (
+            MCPServerTask,
+            _make_tool_handler,
+            _server_breaker_opened_at,
+            _server_error_counts,
+            _servers,
+        )
+
+        class FakeRecoverableServer(MCPServerTask):
+            def __init__(self):
+                super().__init__("test_srv")
+                self.session = MagicMock()
+                self.session.call_tool = AsyncMock(
+                    side_effect=RuntimeError("MCP server 'test_srv' is not connected")
+                )
+                self.reconnect_calls = 0
+
+            async def request_reconnect(self, reason, timeout=15.0):
+                self.reconnect_calls += 1
+                assert "MCP server 'test_srv' is not connected" in reason
+                self.session = MagicMock()
+                self.session.call_tool = AsyncMock(
+                    return_value=_make_call_result("retried", is_error=False)
+                )
+                return True
+
+        server = FakeRecoverableServer()
+        _servers["test_srv"] = server
+        _server_error_counts.pop("test_srv", None)
+        _server_breaker_opened_at.pop("test_srv", None)
+
+        try:
+            handler = _make_tool_handler("test_srv", "recover_tool", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"x": 1}))
+
+            assert result["result"] == "retried"
+            assert server.reconnect_calls == 1
+            assert server.session is not None
+            server.session.call_tool.assert_called_once_with(
+                "recover_tool", arguments={"x": 1}
+            )
+            assert _server_error_counts.get("test_srv") == 0
+        finally:
+            _servers.pop("test_srv", None)
+            _server_error_counts.pop("test_srv", None)
+            _server_breaker_opened_at.pop("test_srv", None)
+
+    def test_disconnected_server_reconnect_timeout_returns_clear_error(self):
+        from tools.mcp_tool import (
+            MCPServerTask,
+            _make_tool_handler,
+            _server_breaker_opened_at,
+            _server_error_counts,
+            _servers,
+        )
+
+        class FakeUnrecoverableServer(MCPServerTask):
+            def __init__(self):
+                super().__init__("test_srv")
+                self.session = None
+                self.reconnect_calls = 0
+
+            async def request_reconnect(self, reason, timeout=15.0):
+                self.reconnect_calls += 1
+                return False
+
+        server = FakeUnrecoverableServer()
+        _servers["test_srv"] = server
+        _server_error_counts.pop("test_srv", None)
+        _server_breaker_opened_at.pop("test_srv", None)
+
+        try:
+            handler = _make_tool_handler("test_srv", "slow_tool", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({}))
+
+            assert server.reconnect_calls == 1
+            assert "error" in result
+            assert "bounded reconnect attempt" in result["error"]
+            assert "did not complete within" in result["error"]
+            assert "/reload-mcp" in result["error"]
+        finally:
+            _servers.pop("test_srv", None)
+            _server_error_counts.pop("test_srv", None)
+            _server_breaker_opened_at.pop("test_srv", None)
+
     def test_interrupted_call_returns_interrupted_error(self):
         from tools.mcp_tool import _make_tool_handler, _servers
 
@@ -1840,6 +1979,77 @@ class TestReconnection:
             assert run_count >= heal_on_attempt
             # Self-heal means no terminal error was latched.
             assert server._error is None
+
+        asyncio.run(_test())
+
+    def test_tool_call_recovery_wakes_reconnect_backoff_without_tearing_down_fresh_session(self):
+        """A tool call can wake an in-flight reconnect sleep and use the fresh session.
+
+        Regression for keepalive-triggered reconnect limbo: when session is
+        already None, recovery must not use _reconnect_event because that event
+        is consumed by the active-session wait loop and would immediately tear
+        down the newly recovered session.
+        """
+        from tools.mcp_tool import MCPServerTask
+
+        run_count = 0
+        target_server = None
+        sleep_calls = []
+        recovered_session = None
+
+        original_run_stdio = MCPServerTask._run_stdio
+
+        async def patched_run_stdio(self_srv, config):
+            nonlocal run_count, target_server, recovered_session
+            run_count += 1
+            if target_server is not self_srv:
+                return await original_run_stdio(self_srv, config)
+            if run_count == 1:
+                self_srv.session = MagicMock()
+                self_srv._tools = []
+                self_srv._ready.set()
+                raise ConnectionError("keepalive forced reconnect")
+            recovered_session = MagicMock()
+            self_srv.session = recovered_session
+            self_srv._connection_generation += 1
+            self_srv._ready.set()
+            await self_srv._wait_for_lifecycle_event()
+
+        async def _test():
+            nonlocal target_server
+            server = MCPServerTask("test_srv")
+            target_server = server
+
+            original_sleep = asyncio.sleep
+
+            async def wakeable_sleep(delay):
+                if delay <= 0.1:
+                    await original_sleep(0)
+                    return
+                sleep_calls.append(delay)
+                await server._recover_now_event.wait()
+
+            with patch.object(MCPServerTask, "_run_stdio", patched_run_stdio), \
+                 patch("asyncio.sleep", side_effect=wakeable_sleep):
+                task = asyncio.create_task(server.run({"command": "test"}))
+                while run_count < 1 or server.session is not None:
+                    await asyncio.sleep(0)
+
+                ready = await server.request_reconnect(
+                    "tools/call recover_tool: MCP server 'test_srv' is not connected",
+                    timeout=1.0,
+                )
+
+                assert ready is True
+                assert server.session is recovered_session
+                assert not server._reconnect_event.is_set()
+                assert run_count == 2
+
+                server._shutdown_event.set()
+                server._reconnect_event.set()
+                await task
+
+            assert sleep_calls
 
         asyncio.run(_test())
 

@@ -660,11 +660,13 @@ Commits:
 
 Upgrade note: do not spend time preserving the reverted subtitle behavior unless a later branch explicitly revives it.
 
-### 19. MCP self-healing reconnect (standby retry instead of permanent give-up)
+### 19. MCP self-healing reconnect (standby + bounded tool-call retry)
 
-Purpose: keep long-lived MCP servers (especially Jake's Windows Agency bridges — EngHub, Teams, M365 Copilot) usable in a long-running gateway after a multi-minute endpoint wedge/outage, without a manual `/reload-mcp` or gateway restart.
+Purpose: keep long-lived MCP servers (especially Jake's Windows Agency bridges — EngHub, Teams, M365 Copilot) usable in a long-running gateway after endpoint wedges, keepalive-triggered reconnects, or session loss, without a manual `/reload-mcp` or gateway restart.
 
 Background / root cause: upstream `MCPServerTask.run()` permanently exits its reconnect loop (`return`) once the fast reconnect budget (`_MAX_RECONNECT_RETRIES = 5`) is exhausted. When an Agency MCP's HTTP bridge stays wedged long enough to burn those 5 attempts, the server's background task ends and the server stays dead in the gateway's tool registry even after the endpoint fully recovers — so brand-new sessions inherit a registry missing e.g. all `mcp_teams_*` tools. The only recovery was `/reload-mcp` (which reconnects every server and re-registers all tools) or a full gateway restart. `/reload-mcp` also invalidates the per-conversation prompt cache, so auto-firing it from an external watchdog is the wrong fix.
+
+Additional runtime bug: a keepalive-triggered reconnect can leave the long-running gateway with model-facing `mcp_<server>_*` handlers registered from an earlier connection while `server.session` is already `None`. In that state a healthy endpoint and even a successful fresh `hermes mcp test <server>` do not help the existing gateway session: the model-facing tool call immediately returns `MCP server '<name>' is not connected` instead of nudging the server-local lifecycle task to reconnect and retrying the call.
 
 Core behavior:
 
@@ -674,26 +676,32 @@ Core behavior:
 - Shutdown is still honored promptly (checked after the standby sleep).
 - `_RECONNECT_STANDBY_INTERVAL = 0` restores the upstream give-up-permanently behavior (escape hatch / behavior contract for the legacy path).
 - Initial-connect failures and OAuth-auth failures are unchanged — they still fail fast (no standby), preserving fast startup and avoiding repeated browser prompts.
+- If a model-facing MCP tool call sees the registered server with no session, or an MCP/session exception whose message says this server is not connected / session missing, the handler triggers a server-local bounded reconnect (`_TOOL_CALL_RECONNECT_TIMEOUT`, default 15s) and retries the same operation once.
+- Tool-call recovery reuses the same `MCPServerTask` and registered model-facing names. It does not call `/reload-mcp`, does not rebuild every MCP server, and does not intentionally invalidate the prompt/tool schema.
+- If the lifecycle task is already between sessions and sleeping in reconnect backoff/standby, tool-call recovery wakes that sleep via `_recover_now_event` without arming `_reconnect_event`; this avoids immediately tearing down the freshly recovered session.
+- If reconnect does not finish within the bounded wait, the tool call returns a clear JSON error and the existing reconnect/standby loop remains the background recovery path.
 
 Key files:
 
-- `tools/mcp_tool.py` (constant `_RECONNECT_STANDBY_INTERVAL`; standby branch in `MCPServerTask.run()` reconnect loop)
-- `tests/tools/test_mcp_tool.py` (`TestReconnection::test_standby_reconnect_self_heals_after_exhausting_retries`, `TestReconnection::test_standby_disabled_restores_give_up_behavior`)
+- `tools/mcp_tool.py` (constant `_RECONNECT_STANDBY_INTERVAL`; constant `_TOOL_CALL_RECONNECT_TIMEOUT`; `MCPServerTask.request_reconnect`; `_recover_now_event`; bounded `_initialize_and_discover`; `_recover_disconnected_server_and_retry`; handler retry path)
+- `tests/tools/test_mcp_tool.py` (`TestReconnection::test_standby_reconnect_self_heals_after_exhausting_retries`, `TestReconnection::test_standby_disabled_restores_give_up_behavior`, `TestReconnection::test_tool_call_recovery_wakes_reconnect_backoff_without_tearing_down_fresh_session`, and the disconnected/not-connected handler retry tests in `TestToolHandler`)
 
 Commits:
 
 - `890a012db` - MCP self-healing standby reconnect.
+- pending current change - MCP runtime bounded tool-call reconnect/retry.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/tools/test_mcp_tool.py::TestReconnection -o 'addopts=' -q
+python -m pytest tests/tools/test_mcp_tool.py -o 'addopts=' -q
 ```
 
 Live smoke for Jake's profile:
 
 - Wedge one Agency MCP endpoint (or stop its Windows bridge) long enough to exhaust the fast reconnect retries; confirm the gateway logs `entering standby, retrying every 300s`.
 - Bring the endpoint back; within one standby interval the gateway should log the server reconnecting and re-registering its tools, and a new session should see those tools (e.g. `mcp_teams_*`) without any `/reload-mcp`.
+- For the tool-call runtime path, leave registered tools in place while `server.session` is missing, call a model-facing tool, and confirm the log contains `disconnected during tools/call ... attempting one bounded reconnect/retry` followed by a single successful retry or the bounded timeout error.
 
 ## Complete commit ledger by feature bucket
 
@@ -779,6 +787,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 
 - pending - `fix(mcp): preserve tool properties literally named definitions` (section 17)
 - `890a012db` `2026-06-27` - `fix(mcp): self-heal reconnect via standby retry instead of permanent give-up` (section 19)
+- pending current change - `fix(mcp): retry disconnected tool calls after bounded reconnect` (section 19)
 
 ### Dashboard sessions UI
 

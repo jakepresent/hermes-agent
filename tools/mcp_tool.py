@@ -290,6 +290,11 @@ _MAX_BACKOFF_SECONDS = 60
 # docs/jake-fork-divergence-manifest.md.)
 _RECONNECT_STANDBY_INTERVAL = 300  # seconds between slow standby reconnect probes
 
+# Tool-call-triggered recovery should be quick and bounded. This is separate
+# from ``connect_timeout`` (which may be intentionally high for cold startup)
+# because the model is already waiting on a user-facing tool call.
+_TOOL_CALL_RECONNECT_TIMEOUT = 15.0
+
 # Keepalive cadence for HTTP/SSE sessions. The MCP spec lets a server expire
 # idle sessions on any TTL it chooses (Streamable HTTP "Session Management"),
 # so a client that wants a session to survive idle periods MUST refresh faster
@@ -1422,6 +1427,8 @@ class MCPServerTask:
         "_rpc_lock", "_pending_refresh_tasks",
         "_pending_call_context",
         "initialize_result", "_ping_unsupported",
+        "_connection_generation", "_reconnect_request_lock",
+        "_recover_now_event",
     )
 
     def __init__(self, name: str):
@@ -1475,6 +1482,19 @@ class MCPServerTask:
         # back to ``list_tools`` (the pre-ping probe) so we neither spam pings
         # nor reconnect-loop. Reset on each fresh transport connection.
         self._ping_unsupported: bool = False
+        # Monotonic counter bumped only after a fresh transport session has
+        # initialized AND discovered tools. Tool-call recovery waits on this
+        # rather than ``_ready`` because ``_ready`` intentionally stays set
+        # across reconnects to keep already-registered schemas stable.
+        self._connection_generation: int = 0
+        # Serialize explicit reconnect requests from concurrent tool calls so
+        # one stale MCP server does not stampede its endpoint.
+        self._reconnect_request_lock = asyncio.Lock()
+        # Tool-call recovery can wake a server that is already between sessions
+        # and sleeping in reconnect backoff/standby. Unlike _reconnect_event,
+        # this is not consumed by an active session's lifecycle wait loop, so it
+        # won't immediately tear down a freshly recovered connection.
+        self._recover_now_event = asyncio.Event()
 
     def _is_http(self) -> bool:
         """Check if this server uses HTTP transport."""
@@ -1499,6 +1519,105 @@ class MCPServerTask:
         if caps is None:
             return True
         return getattr(caps, "tools", None) is not None
+
+    async def _initialize_and_discover(self, session: Any, config: dict) -> None:
+        """Initialize a ClientSession, discover tools, and mark it connected.
+
+        The long-lived reconnect loop cannot wrap the whole transport context
+        in ``wait_for`` because a healthy session then waits indefinitely for a
+        shutdown/reconnect event. Bound only the handshake/discovery steps that
+        should complete promptly on every connect/reconnect.
+        """
+        connect_timeout = float(config.get("connect_timeout", _DEFAULT_CONNECT_TIMEOUT))
+        self.initialize_result = await asyncio.wait_for(
+            session.initialize(), timeout=connect_timeout
+        )
+        # _discover_tools uses self.session for list_tools under _rpc_lock. Do
+        # not bump _connection_generation until discovery also completes.
+        self.session = session
+        try:
+            await asyncio.wait_for(self._discover_tools(), timeout=connect_timeout)
+        except Exception:
+            self.session = None
+            raise
+        self._connection_generation += 1
+        self._ready.set()
+
+    async def request_reconnect(self, reason: str, timeout: float = _TOOL_CALL_RECONNECT_TIMEOUT) -> bool:
+        """Request a server-local reconnect and wait briefly for recovery.
+
+        This is the runtime self-heal path used by already-registered model
+        tools when their backing MCP session is missing or stale. It does not
+        rebuild all MCP servers or mutate the model-facing tool schema; it only
+        nudges this server's existing lifecycle task to rebuild its transport.
+        """
+        timeout = float(timeout)
+        old_session = self.session
+        old_generation = self._connection_generation
+
+        async with self._reconnect_request_lock:
+            # Another concurrent caller may have completed recovery while this
+            # request waited for the lock.
+            if self.session is not None and (
+                old_session is None
+                or self.session is not old_session
+                or self._connection_generation > old_generation
+            ):
+                if old_session is None:
+                    self._reconnect_event.clear()
+                    self._recover_now_event.clear()
+                return True
+
+            if self._shutdown_event.is_set():
+                return False
+
+            # If the lifecycle task already died but the registry still holds
+            # tool handlers for this server, restart that same server object
+            # using its stored config. This preserves tool names and avoids a
+            # global /reload-mcp schema rebuild.
+            if self._task is None or self._task.done():
+                if not self._config:
+                    return False
+                logger.info(
+                    "MCP server '%s': restarting stopped lifecycle task for %s",
+                    self.name, reason,
+                )
+                self._error = None
+                self._reconnect_event.clear()
+                self._task = asyncio.ensure_future(self.run(dict(self._config)))
+            else:
+                logger.info(
+                    "MCP server '%s': reconnect requested by %s",
+                    self.name, reason,
+                )
+                if old_session is not None:
+                    self._reconnect_event.set()
+                else:
+                    self._recover_now_event.set()
+
+            deadline = asyncio.get_running_loop().time() + timeout
+            while True:
+                current_session = self.session
+                if current_session is not None and (
+                    old_session is None
+                    or current_session is not old_session
+                    or self._connection_generation > old_generation
+                ):
+                    # If this request was only waking a task already between
+                    # sessions, don't leave the reconnect event armed after the
+                    # fresh session appears or the lifecycle wait loop may tear
+                    # it down immediately.
+                    if old_session is None:
+                        self._reconnect_event.clear()
+                        self._recover_now_event.clear()
+                    return True
+                if self._shutdown_event.is_set():
+                    return False
+                if self._task is not None and self._task.done() and self.session is None:
+                    return False
+                if asyncio.get_running_loop().time() >= deadline:
+                    return False
+                await asyncio.sleep(0.1)
 
     # ----- Dynamic tool discovery (notifications/tools/list_changed) -----
 
@@ -1830,10 +1949,7 @@ class MCPServerTask:
                 async with ClientSession(
                     read_stream, write_stream, **sampling_kwargs
                 ) as session:
-                    self.initialize_result = await session.initialize()
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
+                    await self._initialize_and_discover(session, config)
                     # stdio transport does not use OAuth, but we still honor
                     # _reconnect_event (e.g. future manual /mcp refresh) for
                     # consistency with _run_http.
@@ -2061,10 +2177,7 @@ class MCPServerTask:
                 async with ClientSession(
                     read_stream, write_stream, **sampling_kwargs
                 ) as session:
-                    self.initialize_result = await session.initialize()
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
+                    await self._initialize_and_discover(session, config)
                     reason = await self._wait_for_lifecycle_event()
                     if reason == "reconnect":
                         logger.info(
@@ -2110,10 +2223,7 @@ class MCPServerTask:
                     read_stream, write_stream, _get_session_id,
                 ):
                     async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                        self.initialize_result = await session.initialize()
-                        self.session = session
-                        await self._discover_tools()
-                        self._ready.set()
+                        await self._initialize_and_discover(session, config)
                         reason = await self._wait_for_lifecycle_event()
                         if reason == "reconnect":
                             logger.info(
@@ -2133,10 +2243,7 @@ class MCPServerTask:
                 read_stream, write_stream, _get_session_id,
             ):
                 async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
-                    self.initialize_result = await session.initialize()
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
+                    await self._initialize_and_discover(session, config)
                     reason = await self._wait_for_lifecycle_event()
                     if reason == "reconnect":
                         logger.info(
@@ -2257,6 +2364,28 @@ class MCPServerTask:
         initial_retries = 0
         backoff = 1.0
 
+        async def _sleep_or_recovery(delay: float) -> None:
+            """Sleep for reconnect backoff, but wake on shutdown or tool-call recovery."""
+            if delay <= 0:
+                return
+            sleep_task = asyncio.create_task(asyncio.sleep(delay))
+            shutdown_task = asyncio.create_task(self._shutdown_event.wait())
+            recovery_task = asyncio.create_task(self._recover_now_event.wait())
+            try:
+                await asyncio.wait(
+                    {sleep_task, shutdown_task, recovery_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            finally:
+                for task in (sleep_task, shutdown_task, recovery_task):
+                    if not task.done():
+                        task.cancel()
+                        try:
+                            await task
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                self._recover_now_event.clear()
+
         while True:
             try:
                 if self._is_http():
@@ -2329,7 +2458,7 @@ class MCPServerTask:
                         self.name, initial_retries,
                         _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
                     )
-                    await asyncio.sleep(backoff)
+                    await _sleep_or_recovery(backoff)
                     backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                     # Check if shutdown was requested during the sleep
@@ -2376,7 +2505,7 @@ class MCPServerTask:
                     # full backoff ladder before returning to standby.
                     retries = 0
                     backoff = 1.0
-                    await asyncio.sleep(_RECONNECT_STANDBY_INTERVAL)
+                    await _sleep_or_recovery(_RECONNECT_STANDBY_INTERVAL)
                     if self._shutdown_event.is_set():
                         return
                     continue
@@ -2387,7 +2516,7 @@ class MCPServerTask:
                     self.name, retries, _MAX_RECONNECT_RETRIES,
                     backoff, exc,
                 )
-                await asyncio.sleep(backoff)
+                await _sleep_or_recovery(backoff)
                 backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                 # Check again after sleeping
@@ -2695,6 +2824,8 @@ _SESSION_EXPIRED_MARKERS: tuple = (
     "expired session",
     "session expired",
     "session not found",
+    "session missing",
+    "no active session",
     "unknown session",
     "session terminated",
     "closedresourceerror",
@@ -2732,6 +2863,119 @@ def _is_session_expired_error(exc: BaseException) -> bool:
     return any(marker in msg for marker in _SESSION_EXPIRED_MARKERS)
 
 
+def _is_disconnected_error_for_server(exc: BaseException, server_name: str) -> bool:
+    """Return True for Hermes/client messages saying this MCP server is disconnected."""
+    if isinstance(exc, InterruptedError):
+        return False
+    msg = str(exc).lower()
+    if "not connected" not in msg or "mcp server" not in msg:
+        return False
+    quoted = re.search(r"mcp server ['\"]([^'\"]+)['\"]", msg)
+    if quoted:
+        expected = {
+            str(server_name).lower(),
+            sanitize_mcp_name_component(server_name).lower(),
+        }
+        return quoted.group(1).lower() in expected
+    # Some client layers omit the quoted server name. Treat the generic marker
+    # as recoverable because the exception was raised by this server's session.
+    return True
+
+
+def _recover_disconnected_server_and_retry(
+    server_name: str,
+    retry_call,
+    op_description: str,
+    reason: str,
+    timeout: float = _TOOL_CALL_RECONNECT_TIMEOUT,
+):
+    """Request a bounded server-local reconnect and retry an MCP operation once.
+
+    This covers two runtime holes that share the same recovery action:
+
+    * the handler sees a registered server object whose ``session`` is missing;
+    * a live session raises a transport/session error such as "not connected" or
+      "session not found" during the actual RPC.
+
+    The recovery is server-local: it signals/restarts the existing
+    ``MCPServerTask`` and waits for that same object to publish a fresh session.
+    It does not call ``/reload-mcp`` and does not rebuild the model-facing tool
+    schema.
+    """
+    with _lock:
+        srv = _servers.get(server_name)
+    if srv is None or not hasattr(srv, "request_reconnect"):
+        return None
+
+    logger.info(
+        "MCP server '%s' disconnected during %s; attempting one bounded "
+        "reconnect/retry: %s",
+        server_name, op_description, reason,
+    )
+
+    async def _recover() -> bool:
+        return await srv.request_reconnect(
+            f"{op_description}: {reason}", timeout=timeout
+        )
+
+    try:
+        ready = bool(_run_on_mcp_loop(_recover, timeout=timeout + 1.0))
+    except InterruptedError:
+        raise
+    except Exception as rec_exc:
+        logger.warning(
+            "MCP server '%s': bounded reconnect for %s failed: %s",
+            server_name, op_description, rec_exc,
+        )
+        ready = False
+
+    if not ready:
+        _bump_server_error(server_name)
+        logger.warning(
+            "MCP server '%s': bounded reconnect for %s did not complete "
+            "within %.0fs",
+            server_name, op_description, timeout,
+        )
+        return json.dumps({
+            "error": (
+                f"MCP server '{server_name}' is not connected; bounded "
+                f"reconnect attempt for {op_description} did not complete "
+                f"within {timeout:.0f}s. Do NOT retry immediately. The MCP "
+                f"server task will keep using its configured background "
+                f"reconnect/standby path; `/reload-mcp` remains a manual "
+                f"emergency recovery option."
+            )
+        }, ensure_ascii=False)
+
+    _reset_server_error(server_name)
+    try:
+        result = retry_call()
+    except InterruptedError:
+        raise
+    except Exception as retry_exc:
+        _bump_server_error(server_name)
+        logger.warning(
+            "MCP %s/%s retry after reconnect failed: %s",
+            server_name, op_description, retry_exc,
+        )
+        return json.dumps({
+            "error": _sanitize_error(
+                f"MCP reconnect succeeded but retry failed: "
+                f"{type(retry_exc).__name__}: {_exc_str(retry_exc)}"
+            )
+        }, ensure_ascii=False)
+
+    try:
+        parsed = json.loads(result)
+        if "error" in parsed:
+            _bump_server_error(server_name)
+        else:
+            _reset_server_error(server_name)
+    except (json.JSONDecodeError, TypeError):
+        _reset_server_error(server_name)
+    return result
+
+
 def _handle_session_expired_and_retry(
     server_name: str,
     exc: BaseException,
@@ -2748,71 +2992,19 @@ def _handle_session_expired_and_retry(
     and rebuild them, reusing the existing OAuth provider instance.
     See #13383.
 
-    Args:
-        server_name: Name of the MCP server that raised.
-        exc: The exception from the failed call.
-        retry_call: Zero-arg callable that re-runs the operation,
-            returning the same JSON string format as the handler.
-        op_description: Human-readable name of the operation (logs).
-
     Returns:
-        A JSON string if reconnect + retry was attempted and produced
-        a response, or ``None`` to fall through to the caller's
-        generic error path (not a session-expired error, no server
-        record, reconnect didn't ready in time, or retry also failed).
+        A JSON string if reconnect + retry was attempted, or ``None`` to fall
+        through to the caller's generic error path when this was not a
+        session-expired/disconnected error.
     """
-    if not _is_session_expired_error(exc):
+    if not _is_session_expired_error(exc) and not _is_disconnected_error_for_server(exc, server_name):
         return None
-
-    with _lock:
-        srv = _servers.get(server_name)
-    if srv is None or not hasattr(srv, "_reconnect_event"):
-        return None
-
-    loop = _mcp_loop
-    if loop is None or not loop.is_running():
-        return None
-
-    logger.info(
-        "MCP server '%s': %s failed with session-expired error (%s); "
-        "signalling transport reconnect and retrying once.",
-        server_name, op_description, exc,
+    return _recover_disconnected_server_and_retry(
+        server_name,
+        retry_call,
+        op_description,
+        reason=_exc_str(exc) or type(exc).__name__,
     )
-
-    # Trigger the same reconnect mechanism the OAuth recovery path
-    # uses, then wait briefly for the new session to come back ready.
-    loop.call_soon_threadsafe(srv._reconnect_event.set)
-    deadline = time.monotonic() + 15
-    ready = False
-    while time.monotonic() < deadline:
-        if srv.session is not None and srv._ready.is_set():
-            ready = True
-            break
-        time.sleep(0.25)
-    if not ready:
-        logger.warning(
-            "MCP server '%s': reconnect did not ready within 15s after "
-            "session-expired error; falling through to error response.",
-            server_name,
-        )
-        return None
-
-    try:
-        result = retry_call()
-        try:
-            parsed = json.loads(result)
-            if "error" not in parsed:
-                _server_error_counts[server_name] = 0
-                return result
-        except (json.JSONDecodeError, TypeError):
-            _server_error_counts[server_name] = 0
-            return result
-    except Exception as retry_exc:
-        logger.warning(
-            "MCP %s/%s retry after session reconnect failed: %s",
-            server_name, op_description, retry_exc,
-        )
-    return None
 
 
 # Sanitized server names whose ``supports_parallel_tool_calls`` config is True.
@@ -3178,7 +3370,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
 
         with _lock:
             server = _servers.get(server_name)
-        if not server or not server.session:
+        if not server:
             _bump_server_error(server_name)
             return json.dumps({
                 "error": f"MCP server '{server_name}' is not connected"
@@ -3190,9 +3382,12 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 # triggered during this call (fired on the MCP recv loop
                 # task, which doesn't inherit our contextvars) can replay
                 # it and detect the gateway platform / session for routing.
+                session = server.session
+                if session is None:
+                    raise ConnectionError(f"MCP server '{server_name}' is not connected")
                 server._pending_call_context = contextvars.copy_context()
                 try:
-                    result = await server.session.call_tool(tool_name, arguments=args)
+                    result = await session.call_tool(tool_name, arguments=args)
                 finally:
                     server._pending_call_context = None
             # MCP CallToolResult has .content (list of content blocks) and .isError
@@ -3270,9 +3465,10 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             if recovered is not None:
                 return recovered
 
-            # Transport session expiry (#13383): same reconnect flow
-            # but skips OAuth recovery because the access token is
-            # still valid — only the server-side session is stale.
+            # Transport session expiry / disconnected session recovery. Session
+            # expiry markers cover server-side GC; the explicit "MCP server ...
+            # is not connected" marker covers the in-process gateway registry
+            # holding a model-facing handler while its backing session is gone.
             recovered = _handle_session_expired_and_retry(
                 server_name, exc, _call_once,
                 f"tools/call {tool_name}",

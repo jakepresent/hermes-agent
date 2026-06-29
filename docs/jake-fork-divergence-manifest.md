@@ -671,7 +671,7 @@ Additional runtime bug: a keepalive-triggered reconnect can leave the long-runni
 Core behavior:
 
 - After the fast reconnect budget is exhausted, a previously-healthy HTTP/SSE server drops into a slow "standby" retry loop (`_RECONNECT_STANDBY_INTERVAL`, default 300s) instead of returning permanently.
-- Because `_run_http`/`_run_stdio` re-discover tools and `run()` re-registers them on every successful (re)entry, a standby reconnect self-heals AND re-registers the server's tools with no `/reload-mcp` and no prompt-cache invalidation.
+- Because `_run_http`/`_run_stdio` re-discover tools on every successful (re)entry while preserving the existing registry handlers, standby reconnect keeps the already model-facing tool names usable with no `/reload-mcp` and no prompt-cache invalidation.
 - On entering standby the fast-retry counter and backoff are reset, so a later transient blip still gets the full fast backoff ladder before returning to standby.
 - Shutdown is still honored promptly (checked after the standby sleep).
 - `_RECONNECT_STANDBY_INTERVAL = 0` restores the upstream give-up-permanently behavior (escape hatch / behavior contract for the legacy path).
@@ -689,7 +689,7 @@ Key files:
 Commits:
 
 - `890a012db` - MCP self-healing standby reconnect.
-- pending current change - MCP runtime bounded tool-call reconnect/retry.
+- `adaf93285` - MCP runtime bounded tool-call reconnect/retry.
 
 Preservation checks:
 
@@ -700,7 +700,7 @@ python -m pytest tests/tools/test_mcp_tool.py -o 'addopts=' -q
 Live smoke for Jake's profile:
 
 - Wedge one Agency MCP endpoint (or stop its Windows bridge) long enough to exhaust the fast reconnect retries; confirm the gateway logs `entering standby, retrying every 300s`.
-- Bring the endpoint back; within one standby interval the gateway should log the server reconnecting and re-registering its tools, and a new session should see those tools (e.g. `mcp_teams_*`) without any `/reload-mcp`.
+- Bring the endpoint back; within one standby interval the gateway should log the server reconnecting, and a new session should still see the existing tool names (e.g. `mcp_teams_*`) without any `/reload-mcp`.
 - For the tool-call runtime path, leave registered tools in place while `server.session` is missing, call a model-facing tool, and confirm the log contains `disconnected during tools/call ... attempting one bounded reconnect/retry` followed by a single successful retry or the bounded timeout error.
 
 ## Complete commit ledger by feature bucket
@@ -787,7 +787,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 
 - pending - `fix(mcp): preserve tool properties literally named definitions` (section 17)
 - `890a012db` `2026-06-27` - `fix(mcp): self-heal reconnect via standby retry instead of permanent give-up` (section 19)
-- pending current change - `fix(mcp): retry disconnected tool calls after bounded reconnect` (section 19)
+- `adaf93285` `2026-06-29` - `fix(mcp): retry disconnected tool calls after bounded reconnect` (section 19)
 
 ### Dashboard sessions UI
 

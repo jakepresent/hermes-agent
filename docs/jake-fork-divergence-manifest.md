@@ -502,7 +502,7 @@ Commits:
 - `ad7a8b61f` - emit session provenance metadata for compression rotation. This appears to be a cherry-pick/forward-port of upstream-style work after the audited release tag, but it is still fork-local relative to `v2026.6.19`.
 - `65112b724` - resolve compression-rotated ACP session IDs.
 - `d223b2c7f` - preserve explicit ACP provider-prefixed model IDs and no-op same-provider/current-model switches.
-- `cf7988f60` - recompute ACP model-switch api_mode from the requested target model so Copilot GPT-5.x selections use Responses even when the persisted default is a chat-completions model.
+- `563de2e2b` - recompute ACP model-switch api_mode from the requested target model so Copilot GPT-5.x selections use Responses even when the persisted default is a chat-completions model.
 
 Preservation checks:
 

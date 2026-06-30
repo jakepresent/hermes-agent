@@ -891,6 +891,42 @@ class TestListAndFork:
 
 
 class TestSessionConfiguration:
+    def test_resolve_model_selection_preserves_explicit_same_provider(self, monkeypatch):
+        detector_calls = []
+
+        def fake_detect_provider_for_model(model, current_provider):
+            detector_calls.append((model, current_provider))
+            return ("openai-api", model)
+
+        monkeypatch.setattr(
+            "hermes_cli.models.detect_provider_for_model",
+            fake_detect_provider_for_model,
+        )
+
+        assert HermesACPAgent._resolve_model_selection(
+            "copilot:gpt-5.5",
+            "copilot",
+        ) == ("copilot", "gpt-5.5")
+        assert detector_calls == []
+
+    def test_resolve_model_selection_still_detects_bare_model(self, monkeypatch):
+        detector_calls = []
+
+        def fake_detect_provider_for_model(model, current_provider):
+            detector_calls.append((model, current_provider))
+            return ("openai-api", model)
+
+        monkeypatch.setattr(
+            "hermes_cli.models.detect_provider_for_model",
+            fake_detect_provider_for_model,
+        )
+
+        assert HermesACPAgent._resolve_model_selection(
+            "gpt-5.5",
+            "copilot",
+        ) == ("openai-api", "gpt-5.5")
+        assert detector_calls == [("gpt-5.5", "copilot")]
+
     @pytest.mark.asyncio
     async def test_set_session_mode_returns_response(self, agent):
         new_resp = await agent.new_session(cwd="/tmp")
@@ -996,6 +1032,126 @@ class TestSessionConfiguration:
         assert state.agent.provider == "anthropic"
         assert state.agent.base_url == "https://anthropic.example/v1"
         assert runtime_calls[-1] == "anthropic"
+
+    @pytest.mark.asyncio
+    async def test_set_session_model_preserves_provider_prefixed_current_model(self, tmp_path, monkeypatch):
+        runtime_calls = []
+        detector_calls = []
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            runtime_calls.append(requested)
+            provider = requested or "copilot"
+            return {
+                "provider": provider,
+                "api_mode": "chat_completions",
+                "base_url": f"https://{provider}.example/v1",
+                "api_key": f"{provider}-key",
+                "command": None,
+                "args": [],
+            }
+
+        def fake_agent(**kwargs):
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                base_url=kwargs.get("base_url"),
+                api_mode=kwargs.get("api_mode"),
+            )
+
+        def fake_detect_provider_for_model(model, current_provider):
+            detector_calls.append((model, current_provider))
+            return ("openai-api", model)
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {"provider": "copilot", "default": "gpt-5.5"}
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.models.detect_provider_for_model",
+            fake_detect_provider_for_model,
+        )
+        manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            acp_agent = HermesACPAgent(session_manager=manager)
+            state = manager.create_session(cwd="/tmp")
+            assert state.model == "gpt-5.5"
+            assert state.agent.provider == "copilot"
+
+            runtime_calls.clear()
+            result = await acp_agent.set_session_model(
+                model_id="copilot:gpt-5.5",
+                session_id=state.session_id,
+            )
+
+        assert isinstance(result, SetSessionModelResponse)
+        assert state.model == "gpt-5.5"
+        assert state.agent.provider == "copilot"
+        assert state.agent.base_url == "https://copilot.example/v1"
+        assert runtime_calls == []
+        assert detector_calls == []
+
+    @pytest.mark.asyncio
+    async def test_set_session_model_replaces_agent_with_explicit_same_provider(self, tmp_path, monkeypatch):
+        runtime_calls = []
+        detector_calls = []
+
+        def fake_resolve_runtime_provider(requested=None, **kwargs):
+            runtime_calls.append(requested)
+            provider = requested or "copilot"
+            return {
+                "provider": provider,
+                "api_mode": "chat_completions",
+                "base_url": f"https://{provider}.example/v1",
+                "api_key": f"{provider}-key",
+                "command": None,
+                "args": [],
+            }
+
+        def fake_agent(**kwargs):
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                base_url=kwargs.get("base_url"),
+                api_mode=kwargs.get("api_mode"),
+            )
+
+        def fake_detect_provider_for_model(model, current_provider):
+            detector_calls.append((model, current_provider))
+            return ("openai-api", model)
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {"provider": "copilot", "default": "gpt-5.4"}
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        monkeypatch.setattr(
+            "hermes_cli.models.detect_provider_for_model",
+            fake_detect_provider_for_model,
+        )
+        manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            acp_agent = HermesACPAgent(session_manager=manager)
+            state = manager.create_session(cwd="/tmp")
+
+            runtime_calls.clear()
+            result = await acp_agent.set_session_model(
+                model_id="copilot:gpt-5.5",
+                session_id=state.session_id,
+            )
+
+        assert isinstance(result, SetSessionModelResponse)
+        assert state.model == "gpt-5.5"
+        assert state.agent.provider == "copilot"
+        assert state.agent.base_url == "https://copilot.example/v1"
+        assert runtime_calls == ["copilot"]
+        assert detector_calls == []
 
 
 # ---------------------------------------------------------------------------

@@ -482,11 +482,14 @@ Core behavior:
 - ACP advertises thought-level session config.
 - ACP emits session provenance metadata for compression rotation.
 - ACP resolves compression-rotated session IDs/aliases instead of losing session continuity.
+- ACP preserves explicit provider-prefixed model selections, including same-provider choices like `copilot:gpt-5.5`, so `session/set_model` cannot be hijacked to another static-catalog provider such as `openai-api`.
+- ACP treats redundant `session/set_model` requests for the already-active provider/model as a successful no-op.
 
 Key files:
 
 - `acp_adapter/server.py`
 - `acp_adapter/session.py`
+- `tests/acp/test_server.py`
 - `tests/acp/test_session.py`
 - `tests/acp_adapter/test_acp_commands.py`
 
@@ -495,11 +498,13 @@ Commits:
 - `9df6ee707` - advertise thought-level ACP session config.
 - `ad7a8b61f` - emit session provenance metadata for compression rotation. This appears to be a cherry-pick/forward-port of upstream-style work after the audited release tag, but it is still fork-local relative to `v2026.6.19`.
 - `65112b724` - resolve compression-rotated ACP session IDs.
+- `t_b9db01ae` work-in-progress - preserve explicit ACP provider-prefixed model IDs and no-op same-provider/current-model switches.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/acp/test_session.py tests/acp_adapter/test_acp_commands.py -o 'addopts=' -q
+scripts/run_tests.sh tests/acp/test_server.py -- -q -k 'resolve_model_selection or set_session_model_preserves_provider_prefixed_current_model or set_session_model_replaces_agent_with_explicit_same_provider or set_session_model_accepts_provider_prefixed_choice'
+scripts/run_tests.sh tests/acp/test_session.py tests/acp_adapter/test_acp_commands.py
 ```
 
 ### 13. Native image, vision, and OCR routing

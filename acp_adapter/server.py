@@ -676,12 +676,21 @@ class HermesACPAgent(acp.Agent):
         """Resolve ``provider:model`` input into the provider and normalized model id."""
         target_provider = current_provider
         new_model = raw_model.strip()
+        explicit_provider_supplied = False
 
         try:
             from hermes_cli.models import detect_provider_for_model, parse_model_input
 
             target_provider, new_model = parse_model_input(new_model, current_provider)
-            if target_provider == current_provider:
+            # ``parse_model_input`` returns the current provider when no
+            # provider prefix is present. Re-parse with an impossible provider
+            # sentinel so ACP can distinguish a bare model (eligible for
+            # cross-provider detection) from an explicit same-provider choice
+            # like ``copilot:gpt-5.5`` (must not be hijacked to openai-api).
+            sentinel_provider = "__hermes_acp_current_provider_sentinel__"
+            parsed_provider, _ = parse_model_input(raw_model.strip(), sentinel_provider)
+            explicit_provider_supplied = parsed_provider != sentinel_provider
+            if target_provider == current_provider and not explicit_provider_supplied:
                 detected = detect_provider_for_model(new_model, current_provider)
                 if detected:
                     target_provider, new_model = detected
@@ -2023,6 +2032,15 @@ class HermesACPAgent(acp.Agent):
                 model_id,
                 current_provider or "openrouter",
             )
+            current_model = str(state.model or getattr(state.agent, "model", "") or "").strip()
+            if current_provider and requested_provider == current_provider and resolved_model == current_model:
+                logger.info(
+                    "Session %s: model %s already active via provider %s",
+                    session_id,
+                    resolved_model,
+                    requested_provider,
+                )
+                return SetSessionModelResponse()
             state.model = resolved_model
             provider_changed = bool(current_provider and requested_provider != current_provider)
             current_base_url = None if provider_changed else getattr(state.agent, "base_url", None)

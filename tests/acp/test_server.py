@@ -1038,8 +1038,8 @@ class TestSessionConfiguration:
         runtime_calls = []
         detector_calls = []
 
-        def fake_resolve_runtime_provider(requested=None, **kwargs):
-            runtime_calls.append(requested)
+        def fake_resolve_runtime_provider(requested=None, target_model=None, **kwargs):
+            runtime_calls.append((requested, target_model))
             provider = requested or "copilot"
             return {
                 "provider": provider,
@@ -1099,8 +1099,8 @@ class TestSessionConfiguration:
         runtime_calls = []
         detector_calls = []
 
-        def fake_resolve_runtime_provider(requested=None, **kwargs):
-            runtime_calls.append(requested)
+        def fake_resolve_runtime_provider(requested=None, target_model=None, **kwargs):
+            runtime_calls.append((requested, target_model))
             provider = requested or "copilot"
             return {
                 "provider": provider,
@@ -1150,8 +1150,57 @@ class TestSessionConfiguration:
         assert state.model == "gpt-5.5"
         assert state.agent.provider == "copilot"
         assert state.agent.base_url == "https://copilot.example/v1"
-        assert runtime_calls == ["copilot"]
+        assert runtime_calls == [("copilot", "gpt-5.5")]
         assert detector_calls == []
+
+    @pytest.mark.asyncio
+    async def test_set_session_model_derives_api_mode_from_requested_model(self, tmp_path, monkeypatch):
+        runtime_calls = []
+
+        def fake_resolve_runtime_provider(requested=None, target_model=None, **kwargs):
+            runtime_calls.append((requested, target_model))
+            return {
+                "provider": requested or "copilot",
+                "api_mode": "codex_responses" if target_model == "gpt-5.5" else "chat_completions",
+                "base_url": "https://copilot.example/v1",
+                "api_key": "copilot-key",
+                "command": None,
+                "args": [],
+            }
+
+        def fake_agent(**kwargs):
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                base_url=kwargs.get("base_url"),
+                api_mode=kwargs.get("api_mode"),
+            )
+
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: {
+            "model": {"provider": "copilot", "default": "claude-opus-4.8"}
+        })
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider",
+            fake_resolve_runtime_provider,
+        )
+        manager = SessionManager(db=SessionDB(tmp_path / "state.db"))
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            acp_agent = HermesACPAgent(session_manager=manager)
+            state = manager.create_session(cwd="/tmp")
+            assert state.agent.api_mode == "chat_completions"
+
+            runtime_calls.clear()
+            result = await acp_agent.set_session_model(
+                model_id="copilot:gpt-5.5",
+                session_id=state.session_id,
+            )
+
+        assert isinstance(result, SetSessionModelResponse)
+        assert state.model == "gpt-5.5"
+        assert state.agent.provider == "copilot"
+        assert state.agent.api_mode == "codex_responses"
+        assert runtime_calls == [("copilot", "gpt-5.5")]
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,33 @@ def test_copilot_runtime_api_mode_keeps_responses_for_gpt5_with_stale_chat():
     ) == "codex_responses"
 
 
+def test_resolve_runtime_provider_uses_target_model_for_copilot_api_mode(monkeypatch):
+    class _Entry:
+        runtime_api_key = "pool-token"
+        access_token = "pool-token"
+        source = "manual"
+        base_url = "https://api.githubcopilot.com"
+
+    class _Pool:
+        def has_credentials(self):
+            return True
+
+        def select(self):
+            return _Entry()
+
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "copilot")
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _Pool())
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {
+        "provider": "copilot",
+        "default": "claude-opus-4.8",
+    })
+
+    resolved = rp.resolve_runtime_provider(requested="copilot", target_model="gpt-5.5")
+
+    assert resolved["provider"] == "copilot"
+    assert resolved["api_mode"] == "codex_responses"
+
+
 def test_resolve_runtime_provider_uses_credential_pool(monkeypatch):
     class _Entry:
         access_token = "pool-token"

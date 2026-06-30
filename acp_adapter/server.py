@@ -2044,7 +2044,12 @@ class HermesACPAgent(acp.Agent):
             state.model = resolved_model
             provider_changed = bool(current_provider and requested_provider != current_provider)
             current_base_url = None if provider_changed else getattr(state.agent, "base_url", None)
-            current_api_mode = None if provider_changed else getattr(state.agent, "api_mode", None)
+            # Recompute api_mode for the requested model even when the provider
+            # stays the same: Copilot, OpenCode, Azure, and similar providers can
+            # serve different models on different wire protocols. Preserving the
+            # old mode here is what made ACP set_model("copilot:gpt-5.5") keep
+            # using chat/completions after switching away from a Claude default.
+            current_api_mode = None
             state.agent = self.session_manager._make_agent(
                 session_id=session_id,
                 cwd=state.cwd,

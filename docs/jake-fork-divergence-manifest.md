@@ -483,15 +483,18 @@ Core behavior:
 - ACP emits session provenance metadata for compression rotation.
 - ACP resolves compression-rotated session IDs/aliases instead of losing session continuity.
 - ACP preserves explicit provider-prefixed model selections, including same-provider choices like `copilot:gpt-5.5`, so `session/set_model` cannot be hijacked to another static-catalog provider such as `openai-api`.
+- ACP recomputes runtime api_mode from the model requested by `session/set_model`, not the persisted default model. This is required for same-provider Copilot switches where the default is a chat-completions model such as Claude Opus but the requested model is a Responses-only GPT-5.x model.
 - ACP treats redundant `session/set_model` requests for the already-active provider/model as a successful no-op.
 
 Key files:
 
 - `acp_adapter/server.py`
 - `acp_adapter/session.py`
+- `hermes_cli/runtime_provider.py`
 - `tests/acp/test_server.py`
 - `tests/acp/test_session.py`
 - `tests/acp_adapter/test_acp_commands.py`
+- `tests/hermes_cli/test_runtime_provider_resolution.py`
 
 Commits:
 
@@ -499,11 +502,13 @@ Commits:
 - `ad7a8b61f` - emit session provenance metadata for compression rotation. This appears to be a cherry-pick/forward-port of upstream-style work after the audited release tag, but it is still fork-local relative to `v2026.6.19`.
 - `65112b724` - resolve compression-rotated ACP session IDs.
 - `d223b2c7f` - preserve explicit ACP provider-prefixed model IDs and no-op same-provider/current-model switches.
+- `cf7988f60` - recompute ACP model-switch api_mode from the requested target model so Copilot GPT-5.x selections use Responses even when the persisted default is a chat-completions model.
 
 Preservation checks:
 
 ```bash
-scripts/run_tests.sh tests/acp/test_server.py -- -q -k 'resolve_model_selection or set_session_model_preserves_provider_prefixed_current_model or set_session_model_replaces_agent_with_explicit_same_provider or set_session_model_accepts_provider_prefixed_choice'
+scripts/run_tests.sh tests/acp/test_server.py -- -q -k 'resolve_model_selection or set_session_model_preserves_provider_prefixed_current_model or set_session_model_replaces_agent_with_explicit_same_provider or set_session_model_derives_api_mode_from_requested_model or set_session_model_accepts_provider_prefixed_choice'
+python -m pytest tests/hermes_cli/test_runtime_provider_resolution.py tests/hermes_cli/test_model_switch_copilot_api_mode.py -o 'addopts=' -q
 scripts/run_tests.sh tests/acp/test_session.py tests/acp_adapter/test_acp_commands.py
 ```
 

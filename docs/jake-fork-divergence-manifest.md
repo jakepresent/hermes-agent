@@ -439,19 +439,25 @@ Core behavior:
 
 - API server model and reasoning overrides are honored.
 - Copilot model switches canonicalize correctly.
-- Copilot/GitHub Models reasoning supports `xhigh`; unsupported `max` should clamp to `xhigh` rather than a lower level when applicable.
+- `max` is a real, selectable reasoning-effort level (not just an on-the-wire alias). Copilot's Claude Opus 4.8 accepts `max` as a distinct tier above `xhigh` (server-verified: `supported values: [low medium high xhigh max]`). The selection gate `VALID_REASONING_EFFORTS` in `hermes_constants.py` MUST include `max`; every user-facing gate (`gateway/slash_commands.py` `/reasoning`, `gateway/platforms/api_server.py`, the CLI which delegates to `parse_reasoning_effort`) must accept it. For models that do NOT advertise `max`, the runtime clamp in `run_agent.py` and `plugins/model-providers/copilot/__init__.py` downgrades `max` → `xhigh` → `high`. Clamp is the *fallback*, not the default behavior.
+- Preservation gate: hardcoded effort-level sets are a recurring merge-revert hazard — upstream `1780ad24b` reset `VALID_REASONING_EFFORTS` and re-dropped `max` during the v2026.6.19 integration. Gates must reference the canonical `VALID_REASONING_EFFORTS` tuple rather than re-listing `{"minimal", "low", "medium", "high", "xhigh"}` inline, so a future merge cannot silently revert the code path without also touching the tuple (which is test-guarded).
 - Auxiliary auto routing uses the correct transport and respects the main provider/model path.
 - Provider-health cache isolation prevents one test/provider failure from poisoning main-first auxiliary behavior.
 
 Key files:
 
+- `hermes_constants.py`
+- `gateway/slash_commands.py`
+- `gateway/run.py`
 - `gateway/platforms/api_server.py`
 - `hermes_cli/models.py`
 - `hermes_cli/providers.py`
 - `hermes_cli/runtime_provider.py`
 - `plugins/model-providers/copilot/__init__.py`
+- `run_agent.py`
 - `agent/auxiliary_client.py`
 - `tests/gateway/test_api_server.py`
+- `tests/gateway/test_reasoning_command.py`
 - `tests/hermes_cli/test_model_validation.py`
 - `tests/hermes_cli/test_model_switch_copilot_api_mode.py`
 - `tests/hermes_cli/test_runtime_provider_resolution.py`
@@ -466,11 +472,18 @@ Commits:
 - `73224a581` - route auxiliary auto model overrides through correct transport.
 - `789611291` - support Copilot Opus 4.8 max reasoning.
 - `73fe8e1a0` - restore Copilot xhigh behavior and isolate auxiliary main-first tests after merge.
+- _(pending)_ - re-restore `max` reasoning gate after v2026.6.19 merge reverted `VALID_REASONING_EFFORTS`; route gateway/slash_commands `/reasoning` gate through the canonical tuple to harden against future reverts.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/gateway/test_api_server.py tests/hermes_cli/test_model_validation.py tests/hermes_cli/test_model_switch_copilot_api_mode.py tests/hermes_cli/test_runtime_provider_resolution.py tests/providers/test_provider_profiles.py tests/agent/test_auxiliary_main_first.py -o 'addopts=' -q
+python -m pytest tests/test_hermes_constants.py tests/gateway/test_api_server.py tests/gateway/test_reasoning_command.py tests/cli/test_reasoning_command.py tests/hermes_cli/test_model_validation.py tests/hermes_cli/test_model_switch_copilot_api_mode.py tests/hermes_cli/test_runtime_provider_resolution.py tests/hermes_cli/test_reasoning_effort_menu.py tests/providers/test_provider_profiles.py tests/agent/test_auxiliary_main_first.py tests/run_agent/test_run_agent.py -o 'addopts=' -q
+```
+
+Quick gate-integrity check (catches a merge silently dropping `max` from the canonical tuple):
+
+```bash
+python -c "from hermes_constants import VALID_REASONING_EFFORTS as v; assert 'max' in v, 'max reasoning tier reverted'; print('ok:', v)"
 ```
 
 ### 12. ACP session/provenance/thought-level behavior

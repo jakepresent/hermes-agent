@@ -2088,6 +2088,7 @@ class GatewaySlashCommandsMixin:
             /reasoning hide|off              Hide model reasoning from responses
         """
         from gateway.run import _hermes_home, _platform_config_key
+        from hermes_constants import VALID_REASONING_EFFORTS
         import yaml
 
         raw_args = event.get_command_args().strip()
@@ -2174,7 +2175,7 @@ class GatewaySlashCommandsMixin:
             return t("gateway.reasoning.reset_done")
         if effort == "none":
             parsed = {"enabled": False}
-        elif effort in {"minimal", "low", "medium", "high", "xhigh"}:
+        elif effort in VALID_REASONING_EFFORTS:
             parsed = {"enabled": True, "effort": effort}
         else:
             return t(

@@ -551,7 +551,7 @@ Commits:
 
 - `88228aaeb` - shrink aggregate native image payloads on 413.
 - `ab4568296` - add fast OCR extraction tool.
-- _(pending)_ - route the 413 image-shrink guard through `TurnRetryState` so native-image 413 recovery cannot crash with `UnboundLocalError` before retrying.
+- `716e70408` - route the 413 image-shrink guard through `TurnRetryState` so native-image 413 recovery cannot crash with `UnboundLocalError` before retrying.
 
 Preservation checks:
 

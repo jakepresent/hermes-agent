@@ -2902,19 +2902,17 @@ def run_conversation(
                     # the empirically observed Copilot hard fail around a
                     # 3-image, ~9 MB request so multi-image screenshot batches
                     # get reduced even when individual files are under 4 MB.
-                    if (
-                        not image_shrink_retry_attempted
-                        and agent._try_shrink_image_parts_in_messages(
+                    if not _retry.image_shrink_retry_attempted:
+                        _retry.image_shrink_retry_attempted = True
+                        if agent._try_shrink_image_parts_in_messages(
                             api_messages,
                             target_total_base64_bytes=4 * 1024 * 1024,
-                        )
-                    ):
-                        image_shrink_retry_attempted = True
-                        agent._emit_status(
-                            "📐 Request payload too large (413) with inline image(s) — "
-                            "shrunk image payload and retrying..."
-                        )
-                        continue
+                        ):
+                            agent._emit_status(
+                                "📐 Request payload too large (413) with inline image(s) — "
+                                "shrunk image payload and retrying..."
+                            )
+                            continue
 
                     compression_attempts += 1
                     if compression_attempts > max_compression_attempts:

@@ -8,7 +8,9 @@ tests/run_agent/ which now exercise these fields via `_retry.<flag>`.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import fields
+from pathlib import Path
 
 from agent.turn_retry_state import TurnRetryState
 
@@ -62,3 +64,23 @@ def test_guards_are_independently_mutable():
     # untouched guards stay False
     assert s.has_retried_429 is False
     assert s.anthropic_auth_retry_attempted is False
+
+
+def test_conversation_loop_references_retry_state_for_image_shrink_guard():
+    """Guard against reintroducing the pre-refactor bare local.
+
+    The retry loop's 413 native-image recovery shares the same one-shot image
+    shrink guard as provider-specific image-too-large recovery.  A bare
+    ``image_shrink_retry_attempted`` local crashes at runtime with
+    UnboundLocalError before the shrink retry can fire.
+    """
+    source = Path("agent/conversation_loop.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    bare_references: list[int] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "image_shrink_retry_attempted":
+            bare_references.append(node.lineno)
+
+    assert bare_references == []
+    assert "_retry.image_shrink_retry_attempted" in source

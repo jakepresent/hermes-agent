@@ -551,11 +551,12 @@ Commits:
 
 - `88228aaeb` - shrink aggregate native image payloads on 413.
 - `ab4568296` - add fast OCR extraction tool.
+- _(pending)_ - route the 413 image-shrink guard through `TurnRetryState` so native-image 413 recovery cannot crash with `UnboundLocalError` before retrying.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/run_agent/test_image_shrink_recovery.py tests/tools/test_ocr_extract_tool.py tests/tools/test_vision_native_fast_path.py -o 'addopts=' -q
+python -m pytest tests/agent/test_turn_retry_state.py tests/run_agent/test_image_shrink_recovery.py tests/tools/test_ocr_extract_tool.py tests/tools/test_vision_native_fast_path.py -o 'addopts=' -q
 ```
 
 ### 14. Codex / GitHub Responses compatibility

@@ -13,6 +13,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import struct
@@ -47,6 +48,17 @@ _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_NONCONVERSATIONAL_STATE_FILENAME = "discord_nonconversational_messages.json"
 _DISCORD_COMMAND_SYNC_MUTATION_INTERVAL_SECONDS = 4.5
 _DISCORD_COMMAND_SYNC_MAX_RATE_LIMIT_SLEEP_SECONDS = 30.0
+# Liveness watchdog tunables. discord.py owns fast gateway reconnects; this
+# watchdog only catches the SILENT stuck-connection case where Bot.start()
+# never exits (so _handle_bot_task_done never fires) yet the gateway is dead.
+# Probe cadence and the how-long-dead-before-we-act threshold are deliberately
+# slow so a routine RESUME/heartbeat gap is never mistaken for a wedge.
+_DISCORD_LIVENESS_PROBE_INTERVAL_SECONDS = 30.0
+# How long the gateway must look continuously non-live before the watchdog
+# declares the connection wedged and hands it to the reconnect watcher. Must
+# comfortably exceed discord.py's own heartbeat interval (~41.25s) plus a
+# RESUME window, so a single missed heartbeat never trips it.
+_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS = 150.0
 # Discord enforces a hard cap of 100 global application (slash) commands per
 # app. Registering more makes the ENTIRE sync fail with error 30032
 # ("Maximum number of application commands reached"), which silently breaks
@@ -858,6 +870,19 @@ class DiscordAdapter(BasePlatformAdapter):
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
         self._post_connect_task: Optional[asyncio.Task] = None
+        # Liveness watchdog: discord.py reconnects gateway drops internally and
+        # its Bot.start() task only exits on a *hard* failure. A silently-dead
+        # websocket (half-open TCP after a host network/interop blip, or an
+        # internal reconnect loop that never re-establishes) leaves the process
+        # alive, the systemd service "active", and the bot offline — with no
+        # exception to fire _handle_bot_task_done. The watchdog probes gateway
+        # liveness and, when it has been non-live past a threshold, routes the
+        # stuck connection through the SAME retryable-fatal path a task-exit
+        # would, so GatewayRunner's existing reconnect watcher takes over.
+        self._liveness_task: Optional[asyncio.Task] = None
+        # Monotonic timestamp of the last time the gateway looked alive. Seeded
+        # on connect() success and refreshed by on_resumed / a healthy probe.
+        self._last_liveness_ok: float = 0.0
         # True while disconnect() is intentionally closing discord.py. The
         # bot task's done callback uses this to distinguish an operator/service
         # shutdown from a runtime websocket crash.
@@ -1058,12 +1083,23 @@ class DiscordAdapter(BasePlatformAdapter):
                 # Resolve any usernames in the allowed list to numeric IDs
                 await adapter_self._resolve_allowed_usernames()
                 adapter_self._ready_event.set()
+                # Gateway just (re)connected — reset the liveness clock so the
+                # watchdog's stale timer starts from a known-good moment.
+                adapter_self._last_liveness_ok = time.monotonic()
 
                 if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
                     adapter_self._post_connect_task.cancel()
                 adapter_self._post_connect_task = asyncio.create_task(
                     adapter_self._run_post_connect_initialization()
                 )
+
+            @self._client.event
+            async def on_resumed():
+                # discord.py fired a successful RESUME after a transient gateway
+                # drop. The connection is live again — refresh the watchdog clock
+                # so an in-progress stale count is cleared.
+                adapter_self._last_liveness_ok = time.monotonic()
+                logger.debug("[%s] Discord gateway session resumed", adapter_self.name)
 
             @self._client.event
             async def on_message(message: DiscordMessage):
@@ -1211,6 +1247,11 @@ class DiscordAdapter(BasePlatformAdapter):
             await _wait_for_ready_or_bot_exit(self._ready_event, self._bot_task, timeout=30)
 
             self._running = True
+            # Seed liveness and start the silent-wedge watchdog. Reaching here
+            # means the gateway handshake completed, so the connection is live
+            # right now.
+            self._last_liveness_ok = time.monotonic()
+            self._start_liveness_watchdog()
             return True
 
         except asyncio.TimeoutError:
@@ -1241,9 +1282,133 @@ class DiscordAdapter(BasePlatformAdapter):
                 pass
         self._bot_task = None
 
+    def _start_liveness_watchdog(self) -> None:
+        """Start (or restart) the background gateway-liveness watchdog."""
+        if self._liveness_task and not self._liveness_task.done():
+            self._liveness_task.cancel()
+        self._liveness_task = asyncio.create_task(self._liveness_watchdog_loop())
+
+    async def _cancel_liveness_watchdog(self) -> None:
+        """Cancel and await the liveness watchdog task, if running."""
+        if self._liveness_task and not self._liveness_task.done():
+            self._liveness_task.cancel()
+            try:
+                await self._liveness_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._liveness_task = None
+
+    def _gateway_is_live(self) -> bool:
+        """Best-effort read of whether the discord.py gateway is currently live.
+
+        discord.py exposes two cheap, side-effect-free signals:
+
+        * ``Client.is_closed()`` — the websocket has been closed/torn down.
+        * ``Client.latency`` — seconds since the last heartbeat ACK; it is
+          ``float('inf')`` (or NaN) when there is no live websocket, and a
+          small positive float on a healthy connection.
+
+        A live gateway is "not closed AND has a finite heartbeat latency". This
+        deliberately does NOT reach into private ``ws`` internals — the two
+        public signals are enough to distinguish a healthy connection from a
+        silently-dead one, and staying on the public API keeps the probe robust
+        across discord.py versions.
+        """
+        client = self._client
+        if client is None:
+            return False
+        try:
+            if client.is_closed():
+                return False
+        except Exception:
+            # If we can't even ask, treat as non-live so the threshold logic
+            # decides based on how long this has persisted.
+            return False
+        try:
+            latency = client.latency
+        except Exception:
+            return False
+        # math.isfinite rejects both inf (no heartbeat yet / dead ws) and NaN.
+        return isinstance(latency, (int, float)) and math.isfinite(latency)
+
+    async def _liveness_watchdog_loop(self) -> None:
+        """Detect a silently-wedged gateway and hand it to the reconnect watcher.
+
+        discord.py reconnects ordinary gateway interruptions internally, and
+        its ``Bot.start()`` task only exits on a hard failure — which fires
+        :meth:`_handle_bot_task_done`. Neither covers the case where the
+        websocket is dead (half-open TCP after a host network/interop blip, or
+        an internal reconnect loop that never re-establishes) while the task
+        stays alive: the process keeps running, systemd still reports the
+        service ``active``, and the bot is offline with no exception anywhere.
+        That is the "green service, dead bot" state that requires a manual
+        restart today.
+
+        This loop refreshes a last-live timestamp whenever the gateway looks
+        healthy. Once the connection has been continuously non-live longer than
+        :data:`_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS`, it marks a
+        *retryable* fatal error and notifies the gateway supervisor — the exact
+        same path :meth:`_handle_bot_task_done` uses — so
+        ``GatewayRunner._handle_adapter_fatal_error`` removes this adapter and
+        queues Discord for the existing background reconnect watcher. The
+        watchdog fires at most once per wedge (it returns after notifying); the
+        fresh adapter created by the reconnect starts its own watchdog.
+        """
+        try:
+            while True:
+                await asyncio.sleep(_DISCORD_LIVENESS_PROBE_INTERVAL_SECONDS)
+
+                if self._disconnecting or not self._running:
+                    return
+                # A dead/exited bot task is already handled by
+                # _handle_bot_task_done; don't double-report it.
+                if self._bot_task is None or self._bot_task.done():
+                    return
+
+                now = time.monotonic()
+                if self._gateway_is_live():
+                    self._last_liveness_ok = now
+                    continue
+
+                stale_for = now - self._last_liveness_ok
+                if stale_for < _DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS:
+                    # Non-live but within the grace window (routine RESUME /
+                    # a single missed heartbeat). Keep watching.
+                    continue
+
+                message = (
+                    f"Discord gateway wedged: websocket non-live for "
+                    f"{stale_for:.0f}s (threshold "
+                    f"{_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS:.0f}s) while the "
+                    f"bot task stayed alive"
+                )
+                logger.error("[%s] %s — triggering reconnect", self.name, message)
+                self._set_fatal_error(
+                    "discord_gateway_wedged", message, retryable=True
+                )
+                try:
+                    await self._notify_fatal_error()
+                except Exception as notify_exc:  # pragma: no cover - defensive
+                    logger.warning(
+                        "[%s] Failed to notify gateway supervisor about wedged "
+                        "Discord gateway: %s",
+                        self.name, notify_exc, exc_info=True,
+                    )
+                return
+        except asyncio.CancelledError:
+            return
+        except Exception:  # pragma: no cover - defensive; watchdog must not crash silently
+            logger.warning(
+                "[%s] Liveness watchdog loop errored", self.name, exc_info=True
+            )
+            return
+
     async def disconnect(self) -> None:
         """Disconnect from Discord."""
         self._disconnecting = True
+        # Stop the liveness watchdog first so it cannot fire a spurious
+        # "wedged" fatal error while we are intentionally tearing down.
+        await self._cancel_liveness_watchdog()
         # Cancel the bot task before closing the client.  If connect() timed out
         # and returned False, the background client.start() task may still be
         # running; calling client.close() alone is not enough to stop it because

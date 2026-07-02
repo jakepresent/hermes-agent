@@ -736,6 +736,41 @@ Live smoke for Jake's profile:
 - Bring the endpoint back; within one standby interval the gateway should log the server reconnecting, and a new session should still see the existing tool names (e.g. `mcp_teams_*`) without any `/reload-mcp`.
 - For the tool-call runtime path, leave registered tools in place while `server.session` is missing, call a model-facing tool, and confirm the log contains `disconnected during tools/call ... attempting one bounded reconnect/retry` followed by a single successful retry or the bounded timeout error.
 
+### 20. Discord gateway liveness watchdog (silent-wedge recovery)
+
+Purpose: recover automatically from the "green service, dead bot" state where the systemd gateway service is `active`, the Python process is alive, but the Discord bot shows offline and never comes back without a manual restart.
+
+Background / root cause: Discord recovery in the gateway is entirely event-driven and has exactly one trigger — the discord.py `Bot.start()` task actually *exiting*, which fires `DiscordAdapter._handle_bot_task_done`, marks a retryable fatal error, and lets `GatewayRunner._handle_adapter_fatal_error` queue the platform for the existing background reconnect watcher. But discord.py runs with `reconnect=True`, so on a *silent* websocket death (half-open TCP after a WSL/host network or interop blip, or an internal reconnect loop that never re-establishes) the task never exits. Task-never-exits → no fatal error → `_failed_platforms` stays empty → the reconnect watcher (which only ever iterates `_failed_platforms`) sleeps forever. Confirmed live 2026-07-02: an overnight WSL-interop loss drove a Windows-MCP reconnect storm and a ~27GB/252-task event-loop balloon, during which the Discord websocket went non-live with zero `Bot.start()` exit and zero reconnect attempts logged for ~13.5h until a manual `hermes gateway restart`. There was previously **no liveness probe on the main gateway websocket** (the only keepalive in the adapter is the unrelated voice-UDP one), so a wedged-but-not-exited connection was invisible to recovery. This is the "liveness is a lie if it's just `connected && process != nil`" failure class.
+
+Core behavior:
+
+- On `connect()` success the adapter seeds a monotonic last-live timestamp and starts a background `_liveness_watchdog_loop`.
+- The loop probes discord.py's PUBLIC signals only — `Client.is_closed()` and `Client.latency` (a finite float on a healthy connection; `inf`/NaN when there is no live heartbeat). No private `ws` internals are touched, for robustness across discord.py versions.
+- Healthy probe refreshes the last-live timestamp. `on_ready` and `on_resumed` also refresh it, so a routine RESUME/heartbeat gap never trips the watchdog.
+- Once the connection has been continuously non-live past `_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS` (default 150s, comfortably beyond discord.py's ~41.25s heartbeat interval + a RESUME window), the watchdog marks a RETRYABLE fatal error (`discord_gateway_wedged`) and calls `_notify_fatal_error()` — the exact same path `_handle_bot_task_done` uses — so the adapter is removed and Discord is re-queued for the existing reconnect watcher. It fires at most once per wedge (returns after notifying); the fresh reconnect adapter starts its own watchdog.
+- The watchdog defers (returns without firing) when `_disconnecting`, when `_running` is false, or when the bot task is already done (that case is owned by `_handle_bot_task_done`), so it never double-reports.
+- `disconnect()` cancels the watchdog before teardown so an intentional shutdown never fires a spurious wedge.
+- This adds the missing SENSOR only; it reuses the existing fatal-error/reconnect machinery and does not add a new recovery path, does not touch prompt caching, and does not change the healthy-path lifecycle.
+
+Key files:
+
+- `plugins/platforms/discord/adapter.py` (constants `_DISCORD_LIVENESS_PROBE_INTERVAL_SECONDS`, `_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS`; state `_liveness_task`, `_last_liveness_ok`; `_start_liveness_watchdog`, `_cancel_liveness_watchdog`, `_gateway_is_live`, `_liveness_watchdog_loop`; `on_ready`/`on_resumed` refresh; `connect()` start; `disconnect()` cancel)
+- `tests/gateway/test_discord_liveness_watchdog.py` (healthy never-fires, wedged fires retryable, closed-ws non-live, grace-window suppression, done-bot-task defer, disconnecting defer, `_gateway_is_live` public-signal classification)
+
+Commits:
+
+- `d1ff7aba6` - Discord gateway liveness watchdog for silently-wedged connections.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/gateway/test_discord_liveness_watchdog.py tests/gateway/test_discord_connect.py -o 'addopts=' -q
+```
+
+Live smoke for Jake's profile:
+
+- Confirm the current gateway process is running the fixed adapter and, on a real transient network drop, the gateway logs either a normal discord.py RESUME (no watchdog action) or, on a true wedge, `Discord gateway wedged: websocket non-live for Ns` followed by the reconnect watcher re-queuing Discord and a fresh `Connected as hermes#...`.
+
 ## Complete commit ledger by feature bucket
 
 This is the raw commit map from the audited branch, grouped as the recommended history-cleanup overlay. It intentionally avoids rewriting history on a published branch.
@@ -765,6 +800,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `6adab27d8` `2026-05-23` - `fix: omit chat chunk pagination markers`
 - `feabad30f` `2026-05-23` - `feat: improve gateway tool progress labels`
 - `7731faed9` `2026-05-29` - `fix: reduce retry and memory-full noise`
+- `d1ff7aba6` `2026-07-02` - `fix(discord): watchdog for silently-wedged gateway (green service, dead bot)`
 
 ### Voice / STT / busy steering
 

@@ -1534,12 +1534,14 @@ registry.register(
 OCR_EXTRACT_SCHEMA = {
     "name": "ocr_extract",
     "description": (
-        "Extract exact visible text from an image, screenshot, receipt, itinerary, "
-        "error dialog, table, or UI. Use this when precise text/numbers matter; "
-        "use vision_analyze for general visual understanding. Accepts a URL, "
-        "local file path, or data URL. Returns deterministic local OCR when "
-        "available, otherwise attaches the image natively with OCR-specific "
-        "instructions."
+        "Create a text transcript from visible text in an image, screenshot, "
+        "receipt, itinerary, error dialog, table, or UI. This is not an "
+        "independent confidence check for images already attached to a "
+        "vision-capable main model; read those pixels directly unless the user "
+        "explicitly asks for OCR/transcription, the main model cannot see the "
+        "image, or the task needs a reusable extracted-text artifact. The normal "
+        "path uses a fast auxiliary vision model; local Tesseract/native OCR is "
+        "fallback only. Accepts a URL, local file path, or data URL."
     ),
     "parameters": {
         "type": "object",

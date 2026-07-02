@@ -26,6 +26,18 @@ def test_ocr_extract_registered_under_vision_toolset():
     assert entry.toolset == "vision"
 
 
+def test_ocr_extract_schema_discourages_native_vision_confidence_checks():
+    entries, _checks = registry._snapshot_state()
+    entry = next(e for e in entries if e.name == "ocr_extract")
+    description = entry.schema["description"]
+
+    assert "not an independent confidence check" in description
+    assert "vision-capable main model" in description
+    assert "fast auxiliary vision model" in description
+    assert "local Tesseract/native OCR is fallback only" in description
+    assert "deterministic local OCR when available" not in description
+
+
 def test_ocr_requirements_true_when_tesseract_exists_without_vision_backend():
     from tools.vision_tools import check_ocr_requirements
 

@@ -1471,14 +1471,16 @@ from tools.registry import registry, tool_error, tool_result
 VISION_ANALYZE_SCHEMA = {
     "name": "vision_analyze",
     "description": (
-        "Load an image into the conversation so you can see it. Accepts a "
-        "URL, local file path, or data URL. When your active model has "
-        "native vision, the image is attached to your context directly "
-        "and you read the pixels yourself on the next turn — call this "
-        "any time the user references an image (filepath in their message, "
-        "URL in tool output, screenshot from the browser, etc.). For "
-        "non-vision models, falls back to an auxiliary vision model that "
-        "returns a text description."
+        "Load an image only when the active model cannot already see the "
+        "pixels, or when native vision is unavailable or insufficient. Do "
+        "not call this as a routine re-check for images already attached to "
+        "a vision-capable model; inspect those directly. Use it for "
+        "non-visible image URLs/paths, tool/browser screenshots that only "
+        "produced a file path, non-vision model fallback, or a deliberate "
+        "targeted second pass after native inspection. Accepts a URL, local "
+        "file path, or data URL. When native fast path is available, the "
+        "image is attached to the next model turn; otherwise Hermes falls "
+        "back to an auxiliary vision description."
     ),
     "parameters": {
         "type": "object",

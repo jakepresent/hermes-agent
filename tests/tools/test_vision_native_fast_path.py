@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 
 from tools.vision_tools import (
+    VISION_ANALYZE_SCHEMA,
     _build_native_vision_tool_result,
     _handle_vision_analyze,
     _supports_media_in_tool_results,
@@ -26,6 +27,20 @@ from tools.vision_tools import (
 _TINY_PNG = base64.b64decode(
     b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
 )
+
+
+# ─── Prompt-facing schema ────────────────────────────────────────────────────
+
+
+def test_vision_analyze_schema_discourages_redundant_native_rechecks():
+    """The tool description shapes model choice, so keep it conservative."""
+    description = VISION_ANALYZE_SCHEMA["description"]
+
+    assert "cannot already see the pixels" in description
+    assert "native vision is unavailable or insufficient" in description
+    assert "not call this as a routine re-check" in description
+    assert "vision-capable model; inspect those directly" in description
+    assert "call this any time" not in description
 
 
 # ─── _supports_media_in_tool_results ─────────────────────────────────────────

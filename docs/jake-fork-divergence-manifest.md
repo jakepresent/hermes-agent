@@ -534,6 +534,7 @@ Core behavior:
 - Native image payloads shrink/retry after provider 413 or image-size errors.
 - Aggregate native image payloads can be shrunk, not just individual tool images.
 - OCR exposes a dedicated fast `ocr_extract` transcription tool separate from general visual reasoning, but its schema tells vision-capable main models not to use it as a redundant confidence check for already-attached images.
+- `vision_analyze` is framed as an escape hatch for non-visible images, non-vision fallback, or targeted second-pass inspection when native vision is insufficient, not as a routine re-check for already-attached images.
 - Vision routing fast path continues to work with native image support.
 
 Key files:

@@ -308,6 +308,74 @@ class TestShrinkImagePartsHelper:
         assert msgs[0]["content"][1]["image_url"]["url"] == shrunk
         assert msgs[0]["content"][2]["image_url"]["url"] == shrunk
 
+    def test_payload_budget_shrinks_multi_image_batch_under_per_image_cap(self, monkeypatch):
+        """A whole-request 413 can recover even when each image is under 4 MB."""
+        agent = _make_agent()
+        img1 = _big_png_data_url(900)
+        img2 = _big_png_data_url(900)
+        # Combined inline payload is > 1 MB, but each image is below the normal
+        # 4 MB per-image shrink threshold. The aggregate 413 path must still
+        # shrink them by passing an explicit total budget through the wrapper.
+        total_budget = 1024 * 1024
+        shrunk = "data:image/jpeg;base64," + "S" * 1000
+        seen_budgets = []
+
+        def _fake_resize(path, mime_type=None, max_base64_bytes=None, max_dimension=None):
+            seen_budgets.append(max_base64_bytes)
+            return shrunk
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            _fake_resize,
+            raising=False,
+        )
+
+        msgs = [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "compare"},
+                {"type": "image_url", "image_url": {"url": img1}},
+                {"type": "image_url", "image_url": {"url": img2}},
+            ],
+        }]
+        changed = agent._try_shrink_image_parts_in_messages(
+            msgs,
+            target_total_base64_bytes=total_budget,
+        )
+        assert changed is True
+        assert seen_budgets == [total_budget // 2, total_budget // 2]
+        assert msgs[0]["content"][1]["image_url"]["url"] == shrunk
+        assert msgs[0]["content"][2]["image_url"]["url"] == shrunk
+
+    def test_payload_budget_under_limit_does_not_shrink_small_images(self, monkeypatch):
+        """The aggregate-budget argument is inert when total inline bytes fit."""
+        agent = _make_agent()
+        img1 = _big_png_data_url(100)
+        img2 = _big_png_data_url(100)
+        resize_hits = {"count": 0}
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            lambda *a, **kw: resize_hits.__setitem__("count", resize_hits["count"] + 1) or "shrunk",
+            raising=False,
+        )
+
+        msgs = [{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": img1}},
+                {"type": "image_url", "image_url": {"url": img2}},
+            ],
+        }]
+        changed = agent._try_shrink_image_parts_in_messages(
+            msgs,
+            target_total_base64_bytes=4 * 1024 * 1024,
+        )
+        assert changed is False
+        assert resize_hits["count"] == 0
+        assert msgs[0]["content"][0]["image_url"]["url"] == img1
+        assert msgs[0]["content"][1]["image_url"]["url"] == img2
+
     def test_http_url_images_not_touched(self, monkeypatch):
         """Only data: URLs are candidates — http URLs are server-fetched."""
         agent = _make_agent()

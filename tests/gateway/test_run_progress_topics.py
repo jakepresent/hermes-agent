@@ -1471,9 +1471,10 @@ async def test_terminal_progress_renders_fenced_code_block(monkeypatch, tmp_path
     assert "```" in all_content
     assert "```bash" not in all_content
     # Non-verbose skips the boilerplate strict-mode line and shows the first
-    # meaningful command line + truncation marker.
+    # meaningful command, compacted by the shell summarizer (§5 reconciliation:
+    # upstream summarize_shell_command collapses the compound command).
     assert "set -euo pipefail" not in all_content
-    assert "printf 'node: '; node --version" in all_content
+    assert "printf 'node: '" in all_content
     assert "npm install -g hyperframes@latest" not in all_content
     # No truncated quoted preview for the terminal command.
     assert 'terminal: "' not in all_content
@@ -1639,7 +1640,7 @@ async def test_consecutive_terminal_progress_collapses_headers(monkeypatch, tmp_
         assert cmd in final
     # Exactly TWO terminal headers: one for the first run of three calls,
     # one for the terminal call after web_search broke the streak.
-    assert final.count("terminal\n```") == 2
+    assert final.count("Terminal\n```") == 2
 
 
 @pytest.mark.asyncio

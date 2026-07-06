@@ -107,6 +107,8 @@ def _make_runner(*, platform_extra: dict | None = None,
     runner._send_voice_reply = AsyncMock()
     runner._capture_gateway_honcho_if_configured = lambda *args, **kwargs: None
     runner._emit_gateway_run_progress = AsyncMock()
+    runner._begin_session_run_generation = MagicMock(return_value=1)
+    runner._end_session_run_generation = MagicMock()
     return runner
 
 
@@ -621,3 +623,40 @@ async def test_gating_isolated_per_platform():
     tg_src = _make_source(platform=Platform.TELEGRAM, user_id="999", chat_id="t1")
     result = await runner._handle_message(_make_event("/whoami", tg_src))
     assert "Tier: unrestricted" in result
+
+
+# ---------------------------------------------------------------------------
+# /moa prompt observability
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_moa_echoes_prompt_non_conversational_before_agent_run(monkeypatch):
+    """/moa should echo the exact prompt before the expensive fan-out starts."""
+    runner = _make_runner(platform_extra={})
+    source = _make_source(user_id="111", chat_id="c1")
+    event = _make_event("/moa Review the design doc with context x,y,z", source)
+
+    captured = {}
+
+    async def fake_agent(event_arg, source_arg, key_arg, generation_arg):
+        captured["event_text"] = event_arg.text
+        captured["source"] = source_arg
+        captured["key"] = key_arg
+        captured["generation"] = generation_arg
+        return {"final_response": "done", "api_calls": 1}
+
+    runner._handle_message_with_agent = fake_agent
+    runner._post_turn_goal_continuation = AsyncMock()
+    runner._restore_moa_one_shot = MagicMock()
+
+    result = await runner._handle_message(event)
+
+    assert result["final_response"] == "done"
+    assert captured["event_text"] == "Review the design doc with context x,y,z"
+    runner.adapters[Platform.DISCORD].send.assert_awaited_once()
+    chat_id, content = runner.adapters[Platform.DISCORD].send.await_args.args[:2]
+    assert chat_id == "c1"
+    assert content == "MoA prompt:\n```\nReview the design doc with context x,y,z\n```"
+    metadata = runner.adapters[Platform.DISCORD].send.await_args.kwargs.get("metadata")
+    assert metadata and metadata.get("non_conversational") is True

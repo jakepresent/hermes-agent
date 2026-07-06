@@ -764,6 +764,33 @@ Live smoke for Jake's profile:
 
 **v2026.7.1 convergence note:** upstream independently added a Discord silent-wedge detector (#26656) — an active REST `fetch_user` probe on a timer that catches a socket wedged behind a dead proxy/NAT that never delivers a RST. The fork's detector is passive: it reads discord.py's public `is_closed()`/`latency` plus keepalive-timestamp freshness (`_gateway_is_live`/`_gateway_heartbeat_age_seconds`) to catch a half-open/CLOSE-WAIT websocket. These catch DIFFERENT failure modes, so resolution keeps BOTH as complementary detectors with separate task handles: the fork's passive watchdog on `self._liveness_task` (started via `_start_liveness_watchdog`, cancelled via `_cancel_liveness_watchdog`) and upstream's active REST probe on the new `self._rest_liveness_task` (started via `_start_liveness_probe`, cancelled via `_cancel_liveness_task`). `connect()` starts both; `disconnect()` cancels both. The process-level event-loop watchdog in `gateway/run.py` (2026-07-06, this section's sibling) is unaffected and survived the merge intact. `tests/gateway/test_discord_liveness_watchdog.py` + `test_discord_connect.py` pass.
 
+### 21. MoA gateway safeguards (prompt echo + non-streaming acting turns)
+
+Purpose: keep `/moa` usable on messaging gateways for real work, especially design-doc / demo review prompts where the aggregator is expected to call tools.
+
+Core behavior:
+
+- `/moa <prompt>` echoes the exact prompt back into the originating chat before the fan-out starts, marked with non-conversational metadata so Discord history backfill does not treat the echo as user context. This gives Jake mobile/Discord observability for the expensive one-shot run.
+- MoA acting turns intentionally use the complete-response path even when a gateway/TUI stream consumer exists. Observed bug (2026-07-06): Copilot Claude Opus 4.8 streamed an aggregator preface and terminated with `finish_reason=tool_calls` but no usable streamed tool-call deltas. The outer loop then surfaced only the pre-tool preface ("Let me ground...") and never executed tools. Non-streaming MoA returns the full ChatCompletion with `message.tool_calls` intact, so the normal tool loop can run.
+
+Key files:
+
+- `agent/conversation_loop.py` (forces `agent.provider == "moa"` down the complete-response path)
+- `gateway/run.py` (`/moa` prompt echo)
+- `tests/run_agent/test_moa_no_streaming.py`
+- `tests/gateway/test_slash_access_dispatch.py::test_moa_echoes_prompt_non_conversational_before_agent_run`
+
+Preservation checks:
+
+```bash
+python -m pytest tests/run_agent/test_moa_no_streaming.py tests/gateway/test_slash_access_dispatch.py::test_moa_echoes_prompt_non_conversational_before_agent_run tests/cli/test_moa_command.py tests/tui_gateway/test_goal_command.py::test_moa_arg_is_always_one_shot tests/tui_gateway/test_moa_reference_emit.py -o 'addopts=' -q
+```
+
+Live smoke:
+
+- Run `/moa <prompt>` in Discord and confirm a `MoA prompt:` echo appears first.
+- Use a prompt that requires reading files or checking the repo; confirm the run continues into tool execution rather than stopping after a planning preface.
+
 ## Complete commit ledger by feature bucket
 
 This is the raw commit map from the audited branch, grouped as the recommended history-cleanup overlay. It intentionally avoids rewriting history on a published branch.

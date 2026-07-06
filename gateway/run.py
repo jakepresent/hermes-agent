@@ -9965,6 +9965,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             preset = moa_cfg["default_preset"]
             try:
                 event.text = moa_payload
+                # Echo the exact one-shot prompt back into the originating chat
+                # before the expensive fan-out starts. This is observability for
+                # Discord/mobile users: once the slash interaction disappears
+                # into "thinking", they need to see what prompt MoA is actually
+                # running. Mark it non-conversational so history backfill does
+                # not treat our own echo as user context later.
+                try:
+                    adapter = self.adapters.get(source.platform)
+                    if adapter:
+                        echo_meta = _non_conversational_metadata(
+                            self._thread_metadata_for_source(source),
+                            platform=source.platform,
+                        )
+                        await adapter.send(
+                            str(source.chat_id),
+                            "MoA prompt:\n```\n" + moa_payload + "\n```",
+                            metadata=echo_meta,
+                        )
+                except Exception:
+                    logger.debug("moa prompt echo failed", exc_info=True)
                 event._moa_restore_override = self._session_model_overrides.get(_quick_key)
                 self._session_model_overrides[_quick_key] = {
                     "provider": "moa",

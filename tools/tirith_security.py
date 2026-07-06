@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -839,19 +840,26 @@ def check_command_security(command: str) -> dict:
         elif action == "warn":
             summary = "security warning detected (details unavailable)"
 
-    # Suppress warn verdicts that consist solely of a lookalike_tld finding for
-    # the .app TLD.  .app is a legitimate gTLD used by many production services
-    # and the "can be confused with file extensions" heuristic generates false
-    # positives for normal API calls.  Any other finding (including other
-    # lookalike_tld entries for non-.app TLDs) preserves the warn action.
+    # Suppress warn verdicts that consist solely of known false-positive findings.
+    # .app is a legitimate gTLD used by many production services, and Tirith's
+    # "can be confused with file extensions" heuristic is noisy for normal API
+    # calls.  Likewise, threat_package_similar_name can sometimes report the
+    # exact same package name on both sides (for example `aiohttp ≈ aiohttp`),
+    # which is not a typosquatting signal.  Any non-suppressible finding
+    # preserves the warn action.
     if action == "warn" and findings:
-        non_suppressible = [f for f in findings if not _is_app_tld_finding(f)]
+        non_suppressible = [f for f in findings if not _is_suppressible_warn_finding(f)]
         if not non_suppressible:
             action = "allow"
             findings = []
             summary = ""
 
     return {"action": action, "findings": findings, "summary": summary}
+
+
+def _is_suppressible_warn_finding(finding: dict) -> bool:
+    """Return True for warn-only Tirith findings known to be false positives."""
+    return _is_app_tld_finding(finding) or _is_package_self_similarity_finding(finding)
 
 
 def _is_app_tld_finding(finding: dict) -> bool:
@@ -869,3 +877,45 @@ def _is_app_tld_finding(finding: dict) -> bool:
         if val is not None and ".app" in str(val).lower():
             return True
     return False
+
+
+def _is_package_self_similarity_finding(finding: dict) -> bool:
+    """Return True for Tirith package-similarity warnings where A == B.
+
+    Tirith's package typo heuristic is useful when a package name is near a
+    different popular package. It is pure noise when the reported candidate and
+    popular package normalize to the same name, e.g. ``aiohttp ≈ aiohttp``.
+    """
+    if not isinstance(finding, dict):
+        return False
+    if finding.get("rule_id") != "threat_package_similar_name":
+        return False
+
+    haystack_parts: list[str] = []
+    for field in ("title", "description", "message", "detail", "value", "raw"):
+        value = finding.get(field)
+        if value is not None:
+            haystack_parts.append(str(value))
+    haystack = "\n".join(haystack_parts)
+
+    pairs: list[tuple[str, str]] = []
+    for pattern in (
+        r"['\"]?([A-Za-z0-9_.-]+)['\"]?\s*[≈~]\s*['\"]?([A-Za-z0-9_.-]+)['\"]?",
+        r"Package\s+['\"]+([^'\"]+)['\"]\s+in\s+\w+\s+is\s+within\s+edit\s+distance\s+\d+\s+of\s+popular\s+package\s+['\"]([^'\"]+)['\"]",
+    ):
+        pairs.extend(re.findall(pattern, haystack, flags=re.IGNORECASE))
+
+    for evidence in finding.get("evidence") or []:
+        if not isinstance(evidence, dict):
+            continue
+        candidate = evidence.get("package") or evidence.get("name") or evidence.get("raw")
+        popular = evidence.get("popular_package") or evidence.get("similar_to") or evidence.get("target")
+        if candidate is not None and popular is not None:
+            pairs.append((str(candidate), str(popular)))
+
+    def _normalize_pkg(name: str) -> str:
+        # PEP 503-style normalization collapses separators and lowercases.
+        cleaned = name.strip().strip("'\"").lower()
+        return re.sub(r"[-_.]+", "-", cleaned)
+
+    return any(_normalize_pkg(left) == _normalize_pkg(right) for left, right in pairs)

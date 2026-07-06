@@ -963,6 +963,7 @@ Do NOT use ls to list directories — use search_files(target='files') instead.
 Do NOT use sed/awk to edit files — use patch instead.
 Do NOT use echo/cat heredoc to create files — use write_file instead.
 Reserve terminal for: builds, installs, git, processes, scripts, network, package managers, and anything that needs a shell.
+Do NOT pipe command output directly into interpreters (`cmd | python`, `cmd | node`, `cmd | bash`, etc.). Hermes' security scanner treats pipe-to-interpreter as risky. If you need to post-process command output, write it to a temp file and pass the file path to your script, or use execute_code/hermes_tools for multi-step parsing.
 Because exported environment state persists, activate a virtualenv or export setup variables once per session; do not re-source the same environment before every command unless a command proves the shell state was reset.
 
 Foreground (default): Commands return INSTANTLY when done, even if the timeout is high. Set timeout=300 for long builds/scripts — you'll still get the result in seconds if it's fast. Prefer foreground for short commands.

@@ -2217,6 +2217,40 @@ def _format_tirith_description(tirith_result: dict, *, command: str = "") -> str
     return "Security scan — " + "; ".join(parts)
 
 
+_SELF_CORRECTABLE_TIRITH_RULES = {
+    "pipe_to_interpreter": (
+        "Rewrite it instead of asking for approval: save the producer's output "
+        "to a temp file and pass that file path to the interpreter, or use "
+        "execute_code/hermes_tools for multi-step parsing. Do not pipe command "
+        "output directly into python, node, bash, sh, perl, or ruby."
+    ),
+}
+
+
+def _self_correctable_tirith_block_result(rule_id: str, description: str) -> dict:
+    """Build a model-facing block result for avoidable Tirith findings.
+
+    Some security findings are not useful user decisions in normal agent work:
+    the right behavior is for the agent to rewrite the command into a safer
+    shape. Returning a normal approval request creates approval fatigue and
+    trains the agent to keep asking for risky shell patterns instead of
+    self-correcting.
+    """
+    instruction = _SELF_CORRECTABLE_TIRITH_RULES.get(rule_id, "Rewrite the command in a safer form.")
+    return {
+        "approved": False,
+        "message": (
+            f"BLOCKED: Security scan flagged an avoidable risky command pattern "
+            f"({description}). {instruction} Try again with the safer form."
+        ),
+        "pattern_key": f"tirith:{rule_id}",
+        "description": description,
+        "outcome": "blocked",
+        "self_correctable": True,
+        "user_consent": False,
+    }
+
+
 def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
                             *, surface: str = "gateway") -> dict:
     """Enqueue *approval_data*, notify the user, and block the calling agent
@@ -2516,10 +2550,24 @@ def check_all_command_guards(command: str, env_type: str,
     # inspect the explanation and approve if they understand the risk.
     if tirith_result["action"] in {"block", "warn"}:
         findings = tirith_result.get("findings") or []
-        rule_id = findings[0].get("rule_id", "unknown") if findings else "unknown"
+        rule_ids = [f.get("rule_id", "unknown") for f in findings] or ["unknown"]
+        rule_id = rule_ids[0]
         tirith_key = f"tirith:{rule_id}"
         tirith_desc = _format_tirith_description(tirith_result, command=command)
         tirith_detected_strings = _extract_tirith_detected_strings(findings, command=command)
+
+        self_correctable_rule_id = next(
+            (rid for rid in rule_ids if rid in _SELF_CORRECTABLE_TIRITH_RULES),
+            "",
+        )
+        if self_correctable_rule_id and not is_approved(
+            session_key, f"tirith:{self_correctable_rule_id}"
+        ):
+            return _self_correctable_tirith_block_result(
+                self_correctable_rule_id,
+                tirith_desc,
+            )
+
         if not is_approved(session_key, tirith_key):
             warnings.append((tirith_key, tirith_desc, True))
 

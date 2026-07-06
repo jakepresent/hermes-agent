@@ -314,6 +314,8 @@ Core behavior:
 - Security-scan approvals show detected suspicious strings, command preview, and visible rendering for invisible Unicode characters.
 - Sensitive home-path detection is restored.
 - Command context remains visible in security approvals.
+- Avoidable Tirith findings that the agent can rewrite safely, currently `pipe_to_interpreter`, are model-facing self-correction blocks instead of user approval prompts.
+- Tirith wrapper suppresses known false-positive warn-only findings before they reach the approval UI, including exact package-name self-matches from `threat_package_similar_name` (for example `aiohttp ≈ aiohttp`).
 - Discord clarify prompts are content-first: full question and full numbered choices appear in message content, while buttons are compact selectors (`1`, `2`, `3`, etc.) plus `Other`.
 - Clarify open-ended prompts use plain message content with a reply instruction, not embed-only text.
 - Clarify question/choice text renders invisible/format Unicode visibly (for example `[U+FE0F]`).
@@ -322,12 +324,16 @@ Core behavior:
 Key files:
 
 - `tools/approval.py`
+- `tools/tirith_security.py`
+- `tools/terminal_tool.py`
 - `gateway/run.py`
 - `plugins/platforms/discord/adapter.py`
 - `tests/gateway/test_discord_exec_approval_prompt.py`
 - `tests/gateway/test_discord_clarify_buttons.py`
 - `tests/tools/test_approval.py`
 - `tests/tools/test_command_guards.py`
+- `tests/tools/test_tirith_security.py`
+- `tests/tools/test_terminal_tool_schema.py`
 
 Commits:
 
@@ -341,11 +347,12 @@ Commits:
 - `f9ac959d3` - restore sensitive home-path detection after upstream merge.
 - `ce08ddbcf` - restore rich approval prompt after UI regression.
 - `bf59e0464` - restore content-first Discord clarify prompt after v0.17.0 merge regression.
+- `be81d7e5d` - reduce approval fatigue for avoidable Tirith findings and package self-match false positives.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/gateway/test_discord_exec_approval_prompt.py tests/gateway/test_discord_clarify_buttons.py tests/tools/test_approval.py tests/tools/test_command_guards.py -o 'addopts=' -q
+python -m pytest tests/gateway/test_discord_exec_approval_prompt.py tests/gateway/test_discord_clarify_buttons.py tests/tools/test_approval.py tests/tools/test_command_guards.py tests/tools/test_tirith_security.py tests/tools/test_terminal_tool_schema.py -o 'addopts=' -q
 ```
 
 Live smoke:

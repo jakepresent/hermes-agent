@@ -1407,6 +1407,56 @@ class TestAppTldSuppression:
         assert result["action"] == "allow"
 
 
+class TestPackageSelfSimilaritySuppression:
+    """Self-matches from Tirith's package typo heuristic are noise."""
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_package_self_similarity_warn_downgraded_to_allow(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "threat_package_similar_name",
+            "severity": "MEDIUM",
+            "title": "Package name similar to popular package: 'aiohttp ≈ aiohttp",
+            "description": (
+                "Package ''aiohttp' in pypi is within edit distance 1 of "
+                "popular package 'aiohttp'. This could indicate a typosquatting attempt."
+            ),
+            "evidence": [{
+                "type": "threat_intel",
+                "source": "popular package names",
+                "threat_type": "similar_name",
+                "confidence": "low",
+            }],
+        }]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "package self-match"))
+
+        result = check_command_security("pip install --dry-run 'aiohttp==3.14.1'")
+
+        assert result["action"] == "allow"
+        assert result["findings"] == []
+        assert result["summary"] == ""
+
+    @patch("tools.tirith_security.subprocess.run")
+    @patch("tools.tirith_security._load_security_config")
+    def test_package_similarity_to_different_package_preserved(self, mock_cfg, mock_run):
+        mock_cfg.return_value = _CFG
+        findings = [{
+            "rule_id": "threat_package_similar_name",
+            "title": "Package name similar to popular package: 'reqeusts ≈ requests'",
+            "description": (
+                "Package 'reqeusts' in pypi is within edit distance 1 of "
+                "popular package 'requests'."
+            ),
+        }]
+        mock_run.return_value = _mock_run(2, _json_stdout(findings, "package typo"))
+
+        result = check_command_security("pip install reqeusts")
+
+        assert result["action"] == "warn"
+        assert len(result["findings"]) == 1
+
+
 class TestIsAppTldFinding:
     """Unit tests for the _is_app_tld_finding helper."""
 
@@ -1442,6 +1492,44 @@ class TestIsAppTldFinding:
 
     def test_case_insensitive_match(self):
         assert self.fn({"rule_id": "lookalike_tld", "value": ".APP"})
+
+
+class TestIsPackageSelfSimilarityFinding:
+    """Unit tests for suppressing exact package-name self-matches."""
+
+    def setup_method(self):
+        from tools.tirith_security import _is_package_self_similarity_finding
+        self.fn = _is_package_self_similarity_finding
+
+    def test_matching_title_pair(self):
+        assert self.fn({
+            "rule_id": "threat_package_similar_name",
+            "title": "Package name similar to popular package: 'aiohttp ≈ aiohttp",
+        })
+
+    def test_matching_description_pair_with_extra_quote(self):
+        assert self.fn({
+            "rule_id": "threat_package_similar_name",
+            "description": "Package ''aiohttp' in pypi is within edit distance 1 of popular package 'aiohttp'.",
+        })
+
+    def test_separator_normalization(self):
+        assert self.fn({
+            "rule_id": "threat_package_similar_name",
+            "title": "Package name similar to popular package: foo_bar ≈ foo-bar",
+        })
+
+    def test_different_package_not_suppressed(self):
+        assert not self.fn({
+            "rule_id": "threat_package_similar_name",
+            "title": "Package name similar to popular package: reqeusts ≈ requests",
+        })
+
+    def test_wrong_rule_id(self):
+        assert not self.fn({
+            "rule_id": "lookalike_tld",
+            "title": "Package name similar to popular package: aiohttp ≈ aiohttp",
+        })
 
 
 # ---------------------------------------------------------------------------

@@ -307,6 +307,39 @@ class TestGatewayTirithPromptData:
         assert "hello️" not in detected[0]
 
 
+class TestSelfCorrectableTirithFindings:
+    @patch(_TIRITH_PATCH,
+           return_value=_tirith_result(
+               "warn",
+               [{
+                   "rule_id": "pipe_to_interpreter",
+                   "severity": "HIGH",
+                   "title": "Pipe to interpreter: gh | python3",
+                   "description": (
+                       "Command pipes output from 'gh' directly to interpreter 'python3'. "
+                       "Downloaded content will be executed without inspection."
+                   ),
+                   "evidence": [{
+                       "raw": "gh pr view https://github.com/org/repo/pull/1 | python3",
+                   }],
+               }],
+               "pipe to interpreter",
+           ))
+    def test_pipe_to_interpreter_blocks_with_rewrite_instruction_instead_of_prompt(self, mock_tirith):
+        os.environ["HERMES_GATEWAY_SESSION"] = "1"
+        result = check_all_command_guards(
+            "gh pr view https://github.com/org/repo/pull/1 --json title | python3 - <<'PY'\nimport sys\nprint(sys.stdin.read())\nPY",
+            "local",
+        )
+
+        assert result["approved"] is False
+        assert result["self_correctable"] is True
+        assert result["pattern_key"] == "tirith:pipe_to_interpreter"
+        assert "Rewrite it instead of asking for approval" in result["message"]
+        assert "temp file" in result["message"]
+        assert "pending_approval" not in result
+
+
 # ---------------------------------------------------------------------------
 # Manual command_allowlist glob entries
 # ---------------------------------------------------------------------------

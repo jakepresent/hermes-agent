@@ -807,7 +807,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `feabad30f` `2026-05-23` - `feat: improve gateway tool progress labels`
 - `7731faed9` `2026-05-29` - `fix: reduce retry and memory-full noise`
 - `d1ff7aba6` `2026-07-02` - `fix(discord): watchdog for silently-wedged gateway (green service, dead bot)`
-- pending - `fix(gateway): restart on wedged event loop` (section 20 follow-up; exits with service-restart code when the main asyncio loop starves every in-loop watchdog/API endpoint)
+- `87b33d621` - Gateway watchdog follow-up: reject stale finite Discord heartbeat latency and restart on wedged gateway event loop.
 
 ### Voice / STT / busy steering
 

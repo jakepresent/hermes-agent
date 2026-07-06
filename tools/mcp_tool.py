@@ -1936,20 +1936,25 @@ class MCPServerTask:
         ``standby_interval`` timer so a long-lived endpoint that comes back on
         its own is auto-retried with no manual ``/mcp`` refresh.
 
+        The timer is implemented with ``asyncio.sleep`` (racing the two events)
+        rather than ``asyncio.wait(timeout=...)`` so tests that patch
+        ``asyncio.sleep`` to be instant still exercise the standby path without
+        blocking on real wall-clock time.
+
         Returns ``"shutdown"``, ``"reconnect"`` (explicit event), or
         ``"standby"`` (timer elapsed — caller should attempt a rebuild).
         Shutdown takes precedence.
         """
         shutdown_task = asyncio.ensure_future(self._shutdown_event.wait())
         reconnect_task = asyncio.ensure_future(self._reconnect_event.wait())
+        standby_task = asyncio.ensure_future(asyncio.sleep(standby_interval))
         try:
-            done, _pending = await asyncio.wait(
-                {shutdown_task, reconnect_task},
-                timeout=standby_interval,
+            await asyncio.wait(
+                {shutdown_task, reconnect_task, standby_task},
                 return_when=asyncio.FIRST_COMPLETED,
             )
         finally:
-            for t in (shutdown_task, reconnect_task):
+            for t in (shutdown_task, reconnect_task, standby_task):
                 if not t.done():
                     t.cancel()
                     try:
@@ -1961,7 +1966,7 @@ class MCPServerTask:
         if self._reconnect_event.is_set():
             self._reconnect_event.clear()
             return "reconnect"
-        # Neither event fired within the interval — the standby timer elapsed.
+        # Neither event fired first — the standby timer elapsed.
         return "standby"
 
     async def _run_stdio(self, config: dict):
@@ -3617,28 +3622,14 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
                 "error": f"MCP server '{server_name}' is not connected"
             }, ensure_ascii=False)
 
-        if not server.session:
-            # No live session — the server task is reconnecting, or it has
-            # exhausted its retry budget and parked (e.g. a dead stdio
-            # subprocess). Probing here would write into a dead/absent
-            # transport and re-arm the breaker forever (#16788). Instead,
-            # ask the (always-present) server task to rebuild the transport
-            # — which respawns a dead stdio subprocess — and return a clean
-            # "reconnecting" error so the model backs off without burning
-            # iterations. The breaker resets once the fresh session
-            # initializes (_run_stdio/_run_http call _reset_server_error).
-            _bump_server_error(server_name)
-            if _signal_reconnect(server):
-                return json.dumps({
-                    "error": (
-                        f"MCP server '{server_name}' transport is down; "
-                        f"reconnect requested. Do NOT retry this tool "
-                        f"immediately — give it a few seconds to come back."
-                    )
-                }, ensure_ascii=False)
-            return json.dumps({
-                "error": f"MCP server '{server_name}' is not connected"
-            }, ensure_ascii=False)
+        # NOTE: we deliberately do NOT early-return here when
+        # ``server.session`` is None. The fork's §19 tool-call recovery lets
+        # ``_call`` raise ``ConnectionError`` and catches it below via
+        # ``_handle_session_expired_and_retry`` -> bounded ``request_reconnect``
+        # + one retry, which is what covers the "registered handler but dead
+        # session" case (and is exercised by the disconnected-server tests). An
+        # upstream early ``_signal_reconnect`` return would short-circuit that
+        # bounded reconnect/retry and only fire-and-forget the event.
 
         async def _call():
             async with server._rpc_lock:

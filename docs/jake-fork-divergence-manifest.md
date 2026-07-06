@@ -206,48 +206,24 @@ Preservation checks:
 python -m pytest tests/tools/test_discord_tool.py -o 'addopts=' -q
 ```
 
-### 5. Gateway display and progress UX
+### 5. Terminal heredoc preview summarizer (fork-unique residue)
 
-Purpose: make long-running gateway/tool work legible without noisy or misleading status messages.
+Status: **mostly landed upstream as of v2026.7.1.** Upstream now owns friendly tool-verb progress labels (`get_tool_verb`/`tool_verb_connector`/`verb_drops_preview`, e.g. `💻 Running pwd`), terminal-preview boilerplate stripping + plumbing compaction (`summarize_shell_command`: drops `set -euo pipefail`, collapses `| tail -N` tails, renders `cmd + N commands`), progress-arg secret redaction (`redact_tool_args_for_display`), chat-chunk pagination-marker suppression, and retry/memory-full noise reduction. Do not re-preserve those — they are baseline.
 
-Core behavior:
-
-- Better gateway tool progress labels.
-- Terminal progress previews hide low-signal shell safety prologues like `set -euo pipefail` and show the first meaningful command line instead.
-- Terminal heredoc previews summarize script bodies (for example `python - <<'PY'`) rather than showing only the wrapper line.
-- Avoid chat chunk pagination markers leaking into assistant-visible or user-facing content.
-- Retry/memory-full/provider-status noise reduced so the user sees signal rather than internal churn.
+Fork-unique residue to keep: **heredoc body summarization.** `build_terminal_command_preview` summarizes a `python - <<'PY'` command by its first meaningful script line (`_extract_heredoc_preview` → e.g. `python: print(Path.cwd()) ...`) instead of the unhelpful wrapper line. Upstream regresses this (its summarizer shows the `<<'PY'` wrapper). The fork path runs the heredoc summarizer first, then falls through to upstream's `summarize_shell_command` for non-heredoc commands. The fenced-block progress header uses the capitalized `get_tool_display_label` ("Terminal").
 
 Key files:
 
-- `agent/display.py`
-- `agent/tool_executor.py`
-- `gateway/display_config.py`
-- `gateway/platforms/api_server.py`
-- `gateway/platforms/base.py`
-- `gateway/run.py`
-- `agent/chat_completion_helpers.py`
-- `tests/agent/test_display.py`
-- `tests/gateway/test_display_config.py`
-- `tests/gateway/test_platform_base.py`
-- `tests/gateway/test_run_progress_topics.py`
-- `tests/gateway/test_stream_events.py`
-- `tests/run_agent/test_retry_status_buffer.py`
+- `agent/display.py` (`_extract_heredoc_preview`, `_strip_shell_strict_mode`, `build_terminal_command_preview`, `clean_terminal_command_for_display`)
+- `tests/agent/test_display.py`, `tests/gateway/test_run_progress_topics.py`
 
-Commits:
+Commits (pre-v2026.7.1; most equivalents now upstream): `6adab27d8`, `feabad30f`, `7731faed9`, `d321360c6`.
 
-- `6adab27d8` - omit chat chunk pagination markers.
-- `feabad30f` - improve gateway tool progress labels.
-- `7731faed9` - reduce retry and memory-full noise.
-- `d321360c6` - make terminal command previews show meaningful command bodies.
-
-Preservation checks:
+Preservation check (the heredoc residue is the only fork-unique assertion left):
 
 ```bash
-python -m pytest tests/agent/test_display.py tests/gateway/test_display_config.py tests/gateway/test_platform_base.py tests/gateway/test_run_progress_topics.py tests/gateway/test_stream_events.py tests/run_agent/test_retry_status_buffer.py -o 'addopts=' -q
+python -m pytest tests/agent/test_display.py::TestBuildToolPreview::test_terminal_preview_summarizes_python_heredoc_body tests/gateway/test_run_progress_topics.py -o 'addopts=' -q
 ```
-
-**v2026.7.1 convergence note:** upstream independently built its own terminal-preview compaction (`summarize_shell_command`: strips `set -euo pipefail`, collapses `| tail -N` plumbing tails, and renders `cmd + N commands` for compound commands) plus a friendly tool-verb label engine (`get_tool_verb` / `tool_verb_connector` / `verb_drops_preview`) and `redact_tool_args_for_display` (secret redaction in progress UI). Resolution kept BOTH engines: the fork's `_strip_shell_strict_mode` + `_extract_heredoc_preview` still summarize `python - <<'PY'` heredocs by their script body (upstream regresses that), and `build_terminal_command_preview` now falls through to upstream's `summarize_shell_command` for non-heredoc commands. Progress lines use upstream's friendly verb labels (`💻 Running pwd`) and the fenced-block header uses the capitalized `get_tool_display_label` ("Terminal"). Two fork tests that pinned the old exact-string compaction (`printf 'node: '; node --version`) were updated to the reconciled output (`printf 'node: ' + 1 command`) — the §5 intent (hide boilerplate, show the meaningful command, summarize heredocs) is unchanged.
 
 ### 6. Voice note transcription, transcript persistence, transcript echo, and active-run voice steering
 
@@ -711,50 +687,34 @@ Commits:
 
 Upgrade note: do not spend time preserving the reverted subtitle behavior unless a later branch explicitly revives it.
 
-### 19. MCP self-healing reconnect (standby + bounded tool-call retry)
+### 19. MCP self-heal: standby auto-retry + bounded tool-call reconnect (fork-unique residue)
 
-Purpose: keep long-lived MCP servers (especially Jake's Windows Agency bridges — EngHub, Teams, M365 Copilot) usable in a long-running gateway after endpoint wedges, keepalive-triggered reconnects, or session loss, without a manual `/reload-mcp` or gateway restart.
+Status: **core orphan-fix landed upstream as of v2026.7.1.** Upstream `MCPServerTask.run()` no longer gives up permanently after the fast-retry budget (`_MAX_RECONNECT_RETRIES`) — it drops phantom tools (`_deregister_tools`) and parks as a dormant listener on `_reconnect_event` (`_wait_for_reconnect_or_shutdown`), so a later breaker half-open probe / OAuth recovery / manual `/mcp` refresh can rebuild the transport (#16788). That baseline is upstream; do not re-preserve it.
 
-Background / root cause: upstream `MCPServerTask.run()` permanently exits its reconnect loop (`return`) once the fast reconnect budget (`_MAX_RECONNECT_RETRIES = 5`) is exhausted. When an Agency MCP's HTTP bridge stays wedged long enough to burn those 5 attempts, the server's background task ends and the server stays dead in the gateway's tool registry even after the endpoint fully recovers — so brand-new sessions inherit a registry missing e.g. all `mcp_teams_*` tools. The only recovery was `/reload-mcp` (which reconnects every server and re-registers all tools) or a full gateway restart. `/reload-mcp` also invalidates the per-conversation prompt cache, so auto-firing it from an external watchdog is the wrong fix.
+Two fork-unique deltas to keep (upstream lacks both), for Jake's Windows Agency bridges (EngHub, Teams, M365 Copilot) which must self-heal with **zero manual action**:
 
-Additional runtime bug: a keepalive-triggered reconnect can leave the long-running gateway with model-facing `mcp_<server>_*` handlers registered from an earlier connection while `server.session` is already `None`. In that state a healthy endpoint and even a successful fresh `hermes mcp test <server>` do not help the existing gateway session: the model-facing tool call immediately returns `MCP server '<name>' is not connected` instead of nudging the server-local lifecycle task to reconnect and retrying the call.
+1. **Standby auto-retry timer.** Upstream's park only wakes on an explicit event; the fork also wakes on a timer via `_wait_for_reconnect_or_standby(_RECONNECT_STANDBY_INTERVAL)` (default 300s), which races shutdown/reconnect events against an `asyncio.sleep(interval)` (patchable, so self-heal tests stay fast). So a recovered endpoint reconnects on its own with no `/reload-mcp` and no prompt-cache churn (`_run_http`/`_run_stdio` re-discover tools on re-entry while preserving registry handlers). Entering standby resets the fast-retry budget. `_RECONNECT_STANDBY_INTERVAL = 0` restores upstream's park-forever behavior.
+2. **Bounded tool-call reconnect.** When a model-facing tool call hits a registered-but-sessionless server (or a "not connected / session missing" exception), the handler triggers a server-local bounded reconnect (`_TOOL_CALL_RECONNECT_TIMEOUT`, default 15s) and retries once, waking a sleeping lifecycle task via `_recover_now_event` without arming `_reconnect_event` (avoids tearing down the fresh session). Reuses the same `MCPServerTask` — no `/reload-mcp`, no schema invalidation. **Merge hazard:** upstream added an early `if not server.session: _signal_reconnect(...)` guard in `_make_tool_handler` that fire-and-forgets and short-circuits this bounded retry. The v2026.7.1 follow-up (`8bb82aca1`) removed that early return so a dead session flows through `_handle_session_expired_and_retry` → `_recover_disconnected_server_and_retry`. A future merge that reintroduces the early guard silently disables delta #2 — the `TestToolHandler::test_disconnected_server_*` tests are the guard.
 
-Core behavior:
-
-- After the fast reconnect budget is exhausted, a previously-healthy HTTP/SSE server drops into a slow "standby" retry loop (`_RECONNECT_STANDBY_INTERVAL`, default 300s) instead of returning permanently.
-- Because `_run_http`/`_run_stdio` re-discover tools on every successful (re)entry while preserving the existing registry handlers, standby reconnect keeps the already model-facing tool names usable with no `/reload-mcp` and no prompt-cache invalidation.
-- On entering standby the fast-retry counter and backoff are reset, so a later transient blip still gets the full fast backoff ladder before returning to standby.
-- Shutdown is still honored promptly (checked after the standby sleep).
-- `_RECONNECT_STANDBY_INTERVAL = 0` restores the upstream give-up-permanently behavior (escape hatch / behavior contract for the legacy path).
-- Initial-connect failures and OAuth-auth failures are unchanged — they still fail fast (no standby), preserving fast startup and avoiding repeated browser prompts.
-- If a model-facing MCP tool call sees the registered server with no session, or an MCP/session exception whose message says this server is not connected / session missing, the handler triggers a server-local bounded reconnect (`_TOOL_CALL_RECONNECT_TIMEOUT`, default 15s) and retries the same operation once.
-- Tool-call recovery reuses the same `MCPServerTask` and registered model-facing names. It does not call `/reload-mcp`, does not rebuild every MCP server, and does not intentionally invalidate the prompt/tool schema.
-- If the lifecycle task is already between sessions and sleeping in reconnect backoff/standby, tool-call recovery wakes that sleep via `_recover_now_event` without arming `_reconnect_event`; this avoids immediately tearing down the freshly recovered session.
-- If reconnect does not finish within the bounded wait, the tool call returns a clear JSON error and the existing reconnect/standby loop remains the background recovery path.
+Also: init/discovery uses the fork's timeout-bounded `_initialize_and_discover` helper (upstream inlines it), now also calling `_reset_server_error` on success.
 
 Key files:
 
-- `tools/mcp_tool.py` (constant `_RECONNECT_STANDBY_INTERVAL`; constant `_TOOL_CALL_RECONNECT_TIMEOUT`; `MCPServerTask.request_reconnect`; `_recover_now_event`; bounded `_initialize_and_discover`; `_recover_disconnected_server_and_retry`; handler retry path)
-- `tests/tools/test_mcp_tool.py` (`TestReconnection::test_standby_reconnect_self_heals_after_exhausting_retries`, `TestReconnection::test_standby_disabled_restores_give_up_behavior`, `TestReconnection::test_tool_call_recovery_wakes_reconnect_backoff_without_tearing_down_fresh_session`, and the disconnected/not-connected handler retry tests in `TestToolHandler`)
+- `tools/mcp_tool.py` (`_RECONNECT_STANDBY_INTERVAL`, `_TOOL_CALL_RECONNECT_TIMEOUT`, `_wait_for_reconnect_or_standby`, `request_reconnect`, `_recover_now_event`, `_initialize_and_discover`, `_recover_disconnected_server_and_retry`, `_make_tool_handler` — no early sessionless return)
+- `tests/tools/test_mcp_tool.py` (`TestReconnection::test_standby_reconnect_self_heals_after_exhausting_retries`, `::test_standby_disabled_restores_give_up_behavior`, `::test_tool_call_recovery_wakes_reconnect_backoff_without_tearing_down_fresh_session`; `TestToolHandler::test_disconnected_server_reconnects_and_retries_once`, `::test_disconnected_server_reconnect_timeout_returns_clear_error`)
 
-Commits:
-
-- `890a012db` - MCP self-healing standby reconnect.
-- `adaf93285` - MCP runtime bounded tool-call reconnect/retry.
+Commits: `890a012db` (standby), `adaf93285` (bounded tool-call retry), `8bb82aca1` (v2026.7.1: drop upstream early-return that shadowed the bounded retry).
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/tools/test_mcp_tool.py -o 'addopts=' -q
+python -m pytest tests/tools/test_mcp_tool.py::TestReconnection tests/tools/test_mcp_tool.py::TestToolHandler -o 'addopts=' -q
 ```
 
 Live smoke for Jake's profile:
 
-- Wedge one Agency MCP endpoint (or stop its Windows bridge) long enough to exhaust the fast reconnect retries; confirm the gateway logs `entering standby, retrying every 300s`.
-- Bring the endpoint back; within one standby interval the gateway should log the server reconnecting, and a new session should still see the existing tool names (e.g. `mcp_teams_*`) without any `/reload-mcp`.
-- For the tool-call runtime path, leave registered tools in place while `server.session` is missing, call a model-facing tool, and confirm the log contains `disconnected during tools/call ... attempting one bounded reconnect/retry` followed by a single successful retry or the bounded timeout error.
-
-**v2026.7.1 convergence note:** upstream independently fixed the same "gives up forever" orphan bug (#16788) with a DIFFERENT mechanism: after the fast-retry budget, drop phantom tools (`_deregister_tools`) and park as a dormant listener on `_reconnect_event` (`_wait_for_reconnect_or_shutdown`), waking only on an explicit event (breaker half-open probe, OAuth recovery, manual `/mcp` refresh). That fixes the orphan but does NOT auto-retry on a timer — Jake's Agency bridges need self-heal with zero manual action. Resolution converges both: park as a dormant listener (upstream orphan-fix + `_deregister_tools`) AND wake on a standby timer via the new `_wait_for_reconnect_or_standby(interval)`, which races the shutdown/reconnect events against an `asyncio.sleep(interval)` (patchable, so the self-heal tests stay fast). `_RECONNECT_STANDBY_INTERVAL == 0` restores upstream's park-forever behavior. Separately, upstream added an early `if not server.session: _signal_reconnect(...)` guard in `_make_tool_handler` that short-circuited the fork's bounded `request_reconnect`+retry path; the merge follow-up (`8bb82aca1`) removes that early return so a dead session flows through `_handle_session_expired_and_retry` → `_recover_disconnected_server_and_retry` (the two `TestToolHandler::test_disconnected_server_*` tests validate this). Init/discovery uses the fork's timeout-bounded `_initialize_and_discover` helper, now also calling `_reset_server_error` on success (upstream's breaker-reset, #16788). `tests/tools/test_mcp_tool.py`: 210 passed.
+- Wedge one Agency MCP endpoint (or stop its Windows bridge) past the fast-retry budget; bring it back — within one standby interval the gateway reconnects and a new session sees the existing tool names (e.g. `mcp_teams_*`) with no `/reload-mcp`.
+- For the tool-call path, call a model-facing tool while `server.session` is missing; confirm one bounded reconnect/retry (or the clean bounded-timeout error), not an immediate fire-and-forget "not connected".
 
 ### 20. Discord gateway liveness watchdog (silent-wedge recovery)
 

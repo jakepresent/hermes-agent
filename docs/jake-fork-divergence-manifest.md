@@ -1,12 +1,24 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-06-25
+Last audited: 2026-07-06 (v2026.7.1 integration)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
 It is intentionally a feature manifest, not a perfect design doc. Use it to answer: "what does this fork intentionally carry that upstream Hermes may not?" and "what tests/symbols should an upgrade preserve?"
 
 ## Scope and anchors
+
+### v2026.7.1 integration (2026-07-06)
+
+- Integration branch: `jake/integrate-v2026.7.1-20260706-103904`
+- Pre-merge fork HEAD: `f7dec8a28` (`docs: record gateway watchdog follow-up`; carries the 2026-07-06 event-loop watchdog + Discord keepalive-freshness fix)
+- Upstream release integrated: `v2026.7.1` (peeled commit `7c1a029553d87c43ecff8a3821336bc95872213b`)
+- Merge commit: `6ab280039` (`merge: integrate Hermes v2026.7.1`), plus follow-ups `8bb82aca1` (MCP §19 tool-call reconnect) and `b83f0b868` (§5 progress-topic test alignment)
+- Rollback marker: `jake/rollback-before-v2026.7.1-20260706-103904` at `f7dec8a28`
+- 21 files conflicted. Three were genuine **feature convergences** (fork and upstream independently built overlapping features in the same area) — resolved by keeping both behaviors, not picking a side. See the "v2026.7.1 convergence notes" under §5, §13, §19, and §20.
+- Preservation gate result: all fork-feature suites pass (memory/session/mcp/display/image/approval/model/voice/busy/provider/acp/codex/dashboard). Two non-merge failures remain and are explicitly OUT of scope: (a) `test_memory_search_tool.py::test_default_roots_include_neutral_chatworkspace_and_hermes_memories` passes with the real `HERMES_HOME` (only fails under a temp-home test override), and (b) `test_background_review_summary.py::test_durable_notes_update_is_surfaced_as_durable_notes_not_memory` fails identically on pre-merge fork HEAD `f7dec8a28` (pre-existing trailing-period strip bug in `_summarize`, unrelated to the upgrade).
+
+### v2026.6.19 integration (prior)
 
 Current branch audited:
 
@@ -234,6 +246,8 @@ Preservation checks:
 ```bash
 python -m pytest tests/agent/test_display.py tests/gateway/test_display_config.py tests/gateway/test_platform_base.py tests/gateway/test_run_progress_topics.py tests/gateway/test_stream_events.py tests/run_agent/test_retry_status_buffer.py -o 'addopts=' -q
 ```
+
+**v2026.7.1 convergence note:** upstream independently built its own terminal-preview compaction (`summarize_shell_command`: strips `set -euo pipefail`, collapses `| tail -N` plumbing tails, and renders `cmd + N commands` for compound commands) plus a friendly tool-verb label engine (`get_tool_verb` / `tool_verb_connector` / `verb_drops_preview`) and `redact_tool_args_for_display` (secret redaction in progress UI). Resolution kept BOTH engines: the fork's `_strip_shell_strict_mode` + `_extract_heredoc_preview` still summarize `python - <<'PY'` heredocs by their script body (upstream regresses that), and `build_terminal_command_preview` now falls through to upstream's `summarize_shell_command` for non-heredoc commands. Progress lines use upstream's friendly verb labels (`💻 Running pwd`) and the fenced-block header uses the capitalized `get_tool_display_label` ("Terminal"). Two fork tests that pinned the old exact-string compaction (`printf 'node: '; node --version`) were updated to the reconciled output (`printf 'node: ' + 1 command`) — the §5 intent (hide boilerplate, show the meaningful command, summarize heredocs) is unchanged.
 
 ### 6. Voice note transcription, transcript persistence, transcript echo, and active-run voice steering
 
@@ -561,6 +575,8 @@ Preservation checks:
 python -m pytest tests/agent/test_turn_retry_state.py tests/run_agent/test_image_shrink_recovery.py tests/tools/test_ocr_extract_tool.py tests/tools/test_vision_native_fast_path.py -o 'addopts=' -q
 ```
 
+**v2026.7.1 convergence note:** upstream added transcoding of non-universal image formats (BMP/TIFF/HEIC/AVIF/ICO → PNG via Pillow, `_transcode_to_png` + `_UNIVERSALLY_SUPPORTED_MIMES`) so providers that reject those formats (Anthropic HTTP 400 "Could not process image") still work. The fork's contribution (`f93fd7510`, 2026-07-06) is the opposite guard: genuine non-images (text/log/PDF/document attachments sent alongside an image in a PHOTO message) must be REJECTED from native routing rather than mislabeled as `image/jpeg`. Resolution keeps BOTH: `_guess_mime` now returns a real image MIME for any actual image (including rare formats, so they can be transcoded) but `None` for genuine non-images (so they are skipped), and `_file_to_data_url` skips on `None` first, then transcodes non-universal formats. `tests/agent/test_image_routing.py` carries both sets (non-image-rejection AND transcode) and both pass. Also verify `gateway/run.py` classifies per-attachment via `_event_media_is_image/_audio/_video` (upstream helpers) rather than the fork's inline `_is_image_media_attachment` — the merged code uses the upstream helpers, and `tests/gateway/test_mixed_attachment_routing.py` asserts both the end-to-end buffering and the per-attachment classification.
+
 ### 14. Codex / GitHub Responses compatibility
 
 Purpose: avoid provider-specific replay bugs and noisy status while using Codex/GitHub Responses-like transports.
@@ -738,6 +754,8 @@ Live smoke for Jake's profile:
 - Bring the endpoint back; within one standby interval the gateway should log the server reconnecting, and a new session should still see the existing tool names (e.g. `mcp_teams_*`) without any `/reload-mcp`.
 - For the tool-call runtime path, leave registered tools in place while `server.session` is missing, call a model-facing tool, and confirm the log contains `disconnected during tools/call ... attempting one bounded reconnect/retry` followed by a single successful retry or the bounded timeout error.
 
+**v2026.7.1 convergence note:** upstream independently fixed the same "gives up forever" orphan bug (#16788) with a DIFFERENT mechanism: after the fast-retry budget, drop phantom tools (`_deregister_tools`) and park as a dormant listener on `_reconnect_event` (`_wait_for_reconnect_or_shutdown`), waking only on an explicit event (breaker half-open probe, OAuth recovery, manual `/mcp` refresh). That fixes the orphan but does NOT auto-retry on a timer — Jake's Agency bridges need self-heal with zero manual action. Resolution converges both: park as a dormant listener (upstream orphan-fix + `_deregister_tools`) AND wake on a standby timer via the new `_wait_for_reconnect_or_standby(interval)`, which races the shutdown/reconnect events against an `asyncio.sleep(interval)` (patchable, so the self-heal tests stay fast). `_RECONNECT_STANDBY_INTERVAL == 0` restores upstream's park-forever behavior. Separately, upstream added an early `if not server.session: _signal_reconnect(...)` guard in `_make_tool_handler` that short-circuited the fork's bounded `request_reconnect`+retry path; the merge follow-up (`8bb82aca1`) removes that early return so a dead session flows through `_handle_session_expired_and_retry` → `_recover_disconnected_server_and_retry` (the two `TestToolHandler::test_disconnected_server_*` tests validate this). Init/discovery uses the fork's timeout-bounded `_initialize_and_discover` helper, now also calling `_reset_server_error` on success (upstream's breaker-reset, #16788). `tests/tools/test_mcp_tool.py`: 210 passed.
+
 ### 20. Discord gateway liveness watchdog (silent-wedge recovery)
 
 Purpose: recover automatically from the "green service, dead bot" state where the systemd gateway service is `active`, the Python process is alive, but the Discord bot shows offline and never comes back without a manual restart. As of the 2026-07-06 follow-up, this feature also includes a process-level event-loop watchdog for the sibling "green service, dead gateway" state where the main asyncio loop stops making progress, starving the Discord watchdog and the API server together.
@@ -776,6 +794,8 @@ Live smoke for Jake's profile:
 
 - Confirm the current gateway process is running the fixed adapter and, on a real transient network drop, the gateway logs either a normal discord.py RESUME (no watchdog action) or, on a true wedge, `Discord gateway wedged: websocket non-live for Ns` followed by the reconnect watcher re-queuing Discord and a fresh `Connected as hermes#...`.
 - For Discord-only stale-socket wedges, simulate/observe a finite stale `Client.latency` with old keepalive timestamps and confirm the adapter logs `Discord gateway wedged: websocket non-live for Ns`, then reconnects. For full-loop wedges like 2026-07-06 (API `:8642` accepts TCP but `/health` times out, and normal gateway housekeeping logs stop), confirm no manual restart is needed: after `gateway.event_loop_watchdog.threshold_seconds`, systemd should restart the service and `gateway-event-loop-watchdog.log` should contain all-thread stack forensics.
+
+**v2026.7.1 convergence note:** upstream independently added a Discord silent-wedge detector (#26656) — an active REST `fetch_user` probe on a timer that catches a socket wedged behind a dead proxy/NAT that never delivers a RST. The fork's detector is passive: it reads discord.py's public `is_closed()`/`latency` plus keepalive-timestamp freshness (`_gateway_is_live`/`_gateway_heartbeat_age_seconds`) to catch a half-open/CLOSE-WAIT websocket. These catch DIFFERENT failure modes, so resolution keeps BOTH as complementary detectors with separate task handles: the fork's passive watchdog on `self._liveness_task` (started via `_start_liveness_watchdog`, cancelled via `_cancel_liveness_watchdog`) and upstream's active REST probe on the new `self._rest_liveness_task` (started via `_start_liveness_probe`, cancelled via `_cancel_liveness_task`). `connect()` starts both; `disconnect()` cancels both. The process-level event-loop watchdog in `gateway/run.py` (2026-07-06, this section's sibling) is unaffected and survived the merge intact. `tests/gateway/test_discord_liveness_watchdog.py` + `test_discord_connect.py` pass.
 
 ## Complete commit ledger by feature bucket
 

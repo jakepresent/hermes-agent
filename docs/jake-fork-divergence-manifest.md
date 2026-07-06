@@ -854,7 +854,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `89389b4df` `2026-05-28` - `fix: skip GitHub Responses message item replay`
 - `ab4568296` `2026-06-02` - `feat: add fast OCR extraction tool`
 - `ab55c4655` `2026-07-04` - `fix: thread aggregate image shrink budget`
-- pending - tighten `vision_analyze` fallback-only guidance and keep text/log/document attachments out of native image parts.
+- `f93fd7510` `2026-07-05` - `fix(gateway): keep text attachments out of image routing` (tightens `vision_analyze` fallback-only guidance and keeps text/log/document attachments out of native image parts).
 
 ### MCP resilience and schema compatibility
 

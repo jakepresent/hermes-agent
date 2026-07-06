@@ -1301,18 +1301,18 @@ class DiscordAdapter(BasePlatformAdapter):
     def _gateway_is_live(self) -> bool:
         """Best-effort read of whether the discord.py gateway is currently live.
 
-        discord.py exposes two cheap, side-effect-free signals:
+        discord.py exposes two cheap, side-effect-free public signals:
 
         * ``Client.is_closed()`` — the websocket has been closed/torn down.
         * ``Client.latency`` — seconds since the last heartbeat ACK; it is
           ``float('inf')`` (or NaN) when there is no live websocket, and a
           small positive float on a healthy connection.
 
-        A live gateway is "not closed AND has a finite heartbeat latency". This
-        deliberately does NOT reach into private ``ws`` internals — the two
-        public signals are enough to distinguish a healthy connection from a
-        silently-dead one, and staying on the public API keeps the probe robust
-        across discord.py versions.
+        In practice ``latency`` can remain as the last finite ACK latency even
+        after the socket has gone stale (e.g. CLOSE-WAIT after a host network
+        blip).  So when discord.py's private keepalive object is present, also
+        require its last ACK/receive timestamp to be fresh.  The private probe is
+        best-effort and falls back to the public signals if the library changes.
         """
         client = self._client
         if client is None:
@@ -1329,7 +1329,49 @@ class DiscordAdapter(BasePlatformAdapter):
         except Exception:
             return False
         # math.isfinite rejects both inf (no heartbeat yet / dead ws) and NaN.
-        return isinstance(latency, (int, float)) and math.isfinite(latency)
+        if not isinstance(latency, (int, float)) or not math.isfinite(latency):
+            return False
+
+        heartbeat_age = self._gateway_heartbeat_age_seconds()
+        if heartbeat_age is not None:
+            return heartbeat_age <= _DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS
+        return True
+
+    def _gateway_heartbeat_age_seconds(self) -> Optional[float]:
+        """Return seconds since the last discord.py heartbeat ACK/recv, if known.
+
+        ``Client.latency`` is not enough on its own: it can be a stale finite
+        value from the last successful ACK.  discord.py's KeepAliveHandler keeps
+        monotonic ``_last_ack`` / ``_last_recv`` timestamps, which are the signal
+        that tells us whether heartbeats are still arriving.
+        """
+        client = self._client
+        if client is None:
+            return None
+        try:
+            ws = getattr(client, "ws", None)
+            keepalive = getattr(ws, "_keep_alive", None)
+        except Exception:
+            return None
+        if keepalive is None:
+            return None
+        candidates: list[float] = []
+        for attr in ("_last_ack", "_last_recv"):
+            try:
+                raw = getattr(keepalive, attr, None)
+            except Exception:
+                raw = None
+            if isinstance(raw, (int, float)) and math.isfinite(raw) and raw > 0:
+                candidates.append(float(raw))
+        if not candidates:
+            return None
+        try:
+            age = time.perf_counter() - max(candidates)
+        except Exception:
+            return None
+        if not math.isfinite(age):
+            return None
+        return max(0.0, age)
 
     async def _liveness_watchdog_loop(self) -> None:
         """Detect a silently-wedged gateway and hand it to the reconnect watcher.
@@ -1371,6 +1413,13 @@ class DiscordAdapter(BasePlatformAdapter):
                     continue
 
                 stale_for = now - self._last_liveness_ok
+                heartbeat_age = self._gateway_heartbeat_age_seconds()
+                if heartbeat_age is not None:
+                    # If prior probes incorrectly refreshed last_liveness_ok
+                    # from a stale finite Client.latency, use the underlying
+                    # heartbeat age so recovery fires immediately once the age
+                    # exceeds the threshold.
+                    stale_for = max(stale_for, heartbeat_age)
                 if stale_for < _DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS:
                     # Non-live but within the grace window (routine RESUME /
                     # a single missed heartbeat). Keep watching.

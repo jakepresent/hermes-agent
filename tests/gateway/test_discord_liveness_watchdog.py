@@ -19,6 +19,7 @@ monkeypatched to ~0 so they never sleep on real time.
 import asyncio
 import math
 import sys
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -68,6 +69,7 @@ class _FakeClient:
     def __init__(self, *, closed: bool = False, latency: float = 0.05):
         self._closed = closed
         self._latency = latency
+        self.ws = None
 
     def is_closed(self) -> bool:
         return self._closed
@@ -75,6 +77,13 @@ class _FakeClient:
     @property
     def latency(self) -> float:
         return self._latency
+
+
+class _FakeKeepAlive:
+    def __init__(self, *, age: float):
+        stamp = time.perf_counter() - age
+        self._last_ack = stamp
+        self._last_recv = stamp
 
 
 def _make_adapter(monkeypatch, *, probe_interval=0.0, threshold=1.0):
@@ -251,3 +260,43 @@ def test_gateway_is_live_reads_public_signals(monkeypatch):
 
     adapter._client = _FakeClient(closed=False, latency=math.nan)
     assert adapter._gateway_is_live() is False, "NaN latency → not live"
+
+
+def test_gateway_is_live_rejects_stale_finite_latency(monkeypatch):
+    """A stale socket can keep the last finite Client.latency forever.
+
+    The watchdog must inspect discord.py's keepalive timestamps when available,
+    or a CLOSE-WAIT / half-dead websocket can look healthy indefinitely.
+    """
+    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
+    monkeypatch.setattr(discord_platform, "_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS", 150.0)
+
+    client = _FakeClient(closed=False, latency=0.05)
+    client.ws = SimpleNamespace(_keep_alive=_FakeKeepAlive(age=999.0))
+    adapter._client = client
+
+    assert adapter._gateway_is_live() is False
+
+
+@pytest.mark.asyncio
+async def test_watchdog_uses_stale_heartbeat_age_even_after_bad_refresh(monkeypatch):
+    """If an older probe refreshed last_liveness_ok from stale finite latency,
+    the next probe must still fire from the underlying heartbeat age.
+    """
+    adapter = _make_adapter(monkeypatch, threshold=150.0)
+    client = _FakeClient(closed=False, latency=0.05)
+    client.ws = SimpleNamespace(_keep_alive=_FakeKeepAlive(age=999.0))
+    adapter._client = client
+
+    # Simulate the pre-fix false refresh: last_liveness_ok says "now", but the
+    # heartbeat timestamps prove Discord has been stale far longer.
+    adapter._last_liveness_ok = time.monotonic()
+
+    notified = AsyncMock()
+    monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
+
+    await asyncio.wait_for(adapter._liveness_watchdog_loop(), timeout=2.0)
+
+    assert adapter.has_fatal_error
+    assert adapter.fatal_error_code == "discord_gateway_wedged"
+    notified.assert_awaited_once()

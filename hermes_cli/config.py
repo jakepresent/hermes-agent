@@ -2504,6 +2504,19 @@ DEFAULT_CONFIG = {
         # multi-tool agent turn. Bridged to HERMES_MEDIA_TRUST_RECENT_SECONDS.
         # Only consulted when ``strict`` is true.
         "trust_recent_files_seconds": 600,
+
+        # Last-resort safety net for "green service, dead gateway" failures:
+        # the process is alive, but the main asyncio event loop stops making
+        # progress, so in-loop watchdogs and the API server are starved. A tiny
+        # in-loop heartbeat is observed by an out-of-loop thread; if stale past
+        # threshold_seconds, the gateway writes thread-stack forensics and exits
+        # with the service-restart code so systemd brings it back.
+        "event_loop_watchdog": {
+            "enabled": True,
+            "heartbeat_seconds": 5,
+            "threshold_seconds": 600,
+            "check_seconds": 5,
+        },
     },
 
     # Real-time token streaming to messaging platforms (Telegram, Discord,

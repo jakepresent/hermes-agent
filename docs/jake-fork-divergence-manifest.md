@@ -740,14 +740,14 @@ Live smoke for Jake's profile:
 
 ### 20. Discord gateway liveness watchdog (silent-wedge recovery)
 
-Purpose: recover automatically from the "green service, dead bot" state where the systemd gateway service is `active`, the Python process is alive, but the Discord bot shows offline and never comes back without a manual restart.
+Purpose: recover automatically from the "green service, dead bot" state where the systemd gateway service is `active`, the Python process is alive, but the Discord bot shows offline and never comes back without a manual restart. As of the 2026-07-06 follow-up, this feature also includes a process-level event-loop watchdog for the sibling "green service, dead gateway" state where the main asyncio loop stops making progress, starving the Discord watchdog and the API server together.
 
 Background / root cause: Discord recovery in the gateway is entirely event-driven and has exactly one trigger — the discord.py `Bot.start()` task actually *exiting*, which fires `DiscordAdapter._handle_bot_task_done`, marks a retryable fatal error, and lets `GatewayRunner._handle_adapter_fatal_error` queue the platform for the existing background reconnect watcher. But discord.py runs with `reconnect=True`, so on a *silent* websocket death (half-open TCP after a WSL/host network or interop blip, or an internal reconnect loop that never re-establishes) the task never exits. Task-never-exits → no fatal error → `_failed_platforms` stays empty → the reconnect watcher (which only ever iterates `_failed_platforms`) sleeps forever. Confirmed live 2026-07-02: an overnight WSL-interop loss drove a Windows-MCP reconnect storm and a ~27GB/252-task event-loop balloon, during which the Discord websocket went non-live with zero `Bot.start()` exit and zero reconnect attempts logged for ~13.5h until a manual `hermes gateway restart`. There was previously **no liveness probe on the main gateway websocket** (the only keepalive in the adapter is the unrelated voice-UDP one), so a wedged-but-not-exited connection was invisible to recovery. This is the "liveness is a lie if it's just `connected && process != nil`" failure class.
 
 Core behavior:
 
 - On `connect()` success the adapter seeds a monotonic last-live timestamp and starts a background `_liveness_watchdog_loop`.
-- The loop probes discord.py's PUBLIC signals only — `Client.is_closed()` and `Client.latency` (a finite float on a healthy connection; `inf`/NaN when there is no live heartbeat). No private `ws` internals are touched, for robustness across discord.py versions.
+- The loop first probes discord.py's public signals — `Client.is_closed()` and `Client.latency` (finite on a healthy connection; `inf`/NaN when there is no live heartbeat) — and then, when available, checks discord.py's keepalive timestamps (`_last_ack` / `_last_recv`) so a stale finite `Client.latency` from a half-dead/CLOSE-WAIT socket cannot refresh liveness forever. The keepalive read is best-effort and falls back to public signals if discord.py changes.
 - Healthy probe refreshes the last-live timestamp. `on_ready` and `on_resumed` also refresh it, so a routine RESUME/heartbeat gap never trips the watchdog.
 - Once the connection has been continuously non-live past `_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS` (default 150s, comfortably beyond discord.py's ~41.25s heartbeat interval + a RESUME window), the watchdog marks a RETRYABLE fatal error (`discord_gateway_wedged`) and calls `_notify_fatal_error()` — the exact same path `_handle_bot_task_done` uses — so the adapter is removed and Discord is re-queued for the existing reconnect watcher. It fires at most once per wedge (returns after notifying); the fresh reconnect adapter starts its own watchdog.
 - The watchdog defers (returns without firing) when `_disconnecting`, when `_running` is false, or when the bot task is already done (that case is owned by `_handle_bot_task_done`), so it never double-reports.
@@ -756,8 +756,11 @@ Core behavior:
 
 Key files:
 
-- `plugins/platforms/discord/adapter.py` (constants `_DISCORD_LIVENESS_PROBE_INTERVAL_SECONDS`, `_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS`; state `_liveness_task`, `_last_liveness_ok`; `_start_liveness_watchdog`, `_cancel_liveness_watchdog`, `_gateway_is_live`, `_liveness_watchdog_loop`; `on_ready`/`on_resumed` refresh; `connect()` start; `disconnect()` cancel)
-- `tests/gateway/test_discord_liveness_watchdog.py` (healthy never-fires, wedged fires retryable, closed-ws non-live, grace-window suppression, done-bot-task defer, disconnecting defer, `_gateway_is_live` public-signal classification)
+- `plugins/platforms/discord/adapter.py` (constants `_DISCORD_LIVENESS_PROBE_INTERVAL_SECONDS`, `_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS`; state `_liveness_task`, `_last_liveness_ok`; `_start_liveness_watchdog`, `_cancel_liveness_watchdog`, `_gateway_is_live`, `_gateway_heartbeat_age_seconds`, `_liveness_watchdog_loop`; `on_ready`/`on_resumed` refresh; `connect()` start; `disconnect()` cancel)
+- `gateway/run.py` (process-level event-loop watchdog: in-loop heartbeat task, out-of-loop monitor thread, `gateway.event_loop_watchdog.*` config, stack dump to `~/.hermes/logs/gateway-event-loop-watchdog.log`, and exit via `GATEWAY_SERVICE_RESTART_EXIT_CODE` so systemd restarts a half-dead gateway)
+- `hermes_cli/config.py` (default `gateway.event_loop_watchdog` config block)
+- `tests/gateway/test_discord_liveness_watchdog.py` (healthy never-fires, wedged fires retryable, closed-ws non-live, stale finite `Client.latency` rejected via keepalive age, grace-window suppression, done-bot-task defer, disconnecting defer, `_gateway_is_live` classification)
+- `tests/gateway/test_gateway_event_loop_watchdog.py` (stale heartbeat exits with service-restart code, fresh heartbeat does not fire, draining suppresses the watchdog, heartbeat task updates the tick)
 
 Commits:
 
@@ -766,12 +769,13 @@ Commits:
 Preservation checks:
 
 ```bash
-python -m pytest tests/gateway/test_discord_liveness_watchdog.py tests/gateway/test_discord_connect.py -o 'addopts=' -q
+python -m pytest tests/gateway/test_discord_liveness_watchdog.py tests/gateway/test_gateway_event_loop_watchdog.py tests/gateway/test_discord_connect.py -o 'addopts=' -q
 ```
 
 Live smoke for Jake's profile:
 
 - Confirm the current gateway process is running the fixed adapter and, on a real transient network drop, the gateway logs either a normal discord.py RESUME (no watchdog action) or, on a true wedge, `Discord gateway wedged: websocket non-live for Ns` followed by the reconnect watcher re-queuing Discord and a fresh `Connected as hermes#...`.
+- For Discord-only stale-socket wedges, simulate/observe a finite stale `Client.latency` with old keepalive timestamps and confirm the adapter logs `Discord gateway wedged: websocket non-live for Ns`, then reconnects. For full-loop wedges like 2026-07-06 (API `:8642` accepts TCP but `/health` times out, and normal gateway housekeeping logs stop), confirm no manual restart is needed: after `gateway.event_loop_watchdog.threshold_seconds`, systemd should restart the service and `gateway-event-loop-watchdog.log` should contain all-thread stack forensics.
 
 ## Complete commit ledger by feature bucket
 
@@ -803,6 +807,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `feabad30f` `2026-05-23` - `feat: improve gateway tool progress labels`
 - `7731faed9` `2026-05-29` - `fix: reduce retry and memory-full noise`
 - `d1ff7aba6` `2026-07-02` - `fix(discord): watchdog for silently-wedged gateway (green service, dead bot)`
+- pending - `fix(gateway): restart on wedged event loop` (section 20 follow-up; exits with service-restart code when the main asyncio loop starves every in-loop watchdog/API endpoint)
 
 ### Voice / STT / busy steering
 

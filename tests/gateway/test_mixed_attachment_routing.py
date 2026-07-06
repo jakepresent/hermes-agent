@@ -1,4 +1,17 @@
-"""Regression tests for mixed image + document gateway attachment routing."""
+"""Regression tests for mixed image + document gateway attachment routing.
+
+Two complementary layers are covered here:
+
+* End-to-end (fork §13 / commit f93fd7510): a PHOTO event that mixes a real
+  image with a document must buffer only the image for native vision and route
+  the document to the readable cached-file context-note path — never send the
+  document bytes to the vision endpoint (which 400s the whole turn).
+
+* Per-attachment classification (upstream #25935): the ``_event_media_is_*``
+  helpers classify each attachment by its OWN mimetype, only falling back to
+  the message-level type (PHOTO/VOICE/AUDIO/VIDEO) when the per-file mimetype is
+  unknown (empty) — platforms that don't populate media_types.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +21,13 @@ import pytest
 
 from gateway.config import Platform
 from gateway.platforms.base import MessageEvent, MessageType
-from gateway.run import GatewayRunner, _build_media_placeholder
+from gateway.run import (
+    GatewayRunner,
+    _build_media_placeholder,
+    _event_media_is_audio,
+    _event_media_is_image,
+    _event_media_is_video,
+)
 from gateway.session import SessionSource
 
 
@@ -87,3 +106,57 @@ def test_media_placeholder_does_not_label_text_document_as_image():
     assert "[User sent an image: /tmp/screen.png]" in placeholder
     assert "[User sent a file: /tmp/auto_film_crop.log]" in placeholder
     assert "[User sent an image: /tmp/auto_film_crop.log]" not in placeholder
+
+
+def _evt(media_urls, media_types, message_type):
+    return SimpleNamespace(
+        media_urls=media_urls,
+        media_types=media_types,
+        message_type=message_type,
+    )
+
+
+# ─── per-attachment classification helpers (upstream #25935) ─────────────────
+
+
+def test_image_trusts_own_mime_over_photo_message_type():
+    evt = _evt(["/c/pic.png", "/c/brief.md"], ["image/png", "text/markdown"], MessageType.PHOTO)
+    assert _event_media_is_image(evt, 0) is True
+    # The document must NOT be promoted to an image by the PHOTO fallback.
+    assert _event_media_is_image(evt, 1) is False
+
+
+def test_unknown_mime_falls_back_to_photo_message_type():
+    # Platforms that don't populate media_types rely on the message-level type.
+    evt = _evt(["/c/photo.jpg"], [""], MessageType.PHOTO)
+    assert _event_media_is_image(evt, 0) is True
+
+
+def test_audio_classified_per_attachment():
+    evt = _evt(["/c/clip.ogg", "/c/shot.png"], ["audio/ogg", "image/png"], MessageType.PHOTO)
+    assert _event_media_is_audio(evt, 0) is True
+    assert _event_media_is_audio(evt, 1) is False
+    assert _event_media_is_image(evt, 1) is True
+
+
+def test_video_classified_per_attachment():
+    evt = _evt(["/c/movie.mp4", "/c/notes.md"], ["video/mp4", "text/markdown"], MessageType.PHOTO)
+    assert _event_media_is_video(evt, 0) is True
+    assert _event_media_is_video(evt, 1) is False
+
+
+# ─── _build_media_placeholder ────────────────────────────────────────────────
+
+
+def test_placeholder_document_in_photo_message_is_not_an_image():
+    evt = _evt(["/c/product.png", "/c/brief.md"], ["image/png", "text/markdown"], MessageType.PHOTO)
+    out = _build_media_placeholder(evt)
+    assert "[User sent an image: /c/product.png]" in out
+    assert "[User sent an image: /c/brief.md]" not in out
+    assert "[User sent a file: /c/brief.md]" in out
+
+
+def test_placeholder_image_with_unknown_mime_uses_photo_fallback():
+    evt = _evt(["/c/photo.jpg"], [""], MessageType.PHOTO)
+    out = _build_media_placeholder(evt)
+    assert "[User sent an image: /c/photo.jpg]" in out

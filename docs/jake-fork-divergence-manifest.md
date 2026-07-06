@@ -772,6 +772,7 @@ Core behavior:
 
 - `/moa <prompt>` echoes the exact prompt back into the originating chat before the fan-out starts, marked with non-conversational metadata so Discord history backfill does not treat the echo as user context. This gives Jake mobile/Discord observability for the expensive one-shot run.
 - MoA acting turns intentionally use the complete-response path even when a gateway/TUI stream consumer exists. Observed bug (2026-07-06): Copilot Claude Opus 4.8 streamed an aggregator preface and terminated with `finish_reason=tool_calls` but no usable streamed tool-call deltas. The outer loop then surfaced only the pre-tool preface ("Let me ground...") and never executed tools. Non-streaming MoA returns the full ChatCompletion with `message.tool_calls` intact, so the normal tool loop can run.
+- General guard: if any provider/MoA path reports `finish_reason=tool_calls` but the normalized response has no executable `tool_calls`, Hermes must not finalize the pre-tool narration. It appends a valid assistant→user nudge asking the model to emit real tool calls or answer in text, then retries; after bounded retries it surfaces a clear partial failure instead of silently treating the preface as final.
 
 Key files:
 

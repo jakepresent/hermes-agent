@@ -605,6 +605,7 @@ def run_conversation(
     codex_ack_continuations = 0
     length_continue_retries = 0
     truncated_tool_call_retries = 0
+    missing_tool_call_payload_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
@@ -4281,6 +4282,53 @@ def run_conversation(
             elif hasattr(agent, "_codex_incomplete_retries"):
                 agent._codex_incomplete_retries = 0
             
+            # If the provider says the turn ended for tool calls but the
+            # normalized payload contains no executable tool calls, do NOT
+            # treat the pre-tool narration as a final answer. This was observed
+            # with MoA over a gateway stream: Copilot Claude Opus ended with
+            # finish_reason=tool_calls, but the stream carried no usable
+            # tool-call deltas, so Discord saw only "Let me ground..." and no
+            # tools ran. Nudge once/twice from a valid assistant→user sequence
+            # and give the model another chance to emit real tool calls.
+            if finish_reason == "tool_calls" and not getattr(assistant_message, "tool_calls", None):
+                missing_tool_call_payload_retries += 1
+                if missing_tool_call_payload_retries <= 2:
+                    agent._buffer_status(
+                        "⚠️ Model signaled tool calls but returned no executable tool payload — asking it to retry"
+                    )
+                    interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
+                    if not (interim_msg.get("content") or "").strip():
+                        interim_msg["content"] = "(tool-call payload missing)"
+                        interim_msg["_empty_recovery_synthetic"] = True
+                    messages.append(interim_msg)
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "You ended the previous turn with finish_reason=tool_calls, "
+                            "but no executable tool_call payload was provided. "
+                            "Either emit the actual tool calls now with valid JSON arguments, "
+                            "or answer in plain text if no tool is needed."
+                        ),
+                        "_empty_recovery_synthetic": True,
+                    })
+                    agent._session_messages = messages
+                    continue
+                agent._flush_status_buffer()
+                _missing_tool_payload_response = (
+                    "The model attempted to call tools, but the provider returned no executable "
+                    "tool-call payload after retrying. Please try again or rephrase the request."
+                )
+                agent._cleanup_task_resources(effective_task_id)
+                agent._persist_session(messages, conversation_history)
+                return {
+                    "final_response": _missing_tool_payload_response,
+                    "messages": messages,
+                    "api_calls": api_call_count,
+                    "completed": False,
+                    "partial": True,
+                    "error": "finish_reason=tool_calls without tool_calls payload",
+                }
+
             # Check for tool calls
             if assistant_message.tool_calls:
                 if not agent.quiet_mode:

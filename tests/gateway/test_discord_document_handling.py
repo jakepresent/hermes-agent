@@ -115,13 +115,17 @@ def make_attachment(
     content_type: Optional[str],
     size: int = 1024,
     url: str = "https://cdn.discordapp.com/attachments/fake/file",
+    raw_bytes: Optional[bytes] = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    attachment = SimpleNamespace(
         filename=filename,
         content_type=content_type,
         size=size,
         url=url,
     )
+    if raw_bytes is not None:
+        attachment.read = AsyncMock(return_value=raw_bytes)
+    return attachment
 
 
 def make_message(attachments: list, content: str = "") -> SimpleNamespace:
@@ -226,6 +230,44 @@ class TestIncomingDocumentHandling:
         assert "[Content of btsnoop_hci.log]:" in event.text
         assert "BLE trace line 1" in event.text
         assert "please inspect this" in event.text
+
+    @pytest.mark.asyncio
+    async def test_vtt_content_injected(self, adapter):
+        """Subtitle/transcript files should be treated as text attachments."""
+        file_content = b"WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nhello"
+
+        with _mock_aiohttp_download(file_content):
+            msg = make_message(
+                attachments=[make_attachment(filename="meeting.vtt", content_type="text/vtt")],
+                content="summarize transcript",
+            )
+            await adapter._handle_message(msg)
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.DOCUMENT
+        assert event.media_types == ["text/vtt"]
+        assert "[Content of meeting.vtt]:" in event.text
+        assert "WEBVTT" in event.text
+        assert "summarize transcript" in event.text
+
+    @pytest.mark.asyncio
+    async def test_json_content_injected(self, adapter):
+        """Small JSON attachments should be visible as text context."""
+        file_content = b'{"status":"ok"}'
+
+        with _mock_aiohttp_download(file_content):
+            msg = make_message(
+                attachments=[make_attachment(filename="state.json", content_type="application/json")],
+                content="inspect state",
+            )
+            await adapter._handle_message(msg)
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.DOCUMENT
+        assert event.media_types == ["application/json"]
+        assert "[Content of state.json]:" in event.text
+        assert '{"status":"ok"}' in event.text
+        assert "inspect state" in event.text
 
     @pytest.mark.asyncio
     async def test_oversized_document_skipped(self, adapter):
@@ -370,20 +412,49 @@ class TestIncomingDocumentHandling:
     @pytest.mark.asyncio
     async def test_image_attachment_unaffected(self, adapter):
         """Image attachments should still go through the image path, not the document path."""
-        with patch(
-            "plugins.platforms.discord.adapter.cache_image_from_url",
-            new_callable=AsyncMock,
-            return_value="/tmp/cached_image.png",
-        ):
-            msg = make_message([
-                make_attachment(filename="photo.png", content_type="image/png")
-            ])
-            await adapter._handle_message(msg)
+        msg = make_message([
+            make_attachment(
+                filename="photo.png",
+                content_type="image/png",
+                raw_bytes=b"\x89PNG\r\n\x1a\n" + b"X" * 8,
+            )
+        ])
+        await adapter._handle_message(msg)
 
         event = adapter.handle_message.call_args[0][0]
         assert event.message_type == MessageType.PHOTO
-        assert event.media_urls == ["/tmp/cached_image.png"]
+        assert len(event.media_urls) == 1
+        assert os.path.exists(event.media_urls[0])
         assert event.media_types == ["image/png"]
+
+    @pytest.mark.asyncio
+    async def test_mixed_image_and_log_keeps_log_text_but_only_image_is_photo_media(self, adapter):
+        """A message can carry both a screenshot and a log without routing the log as an image."""
+        msg = make_message(
+            [
+                make_attachment(
+                    filename="screenshot.png",
+                    content_type="image/png",
+                    raw_bytes=b"\x89PNG\r\n\x1a\n" + b"X" * 8,
+                ),
+                make_attachment(
+                    filename="auto_film_crop.log",
+                    content_type="text/plain",
+                    raw_bytes=b"preflight failed\npython is arm64",
+                ),
+            ],
+            content="what happened?",
+        )
+        await adapter._handle_message(msg)
+
+        event = adapter.handle_message.call_args[0][0]
+        assert event.message_type == MessageType.PHOTO
+        assert len(event.media_urls) == 2
+        assert event.media_types[0] == "image/png"
+        assert event.media_types[1] == "text/plain"
+        assert "[Content of auto_film_crop.log]:" in event.text
+        assert "python is arm64" in event.text
+        assert "what happened?" in event.text
 
 
 class TestAllowAnyAttachment:

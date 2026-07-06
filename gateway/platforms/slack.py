@@ -2723,23 +2723,10 @@ class SlackAdapter(BasePlatformAdapter):
                     logger.debug("[Slack] Cached user document: %s", cached_path)
 
                     # Inject small text-ish files directly into the prompt so
-                    # snippets like JSON/YAML/configs are actually visible to the agent.
+                    # snippets like transcripts, JSON/YAML/configs are actually visible to the agent.
                     MAX_TEXT_INJECT_BYTES = 100 * 1024
-                    TEXT_INJECT_EXTENSIONS = {
-                        ".md",
-                        ".txt",
-                        ".csv",
-                        ".log",
-                        ".json",
-                        ".xml",
-                        ".yaml",
-                        ".yml",
-                        ".toml",
-                        ".ini",
-                        ".cfg",
-                    }
                     if (
-                        ext in TEXT_INJECT_EXTENSIONS
+                        doc_mime.startswith(("text/", "application/json", "application/jsonl", "application/xml", "application/yaml", "application/toml"))
                         and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES
                     ):
                         try:

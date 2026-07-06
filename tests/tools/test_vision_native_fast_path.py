@@ -36,11 +36,14 @@ def test_vision_analyze_schema_discourages_redundant_native_rechecks():
     """The tool description shapes model choice, so keep it conservative."""
     description = VISION_ANALYZE_SCHEMA["description"]
 
-    assert "cannot already see the pixels" in description
-    assert "native vision is unavailable or insufficient" in description
-    assert "not call this as a routine re-check" in description
-    assert "vision-capable model; inspect those directly" in description
+    assert "Fallback image analysis" in description
+    assert "active model cannot receive images natively" in description
+    assert "Do not call this when the active model has native vision" in description
+    assert "already attached/visible" in description
+    assert "inspect those pixels directly" in description
+    assert "browser_vision's native screenshot path" in description
     assert "call this any time" not in description
+    assert "targeted second pass" not in description
 
 
 # ─── _supports_media_in_tool_results ─────────────────────────────────────────

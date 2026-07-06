@@ -5705,9 +5705,9 @@ class DiscordAdapter(BasePlatformAdapter):
                                 "document" if in_allowlist else "attachment",
                                 cached_path,
                             )
-                            # Inject text content for plain-text documents (capped at 100 KB)
+                            # Inject text content for text-like documents (capped at 100 KB)
                             MAX_TEXT_INJECT_BYTES = 100 * 1024
-                            if in_allowlist and ext in {".md", ".txt", ".log"} and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                            if in_allowlist and doc_mime.startswith(("text/", "application/json", "application/jsonl", "application/xml", "application/yaml", "application/toml")) and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                                 try:
                                     text_content = raw_bytes.decode("utf-8")
                                     display_name = att.filename or f"document{ext}"

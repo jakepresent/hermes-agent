@@ -366,6 +366,32 @@ class TestBuildNativeContentParts:
         assert str(good) in text_part["text"]
         assert str(missing) not in text_part["text"]
 
+    def test_non_image_local_file_is_skipped_not_mislabeled_jpeg(self, tmp_path: Path):
+        """A text/log attachment must not become a fake JPEG native image part."""
+        log_file = tmp_path / "auto_film_crop.log"
+        log_file.write_text("[2026-07-04] preflight failed", encoding="utf-8")
+
+        parts, skipped = build_native_content_parts("inspect", [str(log_file)])
+
+        assert skipped == [str(log_file)]
+        assert parts == [{"type": "text", "text": "inspect"}]
+
+    def test_mixed_image_and_non_image_only_attaches_real_image(self, tmp_path: Path):
+        img = tmp_path / "screen.png"
+        img.write_bytes(_png_bytes())
+        log_file = tmp_path / "auto_film_crop.log"
+        log_file.write_text("log text", encoding="utf-8")
+
+        parts, skipped = build_native_content_parts("inspect", [str(img), str(log_file)])
+
+        assert skipped == [str(log_file)]
+        image_parts = [p for p in parts if p.get("type") == "image_url"]
+        assert len(image_parts) == 1
+        assert image_parts[0]["image_url"]["url"].startswith("data:image/png;base64,")
+        text_part = next(p for p in parts if p.get("type") == "text")
+        assert str(img) in text_part["text"]
+        assert str(log_file) not in text_part["text"]
+
     def test_multiple_images(self, tmp_path: Path):
         img1 = tmp_path / "a.png"
         img2 = tmp_path / "b.png"

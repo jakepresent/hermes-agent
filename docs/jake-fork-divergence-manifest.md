@@ -854,6 +854,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `89389b4df` `2026-05-28` - `fix: skip GitHub Responses message item replay`
 - `ab4568296` `2026-06-02` - `feat: add fast OCR extraction tool`
 - `ab55c4655` `2026-07-04` - `fix: thread aggregate image shrink budget`
+- pending - tighten `vision_analyze` fallback-only guidance and keep text/log/document attachments out of native image parts.
 
 ### MCP resilience and schema compatibility
 
@@ -935,6 +936,9 @@ python -m pytest \
   tests/acp/test_session.py \
   tests/acp_adapter/test_acp_commands.py \
   tests/run_agent/test_image_shrink_recovery.py \
+  tests/agent/test_image_routing.py \
+  tests/gateway/test_mixed_attachment_routing.py \
+  tests/gateway/test_discord_document_handling.py \
   tests/tools/test_ocr_extract_tool.py \
   tests/tools/test_vision_native_fast_path.py \
   tests/run_agent/test_run_agent_codex_responses.py \

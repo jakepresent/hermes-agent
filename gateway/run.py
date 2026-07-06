@@ -2007,7 +2007,10 @@ def _build_media_placeholder(event) -> str:
     media_types = getattr(event, "media_types", None) or []
     for i, url in enumerate(media_urls):
         mtype = media_types[i] if i < len(media_types) else ""
-        if mtype.startswith("image/") or getattr(event, "message_type", None) == MessageType.PHOTO:
+        if mtype.startswith("image/") or (
+            getattr(event, "message_type", None) == MessageType.PHOTO
+            and _is_image_media_attachment(mtype, url)
+        ):
             parts.append(f"[User sent an image: {url}]")
         elif mtype.startswith("audio/"):
             parts.append(f"[User sent audio: {url}]")
@@ -2043,6 +2046,17 @@ def _build_document_context_note(display_name: str, agent_path: str, mtype: str)
         f"terminal tool or the ocr-and-documents skill — before answering, instead "
         f"of asking the user to paste the contents.]"
     )
+
+
+def _is_image_media_attachment(mtype: str, path: str = "") -> bool:
+    """Return True only when a media item is an actual image attachment."""
+    mime = str(mtype or "").split(";", 1)[0].strip().lower()
+    if mime.startswith("image/") or mime in {"image", "photo", "picture"}:
+        return True
+    if mime in {"", "application/octet-stream", "unknown"} and path:
+        ext = os.path.splitext(str(path))[1].lower()
+        return ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    return False
 
 
 def _format_duration(seconds: float) -> str:
@@ -8717,7 +8731,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             audio_paths = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
-                if mtype.startswith("image/") or event.message_type == MessageType.PHOTO:
+                if _is_image_media_attachment(mtype, path):
                     image_paths.append(path)
                 # MessageType.AUDIO = audio file attachment (e.g. .mp3, .m4a) — never STT
                 # MessageType.VOICE = voice message (Opus/OGG) — always STT
@@ -8848,14 +8862,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
                 message_text = f"{_note}\n\n{message_text}"
 
-        if event.media_urls and event.message_type == MessageType.DOCUMENT:
+        if event.media_urls:
             import mimetypes as _mimetypes
             from tools.credential_files import to_agent_visible_cache_path
 
-            _TEXT_EXTENSIONS = {".txt", ".md", ".csv", ".log", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg"}
+            _TEXT_EXTENSIONS = {".txt", ".text", ".md", ".markdown", ".csv", ".tsv", ".log", ".vtt", ".srt", ".json", ".jsonl", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".diff", ".patch"}
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
-                if mtype in {"", "application/octet-stream"}:
+                if _is_image_media_attachment(mtype, path) or mtype.startswith(("audio/", "video/")):
+                    continue
+                if mtype in {"", "application/octet-stream", "unknown"}:
                     _ext = os.path.splitext(path)[1].lower()
                     if _ext in _TEXT_EXTENSIONS:
                         mtype = "text/plain"

@@ -6416,9 +6416,9 @@ class TelegramAdapter(BasePlatformAdapter):
                 event.media_types = [mime_type]
                 logger.info("[Telegram] Cached user document at %s", cached_path)
 
-                # For text files, inject content into event.text (capped at 100 KB)
+                # For text-like files, inject content into event.text (capped at 100 KB)
                 MAX_TEXT_INJECT_BYTES = 100 * 1024
-                if ext in {".md", ".txt"} and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
+                if mime_type.startswith(("text/", "application/json", "application/jsonl", "application/xml", "application/yaml", "application/toml")) and len(raw_bytes) <= MAX_TEXT_INJECT_BYTES:
                     try:
                         text_content = raw_bytes.decode("utf-8")
                         display_name = original_filename or f"document{ext}"
@@ -6430,7 +6430,7 @@ class TelegramAdapter(BasePlatformAdapter):
                             event.text = injection
                     except UnicodeDecodeError:
                         logger.warning(
-                            "[Telegram] Could not decode text file as UTF-8, skipping content injection",
+                            "[Telegram] Could not decode text-like file as UTF-8, skipping content injection",
                             exc_info=True,
                         )
 

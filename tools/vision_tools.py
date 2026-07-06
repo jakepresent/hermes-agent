@@ -1471,16 +1471,14 @@ from tools.registry import registry, tool_error, tool_result
 VISION_ANALYZE_SCHEMA = {
     "name": "vision_analyze",
     "description": (
-        "Load an image only when the active model cannot already see the "
-        "pixels, or when native vision is unavailable or insufficient. Do "
-        "not call this as a routine re-check for images already attached to "
-        "a vision-capable model; inspect those directly. Use it for "
-        "non-visible image URLs/paths, tool/browser screenshots that only "
-        "produced a file path, non-vision model fallback, or a deliberate "
-        "targeted second pass after native inspection. Accepts a URL, local "
-        "file path, or data URL. When native fast path is available, the "
-        "image is attached to the next model turn; otherwise Hermes falls "
-        "back to an auxiliary vision description."
+        "Fallback image analysis for sessions where the active model cannot "
+        "receive images natively. Do not call this when the active model has "
+        "native vision or when an image is already attached/visible in the "
+        "conversation; inspect those pixels directly instead. For browser/page "
+        "screenshots, use browser_vision's native screenshot path. For exact "
+        "text extraction, use ocr_extract only when OCR/transcription was "
+        "requested or a reusable text artifact is needed. Accepts a URL, local "
+        "file path, or data URL for non-native-vision fallback."
     ),
     "parameters": {
         "type": "object",

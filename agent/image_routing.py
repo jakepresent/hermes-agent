@@ -74,6 +74,18 @@ _IMAGE_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Native model/provider image blocks are only reliable for the formats the
+# common OpenAI/Responses-style image APIs accept. Other image-ish files (BMP,
+# TIFF, HEIC, SVG) should be converted by an explicit tool path, not mislabeled
+# as JPEG and sent inline.
+_NATIVE_IMAGE_MIME_TYPES = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/jpg",
+    "image/gif",
+    "image/webp",
+})
+
 
 def extract_image_refs(text: str) -> Tuple[List[str], List[str]]:
     """Scan free-form text for image references the model should see.
@@ -396,21 +408,34 @@ def _sniff_mime_from_bytes(raw: bytes) -> Optional[str]:
     return None
 
 
-def _guess_mime(path: Path, raw: Optional[bytes] = None) -> str:
-    """Return image MIME type for *path*.
+def _guess_mime(path: Path, raw: Optional[bytes] = None) -> Optional[str]:
+    """Return a supported native image MIME type for *path*.
 
-    If *raw* bytes are provided, magic-byte sniffing wins (authoritative).
-    Otherwise we fall back to ``mimetypes`` then suffix-based defaults.
+    If *raw* bytes are provided, magic-byte sniffing wins (authoritative). When
+    bytes do not look like a supported image, return None instead of guessing
+    from the suffix. That prevents text/log/PDF/document attachments from being
+    mislabeled as ``image/jpeg`` and rejected by the provider before the model
+    sees the turn.
     """
     if raw is not None:
         sniffed = _sniff_mime_from_bytes(raw)
         if sniffed:
-            return sniffed
+            if sniffed in _NATIVE_IMAGE_MIME_TYPES:
+                return "image/jpeg" if sniffed == "image/jpg" else sniffed
+            logger.warning(
+                "image_routing: %s has unsupported native image MIME %s; skipping",
+                path, sniffed,
+            )
+            return None
+        logger.warning(
+            "image_routing: %s does not contain supported image bytes; skipping",
+            path,
+        )
+        return None
     mime, _ = mimetypes.guess_type(str(path))
-    if mime and mime.startswith("image/"):
-        return mime
-    # mimetypes on some Linux distros mis-maps .jpg; default to jpeg when
-    # the suffix looks imagey.
+    if mime in _NATIVE_IMAGE_MIME_TYPES:
+        return "image/jpeg" if mime == "image/jpg" else mime
+    # No bytes available: accept only unambiguous supported image suffixes.
     suffix = path.suffix.lower()
     return {
         ".jpg": "image/jpeg",
@@ -418,8 +443,7 @@ def _guess_mime(path: Path, raw: Optional[bytes] = None) -> str:
         ".png": "image/png",
         ".gif": "image/gif",
         ".webp": "image/webp",
-        ".bmp": "image/bmp",
-    }.get(suffix, "image/jpeg")
+    }.get(suffix)
 
 
 def _file_to_data_url(path: Path) -> Optional[str]:
@@ -440,6 +464,8 @@ def _file_to_data_url(path: Path) -> Optional[str]:
         logger.warning("image_routing: failed to read %s — %s", path, exc)
         return None
     mime = _guess_mime(path, raw=raw)
+    if not mime:
+        return None
     b64 = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{b64}"
 

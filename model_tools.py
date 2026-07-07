@@ -276,11 +276,93 @@ def _clear_tool_defs_cache() -> None:
     _tool_defs_cache.clear()
 
 
+def _resolve_active_tool_filter_runtime(
+    active_provider: Optional[str] = None,
+    active_model: Optional[str] = None,
+) -> tuple[str, str]:
+    """Return provider/model used by runtime-sensitive tool exposure gates."""
+    provider = active_provider.strip().lower() if isinstance(active_provider, str) else ""
+    model = active_model.strip() if isinstance(active_model, str) else ""
+    if provider and model:
+        return provider, model
+    try:
+        from agent.auxiliary_client import _read_main_provider, _read_main_model
+        if not provider:
+            provider = (_read_main_provider() or "").strip().lower()
+        if not model:
+            model = (_read_main_model() or "").strip()
+    except Exception:
+        pass
+    return provider, model
+
+
+def _native_vision_ocr_opt_in_enabled(cfg: Dict[str, Any] | None) -> bool:
+    """Whether to keep ``ocr_extract`` exposed even for native-vision turns."""
+    try:
+        from utils import is_truthy_value
+        from hermes_cli.config import cfg_get
+
+        return is_truthy_value(
+            cfg_get(cfg or {}, "agent", "expose_ocr_extract_with_native_vision"),
+            default=False,
+        )
+    except Exception:
+        return False
+
+
+def _should_hide_ocr_extract_for_native_vision(
+    active_provider: Optional[str] = None,
+    active_model: Optional[str] = None,
+) -> bool:
+    """Hide OCR when the active image path is native unless explicitly opted in.
+
+    ``ocr_extract`` is still implemented and can be re-enabled, but exposing it
+    by default to a native-vision model invites redundant confidence-check calls
+    through a weaker auxiliary OCR path. If inbound images are routed as native
+    pixels for this provider/model, the main model should read/transcribe them
+    directly.
+    """
+    provider, model = _resolve_active_tool_filter_runtime(active_provider, active_model)
+    if not provider or not model:
+        return False
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+    except Exception:
+        cfg = {}
+    if _native_vision_ocr_opt_in_enabled(cfg):
+        return False
+    try:
+        from agent.image_routing import decide_image_input_mode
+        return decide_image_input_mode(provider, model, cfg) == "native"
+    except Exception:
+        return False
+
+
+def _filter_native_vision_redundant_tools(
+    tool_defs: List[Dict[str, Any]],
+    *,
+    active_provider: Optional[str] = None,
+    active_model: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Remove tools that are redundant/misleading for native-vision sessions."""
+    if not any(t.get("function", {}).get("name") == "ocr_extract" for t in tool_defs):
+        return tool_defs
+    if not _should_hide_ocr_extract_for_native_vision(active_provider, active_model):
+        return tool_defs
+    return [
+        t for t in tool_defs
+        if t.get("function", {}).get("name") != "ocr_extract"
+    ]
+
+
 def get_tool_definitions(
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    active_provider: Optional[str] = None,
+    active_model: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Get tool definitions for model API calls with toolset-based filtering.
@@ -296,6 +378,9 @@ def get_tool_definitions(
             tool_search / tool_describe bridge handlers so they can read the
             real catalog, not the already-collapsed one. Public callers should
             leave this False.
+        active_provider/active_model: Optional active runtime identity for
+            runtime-sensitive tool exposure gates. When omitted, Hermes falls
+            back to the current auxiliary-client runtime/config values.
 
     Returns:
         Filtered list of OpenAI-format tool definitions.
@@ -308,6 +393,11 @@ def get_tool_definitions(
     # user-visible config edits that affect dynamic schemas (execute_code
     # mode, discord action allowlist, etc.) without needing an explicit
     # invalidate hook on every config-writer.
+    resolved_provider, resolved_model = _resolve_active_tool_filter_runtime(
+        active_provider,
+        active_model,
+    )
+
     if quiet_mode:
         try:
             from hermes_cli.config import get_config_path
@@ -323,6 +413,8 @@ def get_tool_definitions(
             cfg_fp,
             bool(os.environ.get("HERMES_KANBAN_TASK")),
             bool(skip_tool_search_assembly),
+            resolved_provider,
+            resolved_model,
         )
         cached = _tool_defs_cache.get(cache_key)
         if cached is not None:
@@ -334,8 +426,14 @@ def get_tool_definitions(
             # schemas are treated as read-only by all known callers.
             return list(cached)
 
-    result = _compute_tool_definitions(enabled_toolsets, disabled_toolsets, quiet_mode,
-                                       skip_tool_search_assembly=skip_tool_search_assembly)
+    result = _compute_tool_definitions(
+        enabled_toolsets,
+        disabled_toolsets,
+        quiet_mode,
+        skip_tool_search_assembly=skip_tool_search_assembly,
+        active_provider=resolved_provider,
+        active_model=resolved_model,
+    )
     if quiet_mode:
         # Cache the freshly-computed list, but hand callers a shallow copy so
         # downstream mutations (e.g. run_agent appending memory/LCM tool
@@ -359,6 +457,8 @@ def _compute_tool_definitions(
     disabled_toolsets: Optional[List[str]] = None,
     quiet_mode: bool = False,
     skip_tool_search_assembly: bool = False,
+    active_provider: Optional[str] = None,
+    active_model: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Uncached implementation of :func:`get_tool_definitions`."""
     # Determine which tool names the caller wants
@@ -441,6 +541,14 @@ def _compute_tool_definitions(
     # Ask the registry for schemas (only returns tools whose check_fn passes)
     filtered_tools = registry.get_definitions(tools_to_include, quiet=quiet_mode)
 
+    # Native-vision main models can read/transcribe attached pixels directly;
+    # exposing OCR as a routine tool nudges them into redundant auxiliary calls.
+    filtered_tools = _filter_native_vision_redundant_tools(
+        filtered_tools,
+        active_provider=active_provider,
+        active_model=active_model,
+    )
+
     # The set of tool names that actually passed check_fn filtering.
     # Use this (not tools_to_include) for any downstream schema that references
     # other tools by name — otherwise the model sees tools mentioned in
@@ -508,6 +616,22 @@ def _compute_tool_definitions(
                         "function": {**td["function"], "description": desc},
                     }
                     break
+
+    # If ocr_extract is hidden for this session, make sure sibling vision tools
+    # do not advertise the missing name and trigger a hallucinated call.
+    if "vision_analyze" in available_tool_names and "ocr_extract" not in available_tool_names:
+        for i, td in enumerate(filtered_tools):
+            if td.get("function", {}).get("name") == "vision_analyze":
+                desc = td["function"].get("description", "")
+                desc = desc.replace(
+                    "For exact text extraction, use ocr_extract only when OCR/transcription was requested or a reusable text artifact is needed. ",
+                    "For exact text extraction, transcribe already-visible pixels directly when native vision is available; otherwise use this fallback path only when native vision is unavailable. ",
+                )
+                filtered_tools[i] = {
+                    "type": "function",
+                    "function": {**td["function"], "description": desc},
+                }
+                break
 
     if not quiet_mode:
         if filtered_tools:

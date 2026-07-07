@@ -1076,6 +1076,11 @@ DEFAULT_CONFIG = {
         # remains available as a tool regardless of this setting — the routing
         # only controls how inbound user images are presented.
         "image_input_mode": "auto",
+        # Keep OCR off the model-facing tool schema when inbound images are
+        # routed natively. Native-vision models should read/transcribe attached
+        # pixels directly; expose ocr_extract only for explicit legacy/automation
+        # use by setting this true.
+        "expose_ocr_extract_with_native_vision": False,
         "disabled_toolsets": [],
     },
     

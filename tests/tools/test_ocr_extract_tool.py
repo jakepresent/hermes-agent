@@ -212,3 +212,83 @@ def test_ocr_extract_is_exposed_in_default_discord_toolset():
     assert "ocr_extract" in tool_names
     assert "ocr_extract" in exposed_names
 
+def _force_vision_tools_available(monkeypatch):
+    from tools.registry import invalidate_check_fn_cache, registry
+    import model_tools
+
+    for tool_name in ("vision_analyze", "ocr_extract"):
+        entry = registry.get_entry(tool_name)
+        assert entry is not None
+        monkeypatch.setattr(entry, "check_fn", lambda: True)
+    invalidate_check_fn_cache()
+    model_tools._clear_tool_defs_cache()
+    return model_tools
+
+
+def test_ocr_extract_hidden_from_tool_schema_when_active_images_route_native(monkeypatch):
+    model_tools = _force_vision_tools_available(monkeypatch)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"agent": {"image_input_mode": "native"}},
+    )
+    model_tools._clear_tool_defs_cache()
+
+    tools = model_tools.get_tool_definitions(
+        enabled_toolsets=["vision"],
+        quiet_mode=True,
+        active_provider="copilot",
+        active_model="gpt-5.5",
+    )
+    names = {tool["function"]["name"] for tool in tools}
+
+    assert "ocr_extract" not in names
+    vision_desc = next(
+        tool["function"]["description"]
+        for tool in tools
+        if tool["function"]["name"] == "vision_analyze"
+    )
+    assert "ocr_extract" not in vision_desc
+
+
+def test_ocr_extract_stays_exposed_when_images_route_to_text(monkeypatch):
+    model_tools = _force_vision_tools_available(monkeypatch)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {"agent": {"image_input_mode": "text"}},
+    )
+    model_tools._clear_tool_defs_cache()
+
+    tools = model_tools.get_tool_definitions(
+        enabled_toolsets=["vision"],
+        quiet_mode=True,
+        active_provider="copilot",
+        active_model="gpt-5.5",
+    )
+    names = {tool["function"]["name"] for tool in tools}
+
+    assert "ocr_extract" in names
+
+
+def test_ocr_extract_native_vision_opt_in_keeps_tool_exposed(monkeypatch):
+    model_tools = _force_vision_tools_available(monkeypatch)
+    monkeypatch.setattr(
+        "hermes_cli.config.load_config",
+        lambda: {
+            "agent": {
+                "image_input_mode": "native",
+                "expose_ocr_extract_with_native_vision": True,
+            }
+        },
+    )
+    model_tools._clear_tool_defs_cache()
+
+    tools = model_tools.get_tool_definitions(
+        enabled_toolsets=["vision"],
+        quiet_mode=True,
+        active_provider="copilot",
+        active_model="gpt-5.5",
+    )
+    names = {tool["function"]["name"] for tool in tools}
+
+    assert "ocr_extract" in names
+

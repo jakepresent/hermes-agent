@@ -4950,6 +4950,8 @@ def refresh_agent_mcp_tools(
             enabled_toolsets=enabled,
             disabled_toolsets=disabled,
             quiet_mode=quiet_mode,
+            active_provider=getattr(agent, "provider", "") or "",
+            active_model=getattr(agent, "model", "") or "",
         )
         or []
     )

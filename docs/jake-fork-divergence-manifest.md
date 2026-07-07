@@ -308,15 +308,17 @@ python -m pytest tests/gateway/test_busy_command.py tests/gateway/test_busy_sess
 
 Purpose: make approval and clarify prompts visible, auditable, and safe in Discord, especially on mobile.
 
+Status note (2026-07-07): upstream PR #60245 merged the narrow Discord embed-invisibility fix from Jake's salvaged #52518 and generalized it to the sibling prompt surfaces. On the next upstream update, do **not** reapply the baseline change that mirrors `send_exec_approval`, `send_slash_confirm`, `send_clarify`, and `send_update_prompt` payloads into plain Discord message content. Preserve only the fork-unique residue below: richer security evidence, full numbered clarify choices, invisible-Unicode rendering, sensitive-path detection, Tirith fatigue reduction, and configured approval pings.
+
 Core behavior:
 
-- Approval prompts are content-first: critical command/reason text appears in message content, not only in embeds/components.
-- Security-scan approvals show detected suspicious strings, command preview, and visible rendering for invisible Unicode characters.
+- Baseline now upstream: interactive Discord prompts carry their primary payload in plain message content next to buttons, not only in embeds/components. Do not re-preserve this baseline after PR #60245 is in the integrated upstream base.
+- Fork-unique approval prompt behavior: security-scan approvals show detected suspicious strings, command preview, and visible rendering for invisible Unicode characters.
 - Sensitive home-path detection is restored.
 - Command context remains visible in security approvals.
 - Avoidable Tirith findings that the agent can rewrite safely, currently `pipe_to_interpreter`, are model-facing self-correction blocks instead of user approval prompts.
 - Tirith wrapper suppresses known false-positive warn-only findings before they reach the approval UI, including exact package-name self-matches from `threat_package_similar_name` (for example `aiohttp ≈ aiohttp`).
-- Discord clarify prompts are content-first: full question and full numbered choices appear in message content, while buttons are compact selectors (`1`, `2`, `3`, etc.) plus `Other`.
+- Fork-unique clarify behavior: full question and full numbered choices appear in message content, while buttons are compact selectors (`1`, `2`, `3`, etc.) plus `Other`.
 - Clarify open-ended prompts use plain message content with a reply instruction, not embed-only text.
 - Clarify question/choice text renders invisible/format Unicode visibly (for example `[U+FE0F]`).
 - Approval pings still work when configured and should prepend/augment the rich prompt rather than replacing it.

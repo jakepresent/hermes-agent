@@ -532,8 +532,8 @@ Core behavior:
 
 - Native image payloads shrink/retry after provider 413 or image-size errors.
 - Aggregate native image payloads can be shrunk, not just individual tool images.
-- OCR exposes a dedicated fast `ocr_extract` transcription tool separate from general visual reasoning, but its schema tells vision-capable main models not to use it as a redundant confidence check for already-attached images.
-- `vision_analyze` is framed as an escape hatch for non-visible images, non-vision fallback, or targeted second-pass inspection when native vision is insufficient, not as a routine re-check for already-attached images.
+- OCR exposes a dedicated fast `ocr_extract` transcription tool separate from general visual reasoning, but native-vision sessions hide it from the model-facing schema by default so already-attached images are read directly. `agent.expose_ocr_extract_with_native_vision: true` opts the tool back in for legacy/automation use.
+- `vision_analyze` is framed as an escape hatch for non-visible images, non-vision fallback, or targeted second-pass inspection when native vision is insufficient, not as a routine re-check for already-attached images. When `ocr_extract` is hidden, the `vision_analyze` schema also stops mentioning the missing tool name.
 - Vision routing fast path continues to work with native image support.
 
 Key files:
@@ -551,6 +551,7 @@ Commits:
 
 - `88228aaeb` - shrink aggregate native image payloads on 413.
 - `ab4568296` - add fast OCR extraction tool.
+- `78fac29d5` - hide `ocr_extract` from native-vision tool schemas by default; add `agent.expose_ocr_extract_with_native_vision` opt-in.
 - `716e70408` - route the 413 image-shrink guard through `TurnRetryState` so native-image 413 recovery cannot crash with `UnboundLocalError` before retrying.
 - `ab55c4655` - thread the aggregate image-payload budget through the shrink helper so native-image 413 recovery cannot crash with a keyword mismatch and can shrink multi-image batches below the request budget.
 

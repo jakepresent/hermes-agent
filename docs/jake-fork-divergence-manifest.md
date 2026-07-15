@@ -795,6 +795,31 @@ Live smoke:
 - Run `/moa <prompt>` in Discord and confirm a `MoA prompt:` echo appears first.
 - Use a prompt that requires reading files or checking the repo; confirm the run continues into tool execution rather than stopping after a planning preface.
 
+### 22. Cached gateway-history replay consistency
+
+Purpose: distinguish a real lagging session write from the intentional cleanup performed before replaying persisted transcript rows.
+
+Core behavior:
+
+- The gateway compares persisted and cached histories only after both have passed through the same replay conversion. Session metadata and interrupted/dangling tool tails are intentionally excluded from a model replay and must not look like missing SQLite rows.
+- A genuinely longer live replay history still wins, preserving in-process context when disk persistence really has not caught up.
+- The guard no longer emits false `possible FTS write corruption` warnings for healthy transcripts, and it does not reintroduce tool tails that replay cleanup deliberately removed.
+
+Key files:
+
+- `gateway/run.py` (`_select_cached_replay_history`)
+- `tests/gateway/test_cached_history_replay_guard.py`
+
+Commits:
+
+- `bafe9702c` - compare cached and persisted histories after identical replay cleanup.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/gateway/test_cached_history_replay_guard.py tests/gateway/test_agent_cache.py tests/agent/test_replay_cleanup.py -o 'addopts=' -q
+```
+
 ## Complete commit ledger by feature bucket
 
 This is the raw commit map from the audited branch, grouped as the recommended history-cleanup overlay. It intentionally avoids rewriting history on a published branch.
@@ -826,6 +851,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `7731faed9` `2026-05-29` - `fix: reduce retry and memory-full noise`
 - `d1ff7aba6` `2026-07-02` - `fix(discord): watchdog for silently-wedged gateway (green service, dead bot)`
 - `87b33d621` - Gateway watchdog follow-up: reject stale finite Discord heartbeat latency and restart on wedged gateway event loop.
+- `bafe9702c` `2026-07-15` - `fix(gateway): compare cached replay history consistently`.
 
 ### Voice / STT / busy steering
 

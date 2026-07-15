@@ -1041,22 +1041,41 @@ def _select_cached_agent_history(
     persisted_history: List[Dict[str, Any]],
     live_history: Any,
 ) -> List[Dict[str, Any]]:
-    """Prefer a cached agent's live in-memory transcript over a shorter
-    persisted one.
+    """Prefer a cached agent's live replay history over a shorter persisted one.
 
-    Guards the FTS write-corruption case (#50502): when message writes fail
-    silently through corrupt FTS triggers, the next turn reloads a stale/empty
-    ``conversation_history`` from disk even though the same cached ``AIAgent``
-    still holds the full live ``_session_messages``. Replacing the live
-    transcript with that shorter persisted copy causes immediate same-session
-    amnesia. When the live transcript is strictly longer, keep it.
-
-    Returns ``persisted_history`` unchanged unless the live copy is a longer
-    list, in which case a copy of the live transcript is returned.
+    Both inputs must already be in the agent replay shape. Comparing a raw
+    transcript with replay history is invalid: replay deliberately omits session
+    metadata and interrupted/dangling tool tails, which otherwise looks exactly
+    like a failed persistence write.
     """
     if isinstance(live_history, list) and len(live_history) > len(persisted_history):
         return list(live_history)
     return persisted_history
+
+
+def _select_cached_replay_history(
+    persisted_history: List[Dict[str, Any]],
+    live_history: Any,
+    *,
+    channel_prompt: Optional[str] = None,
+    inject_timestamps: bool = False,
+) -> List[Dict[str, Any]]:
+    """Compare cached and persisted history after identical replay cleanup.
+
+    ``SessionStore.load_transcript()`` returns canonical raw rows, while a
+    cached ``AIAgent`` retains its raw message list. Normalizing only the disk
+    side made intentional replay cleanup look like a shorter persisted
+    transcript, producing false FTS-corruption warnings and reintroducing tool
+    tails that the replay path had just removed.
+    """
+    if not isinstance(live_history, list):
+        return persisted_history
+    live_replay_history, _ = _build_gateway_agent_history(
+        live_history,
+        channel_prompt=channel_prompt,
+        inject_timestamps=inject_timestamps,
+    )
+    return _select_cached_agent_history(persisted_history, live_replay_history)
 
 
 def _wrap_current_message_with_observed_context(message: Any, observed_context: Optional[str]) -> Any:
@@ -17901,8 +17920,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # immediate same-session amnesia. Only applies when we reused a
             # cached agent bound to this exact session_id.
             if reused_cached_agent and getattr(agent, "session_id", None) == session_id:
-                _selected = _select_cached_agent_history(
-                    agent_history, getattr(agent, "_session_messages", None)
+                _selected = _select_cached_replay_history(
+                    agent_history,
+                    getattr(agent, "_session_messages", None),
+                    channel_prompt=channel_prompt,
+                    inject_timestamps=_message_timestamps_enabled(_load_gateway_config()),
                 )
                 if _selected is not agent_history:
                     logger.warning(

@@ -336,7 +336,22 @@ display:
   #   separate             — send one message per tool (pre-v0.9 style; noisier)
   # Only applies where tool_progress is already enabled.
   tool_progress_grouping: accumulate   # accumulate | separate
+  # Show every command inside terminal calls without enabling verbose output
+  # for every other tool. Can also be set per platform.
+  expand_terminal_commands: false
 ```
+
+To keep normal compact tool progress but expand terminal commands on Discord:
+
+```yaml
+display:
+  tool_progress: all
+  platforms:
+    discord:
+      expand_terminal_commands: true
+```
+
+This renders the full terminal command in a code block, but does not show full arguments or results for other tools.
 
 ### Message timestamps in model context
 

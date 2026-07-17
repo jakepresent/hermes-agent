@@ -744,7 +744,7 @@ async def _run_with_agent(
     platform=Platform.TELEGRAM,
     chat_id="-1001",
     chat_type="group",
-    thread_id="17585",
+    thread_id: str | None = "17585",
     adapter_cls=ProgressCaptureAdapter,
 ):
     if config_data:
@@ -1525,6 +1525,42 @@ async def test_terminal_progress_verbose_shows_full_command(monkeypatch, tmp_pat
     assert "```bash" not in all_content
     # Full cleaned command body present — verbose is uncapped, but still hides
     # the low-signal strict-mode prologue.
+    assert "set -euo pipefail" not in all_content
+    assert "printf 'node: '; node --version" in all_content
+    assert "npm install -g hyperframes@latest" in all_content
+
+
+@pytest.mark.asyncio
+async def test_terminal_only_expansion_shows_full_command_in_all_mode(monkeypatch, tmp_path):
+    """A per-platform opt-in reveals full terminal commands without verbose mode."""
+    monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "all")
+
+    adapter, result = await _run_with_agent(
+        monkeypatch,
+        tmp_path,
+        TerminalCommandAgent,
+        session_id="sess-terminal-only-expansion",
+        config_data={
+            "display": {
+                "tool_progress": "all",
+                "platforms": {
+                    "discord": {"expand_terminal_commands": True},
+                },
+            }
+        },
+        platform=Platform.DISCORD,
+        chat_id="discord-dm-1",
+        chat_type="dm",
+        thread_id=None,
+        adapter_cls=CodeBlockProgressAdapter,
+    )
+
+    assert result["final_response"] == "done"
+    all_content = " ".join(call["content"] for call in adapter.sent)
+    all_content += " ".join(call["content"] for call in adapter.edits)
+    # `all` is still the configured global mode, but the terminal command gets
+    # the same complete cleaned block normally reserved for verbose mode.
+    assert "```" in all_content
     assert "set -euo pipefail" not in all_content
     assert "printf 'node: '; node --version" in all_content
     assert "npm install -g hyperframes@latest" in all_content

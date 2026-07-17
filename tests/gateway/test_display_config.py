@@ -78,6 +78,22 @@ class TestResolveDisplaySetting:
         assert resolve_display_setting(config, "slack", "tool_progress") == "off"
         assert resolve_display_setting(config, "telegram", "tool_progress") == "all"
 
+    def test_terminal_command_expansion_can_be_scoped_to_one_platform(self):
+        """A Discord-only expansion must not make other gateway surfaces noisy."""
+        from gateway.display_config import resolve_display_setting
+
+        config = {
+            "display": {
+                "expand_terminal_commands": False,
+                "platforms": {
+                    "discord": {"expand_terminal_commands": True},
+                },
+            }
+        }
+
+        assert resolve_display_setting(config, "discord", "expand_terminal_commands") is True
+        assert resolve_display_setting(config, "telegram", "expand_terminal_commands") is False
+
 
 # ---------------------------------------------------------------------------
 # Backward compatibility: tool_progress_overrides

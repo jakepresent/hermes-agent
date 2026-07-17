@@ -1415,6 +1415,7 @@ This controls both the `text_to_speech` tool and spoken replies in voice mode (`
 display:
   tool_progress: all      # off | new | all | verbose
   tool_progress_command: false  # Enable /verbose slash command in messaging gateway
+  expand_terminal_commands: false  # Gateway: show full terminal commands but keep other tool previews compact
   platforms: {}           # Per-platform display overrides (see below)
   tool_progress_overrides: {}  # DEPRECATED — use display.platforms instead
   interim_assistant_messages: true  # Gateway: send natural mid-turn assistant updates as separate messages
@@ -1540,6 +1541,18 @@ display:
 ```
 
 Platforms without an override fall back to the global `tool_progress` value. Valid platform keys: `telegram`, `discord`, `slack`, `signal`, `whatsapp`, `matrix`, `mattermost`, `email`, `sms`, `homeassistant`, `dingtalk`, `feishu`, `wecom`, `weixin`, `bluebubbles`, `qqbot`. The legacy `display.tool_progress_overrides` key still loads for backward compatibility but is deprecated and migrated into `display.platforms` on first load.
+
+To inspect every shell action without turning on full verbose output for every tool, set `expand_terminal_commands: true`. It renders terminal tool calls as complete code blocks while preserving the configured compact previews for file, web, browser, and other tools. The flag can be scoped to one platform:
+
+```yaml
+display:
+  tool_progress: all
+  platforms:
+    discord:
+      expand_terminal_commands: true
+```
+
+This applies only to adapters that support code blocks. Other platforms keep their normal compact terminal preview.
 
 Signal is listed as a valid platform key because the setting can be saved per platform, but the current Signal adapter cannot edit sent messages and does not render tool-progress bubbles. Keep Signal `tool_progress` set to `off`; use the CLI or an editing-capable messaging platform if you need to watch each tool call live.
 

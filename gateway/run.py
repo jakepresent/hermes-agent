@@ -16603,6 +16603,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             require_platform_override_for={Platform.MATTERMOST},
         )
         needs_progress_queue = tool_progress_enabled or _thinking_enabled
+        # Keep ordinary tool progress compact while allowing a platform to
+        # expand only terminal commands.  This is intentionally independent of
+        # the global ``verbose`` mode, which also exposes every tool's args.
+        expand_terminal_commands = bool(
+            resolve_display_setting(
+                user_config, platform_key, "expand_terminal_commands", False
+            )
+        )
 
 
         # Queue for progress messages (thread-safe)
@@ -16771,9 +16779,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # line ("bash"), and a bare fence renders correctly everywhere
             # that supports blocks.
             #
-            # Verbose mode shows the FULL command.  Non-verbose ("all"/"new")
-            # modes still wrap in a fence but truncate to a single line capped
-            # at ``tool_preview_length`` (default 40) so a long or multi-line
+            # Verbose mode, or an explicit terminal-only expansion opt-in,
+            # shows the FULL command.  Non-verbose ("all"/"new") modes otherwise
+            # wrap in a fence but truncate to a single line capped at
+            # ``tool_preview_length`` (default 40) so a long or multi-line
             # command doesn't render as a huge block — matching the budget the
             # non-terminal preview path already applies (#42634).
             _code_block_full = None
@@ -16804,7 +16813,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "" if last_was_terminal_block[0] else f"{emoji} {tool_label}\n"
                 )
                 _code_block_full = f"{_block_header}```\n{_cmd_full}\n```"
-                if progress_mode == "verbose":
+                if progress_mode == "verbose" or expand_terminal_commands:
                     _cmd_short = _cmd_full
                 else:
                     _cmd_short = build_terminal_command_preview(

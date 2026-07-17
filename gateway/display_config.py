@@ -33,6 +33,10 @@ from typing import Any
 _GLOBAL_DEFAULTS: dict[str, Any] = {
     "tool_progress": "all",
     "tool_progress_grouping": "accumulate",  # "accumulate" = edit one bubble; "separate" = one msg per tool
+    # Render the full terminal command in tool-progress bubbles while keeping
+    # every other tool at the configured summary level.  Useful when an agent
+    # wraps several shell actions in one terminal invocation.
+    "expand_terminal_commands": False,
     "show_reasoning": False,
     # How a reasoning/thinking summary is rendered when show_reasoning is on.
     #   "code"      -> 💭 **Reasoning:** + fenced code block (legacy default)
@@ -242,6 +246,7 @@ def _normalise(setting: str, value: Any) -> Any:
             return "all"
         return str(value).lower()
     if setting in {
+        "expand_terminal_commands",
         "show_reasoning",
         "streaming",
         "interim_assistant_messages",

@@ -219,11 +219,38 @@ Key files:
 
 Commits (pre-v2026.7.1; most equivalents now upstream): `6adab27d8`, `feabad30f`, `7731faed9`, `d321360c6`.
 
-Preservation check (the heredoc residue is the only fork-unique assertion left):
+Preservation check (heredoc body summarization):
 
 ```bash
 python -m pytest tests/agent/test_display.py::TestBuildToolPreview::test_terminal_preview_summarizes_python_heredoc_body tests/gateway/test_run_progress_topics.py -o 'addopts=' -q
 ```
+
+#### Terminal-only command expansion (fork-only)
+
+`display.expand_terminal_commands` defaults to `false`. When enabled globally or through `display.platforms.<platform>.expand_terminal_commands`, a markdown-capable gateway keeps its normal `all`/`new` tool-progress mode but renders each terminal call as a full, cleaned code block. Other tools retain their compact previews; this is deliberately narrower than global `verbose`, which emits every tool's full arguments.
+
+The flag is useful when `summarize_shell_command` collapses a compound invocation into `cmd + N commands` and the user needs to audit every shell action without flooding the chat with every other tool's inputs. Plain-text adapters keep the ordinary compact terminal preview.
+
+Key files:
+
+- `gateway/display_config.py` (`expand_terminal_commands` resolution and normalization)
+- `gateway/run.py` (terminal code-block selection)
+- `hermes_cli/config.py`
+- `tests/gateway/test_display_config.py`, `tests/gateway/test_run_progress_topics.py`
+- `website/docs/user-guide/configuration.md`, `website/docs/user-guide/messaging/index.md`
+
+Commit: `f9e2493f4` - terminal-only command expansion in compact gateway progress.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/gateway/test_display_config.py tests/gateway/test_run_progress_topics.py -o 'addopts=' -q
+```
+
+Live smoke:
+
+- Set `display.platforms.discord.expand_terminal_commands: true` while Discord tool progress remains `all`.
+- Trigger a terminal invocation with several shell actions. Discord must show the full cleaned command block, while a subsequent web/file tool call remains compact.
 
 ### 6. Voice note transcription, transcript persistence, transcript echo, and active-run voice steering
 

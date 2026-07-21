@@ -1,6 +1,6 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-07-06 (v2026.7.1 integration)
+Last audited: 2026-07-18 (v2026.7.1 integration + skill-reuse policy)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
@@ -847,6 +847,32 @@ Preservation checks:
 python -m pytest tests/gateway/test_cached_history_replay_guard.py tests/gateway/test_agent_cache.py tests/agent/test_replay_cleanup.py -o 'addopts=' -q
 ```
 
+### 23. Session-scoped skill reuse
+
+Purpose: preserve mandatory skill discovery without making the agent reload the same skill for every follow-up in one continuous task.
+
+Core behavior:
+
+- The agent loads a matching skill before first using it in a session, then reuses the loaded instructions for later turns in the same ongoing task.
+- A simple follow-up does not trigger another `skill_view` call or another full skill payload in the conversation.
+- Reload remains required when the task materially changes, a linked reference is needed, the skill may have changed, or Jake asks for a reload.
+- This is prompt policy only. It does not hide skills, weaken first-use loading, or mutate a cached system prompt mid-session.
+
+Key files:
+
+- `agent/prompt_builder.py` (`build_skills_system_prompt`)
+- `tests/agent/test_prompt_builder.py::TestBuildSkillsSystemPrompt::test_instructs_agent_to_reuse_skill_for_follow_up_turns`
+
+Commits:
+
+- `93295c914` - reuse a loaded skill for follow-up turns in the same ongoing task.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/agent/test_prompt_builder.py -o 'addopts=' -q
+```
+
 ## Complete commit ledger by feature bucket
 
 This is the raw commit map from the audited branch, grouped as the recommended history-cleanup overlay. It intentionally avoids rewriting history on a published branch.
@@ -941,6 +967,10 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 ### Dashboard sessions UI
 
 - `438431705` `2026-06-25` - `fix(dashboard): default sessions to recent activity`
+
+### Skills system-prompt policy
+
+- `93295c914` `2026-07-18` - `fix(skills): reuse loaded skills for follow-ups`
 
 ### Test-only / no-net-change / integration bookkeeping
 

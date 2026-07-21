@@ -1658,8 +1658,11 @@ def build_skills_system_prompt(
         result = (
             "## Skills (mandatory)\n"
             "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
+            "to your task, you MUST load it with skill_view(name) before first using it in this session "
+            "and follow its instructions. Once a skill is loaded, reuse it for later turns in the same "
+            "ongoing task; do not call skill_view again merely because the user sent a follow-up. Reload "
+            "only when the task materially changes, you need a linked reference, the skill may have changed, "
+            "or the user asks. Err on the side of loading — it is always better to have context you don't need "
             "than to miss critical steps, pitfalls, or established workflows. "
             "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
             "and proven workflows that outperform general-purpose approaches. Load the skill "

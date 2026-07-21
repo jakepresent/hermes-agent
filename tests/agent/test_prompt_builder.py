@@ -419,6 +419,21 @@ class TestBuildSkillsSystemPrompt:
         assert "Debug Python scripts" in result
         assert "available_skills" in result
 
+    def test_instructs_agent_to_reuse_skill_for_follow_up_turns(self, monkeypatch, tmp_path):
+        """A loaded skill remains usable for a continuing task without a redundant reload."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "learning" / "korean"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: korean\ndescription: Teach Korean\n---\n"
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "before first using it in this session" in result
+        assert "same ongoing task" in result
+        assert "do not call skill_view again merely because the user sent a follow-up" in result
+
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         cat_dir = tmp_path / "skills" / "tools"

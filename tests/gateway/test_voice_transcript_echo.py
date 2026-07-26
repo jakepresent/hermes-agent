@@ -146,14 +146,18 @@ async def test_dequeued_voice_transcribes_without_echoing_raw_transcript_by_defa
         "_persist_voice_transcript",
         new=AsyncMock(),
     ):
-        result = await runner._dequeue_pending_with_transcription(
+        result, transcripts = await runner._transcribe_and_echo_pending_voice(
+            event,
             adapter,
-            "discord:123",
             source,
+            event.text,
+            log_context="Voice-drain",
+            metadata={"thread_id": source.thread_id},
         )
 
     assert result is not None
     assert "queued voice should not echo" in result
+    assert transcripts == ["queued voice should not echo"]
     assert adapter.sent == []
 
 
@@ -178,14 +182,18 @@ async def test_dequeued_voice_echoes_raw_transcript_when_enabled():
         "_persist_voice_transcript",
         new=AsyncMock(),
     ):
-        result = await runner._dequeue_pending_with_transcription(
+        result, transcripts = await runner._transcribe_and_echo_pending_voice(
+            event,
             adapter,
-            "discord:123",
             source,
+            event.text,
+            log_context="Voice-drain",
+            metadata={"thread_id": source.thread_id},
         )
 
     assert result is not None
     assert "queued voice should echo" in result
+    assert transcripts == ["queued voice should echo"]
     assert adapter.sent == [
         ("123", '🎙️ "queued voice should echo"', {"thread_id": "789"}, {})
     ]

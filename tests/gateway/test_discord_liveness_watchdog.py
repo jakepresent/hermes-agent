@@ -1,302 +1,124 @@
-"""Regression tests for the Discord gateway liveness watchdog.
+"""Fork regression tests for the complementary Discord REST liveness probe.
 
-Class-level bug this guards against: discord.py reconnects ordinary gateway
-interruptions internally, and its ``Bot.start()`` task only *exits* on a hard
-failure (which fires ``_handle_bot_task_done``). Neither path covers a
-websocket that is silently dead — half-open TCP after a host network/interop
-blip, or an internal reconnect loop that never re-establishes — while the task
-stays alive. That leaves the process running, the systemd service "active", and
-the bot offline, with no exception anywhere to trigger recovery ("green
-service, dead bot"). The watchdog detects that state via discord.py's public
-``is_closed()`` / ``latency`` signals and routes it through the SAME
-retryable-fatal path a task-exit would, so the gateway's existing reconnect
-watcher takes over instead of a human having to restart.
-
-The tests drive ``_liveness_watchdog_loop`` directly with the probe interval
-monkeypatched to ~0 so they never sleep on real time.
+Upstream v2026.7.20 owns the WebSocket ACK/open-state watchdog.  The fork keeps
+an independent REST probe because Gateway and REST are separate transports: a
+healthy WebSocket does not prove that message-delivery REST calls still work.
 """
 
+from __future__ import annotations
+
 import asyncio
-import math
-import sys
-import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
-from gateway.config import PlatformConfig
-
-
-def _ensure_discord_mock():
-    """Install a minimal mock ``discord`` module if one isn't present.
-
-    Mirrors the stub in test_discord_connect.py so this module can run in
-    isolation as well as in the full suite.
-    """
-    if sys.modules.get("discord") is None:
-        discord_mod = MagicMock()
-        discord_mod.Intents.default.return_value = MagicMock()
-        discord_mod.Client = MagicMock
-        discord_mod.File = MagicMock
-        discord_mod.DMChannel = type("DMChannel", (), {})
-        discord_mod.Thread = type("Thread", (), {})
-        discord_mod.ForumChannel = type("ForumChannel", (), {})
-        discord_mod.opus = SimpleNamespace(is_loaded=lambda: True)
-        ext_mod = MagicMock()
-        commands_mod = MagicMock()
-        commands_mod.Bot = MagicMock
-        ext_mod.commands = commands_mod
-        sys.modules["discord"] = discord_mod
-        sys.modules.setdefault("discord.ext", ext_mod)
-        sys.modules.setdefault("discord.ext.commands", commands_mod)
-
-    if not hasattr(sys.modules["discord"], "AllowedMentions"):
-        sys.modules["discord"].AllowedMentions = MagicMock
-
+from tests.gateway.test_discord_connect import _ensure_discord_mock
 
 _ensure_discord_mock()
 
-import plugins.platforms.discord.adapter as discord_platform  # noqa: E402
+from gateway.config import PlatformConfig  # noqa: E402
 from plugins.platforms.discord.adapter import DiscordAdapter  # noqa: E402
 
 
-class _FakeClient:
-    """Stand-in for a discord.py ``Client`` exposing the two public liveness
-    signals the watchdog reads: ``is_closed()`` and ``latency``.
-    """
-
-    def __init__(self, *, closed: bool = False, latency: float = 0.05):
-        self._closed = closed
-        self._latency = latency
-        self.ws = None
-
-    def is_closed(self) -> bool:
-        return self._closed
-
-    @property
-    def latency(self) -> float:
-        return self._latency
-
-
-class _FakeKeepAlive:
-    def __init__(self, *, age: float):
-        stamp = time.perf_counter() - age
-        self._last_ack = stamp
-        self._last_recv = stamp
-
-
-def _make_adapter(monkeypatch, *, probe_interval=0.0, threshold=1.0):
-    """Build a DiscordAdapter wired so the watchdog loop iterates instantly."""
-    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
-    monkeypatch.setattr(
-        discord_platform, "_DISCORD_LIVENESS_PROBE_INTERVAL_SECONDS", probe_interval
+def _adapter(*, interval: float = 0.0, threshold: int = 2) -> DiscordAdapter:
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={
+                "rest_liveness_interval_seconds": 60.0,
+                "rest_liveness_failure_threshold": threshold,
+            },
+        )
     )
-    monkeypatch.setattr(
-        discord_platform, "_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS", threshold
-    )
-    # Give the watchdog the invariants it checks: running, not disconnecting,
-    # and a live (not-done) bot task.
+    # Drive the loop without wall-clock waits.
+    adapter._rest_liveness_interval_seconds = interval
     adapter._running = True
     adapter._disconnecting = False
-    adapter._bot_task = SimpleNamespace(done=lambda: False)
     return adapter
 
 
-@pytest.mark.asyncio
-async def test_healthy_gateway_never_fires_fatal_error(monkeypatch):
-    """A live websocket (not closed, finite latency) must never be reported as
-    wedged, no matter how many probe cycles run."""
-    adapter = _make_adapter(monkeypatch, threshold=0.001)
-    adapter._client = _FakeClient(closed=False, latency=0.05)
-
-    notified = AsyncMock()
-    monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
-
-    # Run several probe cycles, then cancel — the loop only exits on wedge or
-    # cancellation, so we cancel it ourselves after letting it iterate.
-    task = asyncio.create_task(adapter._liveness_watchdog_loop())
-    for _ in range(5):
-        await asyncio.sleep(0)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    assert not adapter.has_fatal_error, "healthy gateway must not be marked fatal"
-    notified.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_wedged_gateway_fires_retryable_fatal_error(monkeypatch):
-    """A silently-dead websocket (closed, or infinite latency) held past the
-    stale threshold must fire a RETRYABLE fatal error and notify the supervisor
-    exactly once, then the loop exits."""
-    adapter = _make_adapter(monkeypatch, threshold=1.0)
-    # Dead ws: discord.py reports latency == inf when there is no heartbeat.
-    adapter._client = _FakeClient(closed=False, latency=math.inf)
-
-    notified = AsyncMock()
-    monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
-
-    # Seed the last-live timestamp well in the past so the very first probe is
-    # already past the stale threshold.
-    import time as _time
-    adapter._last_liveness_ok = _time.monotonic() - 999.0
-
-    # The loop returns after firing — bounded wait guards against a hang.
-    await asyncio.wait_for(adapter._liveness_watchdog_loop(), timeout=2.0)
-
-    assert adapter.has_fatal_error, "wedged gateway must be marked fatal"
-    assert adapter.fatal_error_code == "discord_gateway_wedged"
-    assert adapter.fatal_error_retryable is True, (
-        "wedge must be RETRYABLE so the gateway reconnect watcher re-queues it"
+def test_rest_probe_has_independent_config_and_task():
+    adapter = DiscordAdapter(
+        PlatformConfig(
+            enabled=True,
+            token="test-token",
+            extra={
+                "websocket_liveness_interval_seconds": 15,
+                "rest_liveness_interval_seconds": 45,
+                "rest_liveness_failure_threshold": 4,
+            },
+        )
     )
-    notified.assert_awaited_once()
+
+    assert adapter._liveness_interval_seconds == 15
+    assert adapter._rest_liveness_interval_seconds == 45
+    assert adapter._rest_liveness_failure_threshold == 4
+    assert adapter._liveness_task is None
+    assert adapter._rest_liveness_task is None
 
 
 @pytest.mark.asyncio
-async def test_closed_websocket_is_treated_as_non_live(monkeypatch):
-    """``is_closed() == True`` must count as non-live even if a stale latency
-    value lingers on the object."""
-    adapter = _make_adapter(monkeypatch, threshold=1.0)
-    # Closed socket but a leftover finite latency — closed must win.
-    adapter._client = _FakeClient(closed=True, latency=0.05)
-
-    notified = AsyncMock()
-    monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
-
-    import time as _time
-    adapter._last_liveness_ok = _time.monotonic() - 999.0
-
-    await asyncio.wait_for(adapter._liveness_watchdog_loop(), timeout=2.0)
-
-    assert adapter.has_fatal_error
-    assert adapter.fatal_error_code == "discord_gateway_wedged"
-    notified.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_non_live_within_grace_window_does_not_fire(monkeypatch):
-    """A gateway that is momentarily non-live but WITHIN the stale threshold
-    (a routine RESUME / single missed heartbeat) must not be reported."""
-    adapter = _make_adapter(monkeypatch, threshold=3600.0)
-    adapter._client = _FakeClient(closed=False, latency=math.inf)
-
-    notified = AsyncMock()
-    monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
-
-    # last_liveness_ok is "now" → stale_for is ~0, far below the 1h threshold.
-    import time as _time
-    adapter._last_liveness_ok = _time.monotonic()
-
-    task = asyncio.create_task(adapter._liveness_watchdog_loop())
-    for _ in range(5):
-        await asyncio.sleep(0)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    assert not adapter.has_fatal_error, (
-        "a brief non-live blip within the grace window must not trip the watchdog"
+async def test_healthy_rest_probe_does_not_trip_websocket_watchdog_state():
+    adapter = _adapter(interval=0.0, threshold=2)
+    client = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        is_closed=lambda: False,
+        fetch_user=AsyncMock(return_value=SimpleNamespace(id=42)),
     )
-    notified.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_watchdog_exits_when_bot_task_already_done(monkeypatch):
-    """If the bot task has exited, ``_handle_bot_task_done`` already owns
-    recovery — the watchdog must defer and not double-report."""
-    adapter = _make_adapter(monkeypatch, threshold=0.001)
-    adapter._client = _FakeClient(closed=True, latency=math.inf)
-    adapter._bot_task = SimpleNamespace(done=lambda: True)  # already exited
-
-    notified = AsyncMock()
-    monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
-
-    await asyncio.wait_for(adapter._liveness_watchdog_loop(), timeout=2.0)
-
-    assert not adapter.has_fatal_error, (
-        "a done bot task is handled by _handle_bot_task_done; watchdog must defer"
-    )
-    notified.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_disconnecting_flag_stops_watchdog(monkeypatch):
-    """During an intentional disconnect the watchdog must exit without firing,
-    even if the client looks dead."""
-    adapter = _make_adapter(monkeypatch, threshold=0.001)
-    adapter._client = _FakeClient(closed=True, latency=math.inf)
-    adapter._disconnecting = True
-
-    notified = AsyncMock()
-    monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
-
-    await asyncio.wait_for(adapter._liveness_watchdog_loop(), timeout=2.0)
-
-    assert not adapter.has_fatal_error
-    notified.assert_not_awaited()
-
-
-def test_gateway_is_live_reads_public_signals(monkeypatch):
-    """_gateway_is_live must use only is_closed()/latency and classify correctly."""
-    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
-
-    adapter._client = None
-    assert adapter._gateway_is_live() is False, "no client → not live"
-
-    adapter._client = _FakeClient(closed=False, latency=0.05)
-    assert adapter._gateway_is_live() is True, "open + finite latency → live"
-
-    adapter._client = _FakeClient(closed=True, latency=0.05)
-    assert adapter._gateway_is_live() is False, "closed → not live"
-
-    adapter._client = _FakeClient(closed=False, latency=math.inf)
-    assert adapter._gateway_is_live() is False, "inf latency (no heartbeat) → not live"
-
-    adapter._client = _FakeClient(closed=False, latency=math.nan)
-    assert adapter._gateway_is_live() is False, "NaN latency → not live"
-
-
-def test_gateway_is_live_rejects_stale_finite_latency(monkeypatch):
-    """A stale socket can keep the last finite Client.latency forever.
-
-    The watchdog must inspect discord.py's keepalive timestamps when available,
-    or a CLOSE-WAIT / half-dead websocket can look healthy indefinitely.
-    """
-    adapter = DiscordAdapter(PlatformConfig(enabled=True, token="test-token"))
-    monkeypatch.setattr(discord_platform, "_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS", 150.0)
-
-    client = _FakeClient(closed=False, latency=0.05)
-    client.ws = SimpleNamespace(_keep_alive=_FakeKeepAlive(age=999.0))
     adapter._client = client
 
-    assert adapter._gateway_is_live() is False
+    task = asyncio.create_task(adapter._rest_liveness_loop())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    adapter._running = False
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert client.fetch_user.await_count >= 1
+    assert adapter.has_fatal_error is False
+    assert adapter._liveness_task is None
 
 
 @pytest.mark.asyncio
-async def test_watchdog_uses_stale_heartbeat_age_even_after_bad_refresh(monkeypatch):
-    """If an older probe refreshed last_liveness_ok from stale finite latency,
-    the next probe must still fire from the underlying heartbeat age.
-    """
-    adapter = _make_adapter(monkeypatch, threshold=150.0)
-    client = _FakeClient(closed=False, latency=0.05)
-    client.ws = SimpleNamespace(_keep_alive=_FakeKeepAlive(age=999.0))
+async def test_repeated_rest_failures_trigger_retryable_fatal_reconnect(monkeypatch):
+    adapter = _adapter(interval=0.0, threshold=2)
+    client = SimpleNamespace(
+        user=SimpleNamespace(id=42),
+        ws=None,
+        _closing_task=None,
+        is_closed=lambda: False,
+        fetch_user=AsyncMock(side_effect=RuntimeError("REST unavailable")),
+        close=AsyncMock(),
+    )
     adapter._client = client
-
-    # Simulate the pre-fix false refresh: last_liveness_ok says "now", but the
-    # heartbeat timestamps prove Discord has been stale far longer.
-    adapter._last_liveness_ok = time.monotonic()
-
     notified = AsyncMock()
     monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
 
-    await asyncio.wait_for(adapter._liveness_watchdog_loop(), timeout=2.0)
+    await asyncio.wait_for(adapter._rest_liveness_loop(), timeout=1.0)
+    if adapter._liveness_notification_task is not None:
+        await asyncio.wait_for(adapter._liveness_notification_task, timeout=1.0)
 
-    assert adapter.has_fatal_error
-    assert adapter.fatal_error_code == "discord_gateway_wedged"
+    assert client.fetch_user.await_count == 2
+    assert adapter.has_fatal_error is True
+    assert adapter.fatal_error_code == "discord_rest_health_stale"
+    assert adapter.fatal_error_retryable is True
     notified.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_rest_probe_does_not_cancel_websocket_probe():
+    adapter = _adapter(interval=60.0)
+    adapter._start_rest_liveness_probe()
+    rest_task = adapter._rest_liveness_task
+    websocket_task = asyncio.create_task(asyncio.sleep(60))
+    adapter._liveness_task = websocket_task
+
+    await adapter._cancel_rest_liveness_task()
+
+    assert rest_task is not None and rest_task.done()
+    assert adapter._rest_liveness_task is None
+    assert adapter._liveness_task is websocket_task
+    websocket_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await websocket_task

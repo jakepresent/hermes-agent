@@ -51,7 +51,7 @@ async def test_prepare_inbound_mixed_image_and_log_only_buffers_image(tmp_path, 
     runner._pending_native_image_paths_by_session = {}
     runner._session_db = None
 
-    monkeypatch.setattr(runner, "_decide_image_input_mode", lambda: "native")
+    monkeypatch.setattr(runner, "_decide_image_input_mode", lambda **_: "native")
 
     source = SessionSource(
         platform=Platform.DISCORD,

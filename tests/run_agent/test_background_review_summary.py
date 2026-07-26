@@ -145,4 +145,4 @@ def test_durable_notes_update_is_surfaced_as_durable_notes_not_memory():
 
     actions = _summarize(review_messages, [])
 
-    assert actions == ["Durable notes updated"]
+    assert actions == ["Durable notes updated."]

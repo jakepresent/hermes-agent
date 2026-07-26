@@ -1,12 +1,29 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-07-18 (v2026.7.1 integration + skill-reuse policy)
+Last audited: 2026-07-26 (v2026.7.20 integration in progress)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
 It is intentionally a feature manifest, not a perfect design doc. Use it to answer: "what does this fork intentionally carry that upstream Hermes may not?" and "what tests/symbols should an upgrade preserve?"
 
 ## Scope and anchors
+
+### v2026.7.20 integration (2026-07-26)
+
+- Integration branch: `jake/integrate-v2026.7.20-20260726-033213`
+- Pre-merge fork HEAD: `34e62bfe1`
+- Upstream release integrated: `v2026.7.20` (peeled commit `3ef6bbd201263d354fd83ec55b3c306ded2eb72a`)
+- Rollback marker: `jake/rollback-before-v2026.7.20-20260726-033213` at `34e62bfe1`
+- The merge was performed in isolated worktree `/tmp/hermes-v2026.7.20-integration-20260726-033213`; Jake's live checkout and gateway were not switched during conflict resolution or tests.
+- 29 files conflicted. The important resolutions were feature convergences rather than side-picks:
+  - upstream's timed parked-state MCP self-probe replaces the fork's duplicate standby timer; the fork still keeps bounded per-tool reconnect/retry for a registered-but-sessionless server (§19);
+  - upstream's newer Discord WebSocket ACK/open-state watchdog replaces the fork's older passive watchdog; the fork still keeps an independent REST delivery-path probe plus its process-level event-loop watchdog (§20);
+  - API-server `model_routes` were combined with fork per-request model/reasoning overrides, with session `/model` taking precedence;
+  - upstream once-only queued voice transcription/echo handling was combined with fork transcript persistence and opt-in echo policy;
+  - upstream smart-DENY/admin approval semantics were combined with fork content-first, security-scan-aware Discord prompts and compact numeric clarify buttons;
+  - upstream auxiliary client cache isolation by model was combined with fork provider normalization and secret-safe cache discriminators.
+- Dependency resolution was regenerated from upstream `uv.lock` with `uv lock`; tests run in an isolated Python 3.11 `.venv` inside the integration worktree.
+- Preservation result: focused fork gate passed **2,846 tests with 2 environment skips** in the isolated worktree. Conflict-seam reruns also passed independently: full MCP tool suite (219), reasoning/provider core (799), voice/config (156), Discord liveness/connect (50), auxiliary-provider cache (238), and the previously order-sensitive busy/model/OCR/retry tests (51). The local semantic-memory tests require optional `scikit-learn`, which was installed only in the isolated test venv; no live environment was changed.
 
 ### v2026.7.1 integration (2026-07-06)
 
@@ -724,75 +741,71 @@ Commits:
 
 Upgrade note: do not spend time preserving the reverted subtitle behavior unless a later branch explicitly revives it.
 
-### 19. MCP self-heal: standby auto-retry + bounded tool-call reconnect (fork-unique residue)
+### 19. MCP self-heal: bounded tool-call reconnect (fork-unique residue)
 
-Status: **core orphan-fix landed upstream as of v2026.7.1.** Upstream `MCPServerTask.run()` no longer gives up permanently after the fast-retry budget (`_MAX_RECONNECT_RETRIES`) — it drops phantom tools (`_deregister_tools`) and parks as a dormant listener on `_reconnect_event` (`_wait_for_reconnect_or_shutdown`), so a later breaker half-open probe / OAuth recovery / manual `/mcp` refresh can rebuild the transport (#16788). That baseline is upstream; do not re-preserve it.
+Status: **the standby auto-retry timer landed upstream as of v2026.7.20.** Upstream now parks a server after the fast retry budget, deregisters phantom tools, and wakes on either an explicit reconnect event or `_PARKED_RETRY_INTERVAL` for an autonomous self-probe. The fork's `_RECONNECT_STANDBY_INTERVAL` and `_wait_for_reconnect_or_standby` were duplicate machinery and were removed during this integration. Upstream's `tests/tools/test_mcp_parked_self_probe.py` and retry-reset tests now own that baseline.
 
-Two fork-unique deltas to keep (upstream lacks both), for Jake's Windows Agency bridges (EngHub, Teams, M365 Copilot) which must self-heal with **zero manual action**:
+Fork-unique residue to keep for Jake's Windows Agency bridges (EngHub, Teams, M365 Copilot): **bounded tool-call reconnect and one retry.** When a model-facing handler reaches a registered-but-sessionless server, or receives a recoverable "not connected / session missing" exception, it calls `MCPServerTask.request_reconnect()` with `_TOOL_CALL_RECONNECT_TIMEOUT` (default 15s), wakes the existing lifecycle task through `_recover_now_event`, waits for a new connection generation, and retries the operation once. It reuses the same server object and schema, so there is no global `/reload-mcp` or prompt-cache churn.
 
-1. **Standby auto-retry timer.** Upstream's park only wakes on an explicit event; the fork also wakes on a timer via `_wait_for_reconnect_or_standby(_RECONNECT_STANDBY_INTERVAL)` (default 300s), which races shutdown/reconnect events against an `asyncio.sleep(interval)` (patchable, so self-heal tests stay fast). So a recovered endpoint reconnects on its own with no `/reload-mcp` and no prompt-cache churn (`_run_http`/`_run_stdio` re-discover tools on re-entry while preserving registry handlers). Entering standby resets the fast-retry budget. `_RECONNECT_STANDBY_INTERVAL = 0` restores upstream's park-forever behavior.
-2. **Bounded tool-call reconnect.** When a model-facing tool call hits a registered-but-sessionless server (or a "not connected / session missing" exception), the handler triggers a server-local bounded reconnect (`_TOOL_CALL_RECONNECT_TIMEOUT`, default 15s) and retries once, waking a sleeping lifecycle task via `_recover_now_event` without arming `_reconnect_event` (avoids tearing down the fresh session). Reuses the same `MCPServerTask` — no `/reload-mcp`, no schema invalidation. **Merge hazard:** upstream added an early `if not server.session: _signal_reconnect(...)` guard in `_make_tool_handler` that fire-and-forgets and short-circuits this bounded retry. The v2026.7.1 follow-up (`8bb82aca1`) removed that early return so a dead session flows through `_handle_session_expired_and_retry` → `_recover_disconnected_server_and_retry`. A future merge that reintroduces the early guard silently disables delta #2 — the `TestToolHandler::test_disconnected_server_*` tests are the guard.
+Merge hazards:
 
-Also: init/discovery uses the fork's timeout-bounded `_initialize_and_discover` helper (upstream inlines it), now also calling `_reset_server_error` on success.
+- Do not restore an early `if not server.session: return reconnect_requested` branch in `_make_tool_handler`; that fire-and-forget path shadows the fork's bounded wait/retry.
+- Keep `_connection_generation`, `_reconnect_request_lock`, `_recover_now_event`, `request_reconnect`, `_recover_disconnected_server_and_retry`, and the broader disconnected-error recognizer.
+- `_initialize_and_discover` is the shared handshake/discovery helper after v2026.7.20. It preserves the fork generation bookkeeping and timeout boundary while also running upstream lifecycle/recycle bookkeeping and resetting `_reconnect_retries` plus the circuit breaker on success.
+- Keep upstream's `_reconnect_retries` and timed parked-state engine; do not reintroduce the fork's removed second standby counter/timer.
 
 Key files:
 
-- `tools/mcp_tool.py` (`_RECONNECT_STANDBY_INTERVAL`, `_TOOL_CALL_RECONNECT_TIMEOUT`, `_wait_for_reconnect_or_standby`, `request_reconnect`, `_recover_now_event`, `_initialize_and_discover`, `_recover_disconnected_server_and_retry`, `_make_tool_handler` — no early sessionless return)
-- `tests/tools/test_mcp_tool.py` (`TestReconnection::test_standby_reconnect_self_heals_after_exhausting_retries`, `::test_standby_disabled_restores_give_up_behavior`, `::test_tool_call_recovery_wakes_reconnect_backoff_without_tearing_down_fresh_session`; `TestToolHandler::test_disconnected_server_reconnects_and_retries_once`, `::test_disconnected_server_reconnect_timeout_returns_clear_error`)
+- `tools/mcp_tool.py`
+- `tests/tools/test_mcp_tool.py` (`TestToolHandler::test_disconnected_server_reconnects_and_retries_once`, `::test_not_connected_exception_reconnects_and_retries_once`, `::test_disconnected_server_reconnect_timeout_returns_clear_error`, and reconnect-backoff coverage)
+- upstream baseline: `tests/tools/test_mcp_parked_self_probe.py`, `tests/tools/test_mcp_reconnect_retry_reset.py`, `tests/tools/test_mcp_stdio_init_timeout.py`
 
-Commits: `890a012db` (standby), `adaf93285` (bounded tool-call retry), `8bb82aca1` (v2026.7.1: drop upstream early-return that shadowed the bounded retry).
+Commits: `890a012db` (historical standby implementation, now upstream-covered), `adaf93285` (bounded tool-call retry), `8bb82aca1` (v2026.7.1 early-return removal).
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/tools/test_mcp_tool.py::TestReconnection tests/tools/test_mcp_tool.py::TestToolHandler -o 'addopts=' -q
+python -m pytest tests/tools/test_mcp_tool.py::TestReconnection tests/tools/test_mcp_tool.py::TestToolHandler tests/tools/test_mcp_parked_self_probe.py tests/tools/test_mcp_reconnect_retry_reset.py -o 'addopts=' -q
 ```
 
 Live smoke for Jake's profile:
 
-- Wedge one Agency MCP endpoint (or stop its Windows bridge) past the fast-retry budget; bring it back — within one standby interval the gateway reconnects and a new session sees the existing tool names (e.g. `mcp_teams_*`) with no `/reload-mcp`.
-- For the tool-call path, call a model-facing tool while `server.session` is missing; confirm one bounded reconnect/retry (or the clean bounded-timeout error), not an immediate fire-and-forget "not connected".
+- Stop one Agency bridge long enough to exhaust fast retries, restore it, and confirm upstream's parked-state timer reconnects and re-registers tools without `/reload-mcp`.
+- Call a model-facing tool while its server object is registered but `session` is missing; confirm one bounded reconnect/retry (or the clear bounded-timeout error), not an immediate fire-and-forget failure.
 
-### 20. Discord gateway liveness watchdog (silent-wedge recovery)
+### 20. Gateway liveness: upstream WebSocket probe + fork REST and event-loop probes
 
-Purpose: recover automatically from the "green service, dead bot" state where the systemd gateway service is `active`, the Python process is alive, but the Discord bot shows offline and never comes back without a manual restart. As of the 2026-07-06 follow-up, this feature also includes a process-level event-loop watchdog for the sibling "green service, dead gateway" state where the main asyncio loop stops making progress, starving the Discord watchdog and the API server together.
+Purpose: recover from both "green service, dead Discord bot" and "green process, dead event loop" without manual restarts.
 
-Background / root cause: Discord recovery in the gateway is entirely event-driven and has exactly one trigger — the discord.py `Bot.start()` task actually *exiting*, which fires `DiscordAdapter._handle_bot_task_done`, marks a retryable fatal error, and lets `GatewayRunner._handle_adapter_fatal_error` queue the platform for the existing background reconnect watcher. But discord.py runs with `reconnect=True`, so on a *silent* websocket death (half-open TCP after a WSL/host network or interop blip, or an internal reconnect loop that never re-establishes) the task never exits. Task-never-exits → no fatal error → `_failed_platforms` stays empty → the reconnect watcher (which only ever iterates `_failed_platforms`) sleeps forever. Confirmed live 2026-07-02: an overnight WSL-interop loss drove a Windows-MCP reconnect storm and a ~27GB/252-task event-loop balloon, during which the Discord websocket went non-live with zero `Bot.start()` exit and zero reconnect attempts logged for ~13.5h until a manual `hermes gateway restart`. There was previously **no liveness probe on the main gateway websocket** (the only keepalive in the adapter is the unrelated voice-UDP one), so a wedged-but-not-exited connection was invisible to recovery. This is the "liveness is a lie if it's just `connected && process != nil`" failure class.
+Status after v2026.7.20: **the fork's original passive Discord WebSocket watchdog is upstream-covered and was removed.** Upstream now owns a stronger WebSocket-level probe that checks `Client.is_ready()`, socket open state, heartbeat ACK age, and latency, then closes the stale client and routes a retryable fatal error through the gateway reconnect supervisor. The removed fork symbols (`_DISCORD_LIVENESS_*`, `_last_liveness_ok`, `_gateway_is_live`, `_liveness_watchdog_loop`, and `on_resumed` clock refresh) must not be resurrected as a second WebSocket engine.
 
-Core behavior:
+Fork-unique residue:
 
-- On `connect()` success the adapter seeds a monotonic last-live timestamp and starts a background `_liveness_watchdog_loop`.
-- The loop first probes discord.py's public signals — `Client.is_closed()` and `Client.latency` (finite on a healthy connection; `inf`/NaN when there is no live heartbeat) — and then, when available, checks discord.py's keepalive timestamps (`_last_ack` / `_last_recv`) so a stale finite `Client.latency` from a half-dead/CLOSE-WAIT socket cannot refresh liveness forever. The keepalive read is best-effort and falls back to public signals if discord.py changes.
-- Healthy probe refreshes the last-live timestamp. `on_ready` and `on_resumed` also refresh it, so a routine RESUME/heartbeat gap never trips the watchdog.
-- Once the connection has been continuously non-live past `_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS` (default 150s, comfortably beyond discord.py's ~41.25s heartbeat interval + a RESUME window), the watchdog marks a RETRYABLE fatal error (`discord_gateway_wedged`) and calls `_notify_fatal_error()` — the exact same path `_handle_bot_task_done` uses — so the adapter is removed and Discord is re-queued for the existing reconnect watcher. It fires at most once per wedge (returns after notifying); the fresh reconnect adapter starts its own watchdog.
-- The watchdog defers (returns without firing) when `_disconnecting`, when `_running` is false, or when the bot task is already done (that case is owned by `_handle_bot_task_done`), so it never double-reports.
-- `disconnect()` cancels the watchdog before teardown so an intentional shutdown never fires a spurious wedge.
-- This adds the missing SENSOR only; it reuses the existing fatal-error/reconnect machinery and does not add a new recovery path, does not touch prompt caching, and does not change the healthy-path lifecycle.
+1. **Independent REST delivery-path probe.** WebSocket health does not prove Discord REST calls still work. `connect()` starts `_start_rest_liveness_probe` alongside upstream `_start_liveness_probe`; `_rest_liveness_loop` periodically calls `fetch_user`, resets on success, and after `rest_liveness_failure_threshold` consecutive failures sets retryable fatal code `discord_rest_health_stale` and reuses upstream's bounded close/notify path. Configuration lives in Discord platform `extra` as `rest_liveness_interval_seconds` (default 60) and `rest_liveness_failure_threshold` (default 3). `_rest_liveness_task` is separate from upstream `_liveness_task` / `_liveness_notification_task`, and `disconnect()` cancels both engines.
+2. **Process-level event-loop watchdog.** `gateway/run.py` keeps an in-loop heartbeat plus an out-of-loop monitor thread. If the asyncio loop stops advancing past `gateway.event_loop_watchdog.threshold_seconds`, it dumps all-thread stacks to `~/.hermes/logs/gateway-event-loop-watchdog.log` and exits with `GATEWAY_SERVICE_RESTART_EXIT_CODE` so systemd can restart the half-dead gateway. Draining and intentional shutdown suppress the watchdog.
 
 Key files:
 
-- `plugins/platforms/discord/adapter.py` (constants `_DISCORD_LIVENESS_PROBE_INTERVAL_SECONDS`, `_DISCORD_LIVENESS_STALE_THRESHOLD_SECONDS`; state `_liveness_task`, `_last_liveness_ok`; `_start_liveness_watchdog`, `_cancel_liveness_watchdog`, `_gateway_is_live`, `_gateway_heartbeat_age_seconds`, `_liveness_watchdog_loop`; `on_ready`/`on_resumed` refresh; `connect()` start; `disconnect()` cancel)
-- `gateway/run.py` (process-level event-loop watchdog: in-loop heartbeat task, out-of-loop monitor thread, `gateway.event_loop_watchdog.*` config, stack dump to `~/.hermes/logs/gateway-event-loop-watchdog.log`, and exit via `GATEWAY_SERVICE_RESTART_EXIT_CODE` so systemd restarts a half-dead gateway)
-- `hermes_cli/config.py` (default `gateway.event_loop_watchdog` config block)
-- `tests/gateway/test_discord_liveness_watchdog.py` (healthy never-fires, wedged fires retryable, closed-ws non-live, stale finite `Client.latency` rejected via keepalive age, grace-window suppression, done-bot-task defer, disconnecting defer, `_gateway_is_live` classification)
-- `tests/gateway/test_gateway_event_loop_watchdog.py` (stale heartbeat exits with service-restart code, fresh heartbeat does not fire, draining suppresses the watchdog, heartbeat task updates the tick)
+- `plugins/platforms/discord/adapter.py` (upstream WebSocket liveness plus fork `_rest_liveness_*` state/methods)
+- `gateway/run.py` (process event-loop heartbeat/monitor and restart exit)
+- `hermes_cli/config.py` (event-loop watchdog config)
+- `tests/gateway/test_discord_liveness.py` (upstream WebSocket baseline)
+- `tests/gateway/test_discord_liveness_watchdog.py` (fork REST probe isolation, success/failure, and cancellation)
+- `tests/gateway/test_gateway_event_loop_watchdog.py`
 
-Commits:
-
-- `d1ff7aba6` - Discord gateway liveness watchdog for silently-wedged connections.
+Commits: `d1ff7aba6` and the 2026-07-06 event-loop watchdog follow-up; v2026.7.20 integration intentionally shrinks the old Discord-specific residue to REST-only.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/gateway/test_discord_liveness_watchdog.py tests/gateway/test_gateway_event_loop_watchdog.py tests/gateway/test_discord_connect.py -o 'addopts=' -q
+python -m pytest tests/gateway/test_discord_liveness.py tests/gateway/test_discord_liveness_watchdog.py tests/gateway/test_gateway_event_loop_watchdog.py tests/gateway/test_discord_connect.py -o 'addopts=' -q
 ```
 
 Live smoke for Jake's profile:
 
-- Confirm the current gateway process is running the fixed adapter and, on a real transient network drop, the gateway logs either a normal discord.py RESUME (no watchdog action) or, on a true wedge, `Discord gateway wedged: websocket non-live for Ns` followed by the reconnect watcher re-queuing Discord and a fresh `Connected as hermes#...`.
-- For Discord-only stale-socket wedges, simulate/observe a finite stale `Client.latency` with old keepalive timestamps and confirm the adapter logs `Discord gateway wedged: websocket non-live for Ns`, then reconnects. For full-loop wedges like 2026-07-06 (API `:8642` accepts TCP but `/health` times out, and normal gateway housekeeping logs stop), confirm no manual restart is needed: after `gateway.event_loop_watchdog.threshold_seconds`, systemd should restart the service and `gateway-event-loop-watchdog.log` should contain all-thread stack forensics.
-
-**v2026.7.1 convergence note:** upstream independently added a Discord silent-wedge detector (#26656) — an active REST `fetch_user` probe on a timer that catches a socket wedged behind a dead proxy/NAT that never delivers a RST. The fork's detector is passive: it reads discord.py's public `is_closed()`/`latency` plus keepalive-timestamp freshness (`_gateway_is_live`/`_gateway_heartbeat_age_seconds`) to catch a half-open/CLOSE-WAIT websocket. These catch DIFFERENT failure modes, so resolution keeps BOTH as complementary detectors with separate task handles: the fork's passive watchdog on `self._liveness_task` (started via `_start_liveness_watchdog`, cancelled via `_cancel_liveness_watchdog`) and upstream's active REST probe on the new `self._rest_liveness_task` (started via `_start_liveness_probe`, cancelled via `_cancel_liveness_task`). `connect()` starts both; `disconnect()` cancels both. The process-level event-loop watchdog in `gateway/run.py` (2026-07-06, this section's sibling) is unaffected and survived the merge intact. `tests/gateway/test_discord_liveness_watchdog.py` + `test_discord_connect.py` pass.
+- On a true Gateway socket wedge, expect upstream's `Discord Gateway WebSocket unhealthy` / `forcing reconnect` path and a fresh Discord connection without a manual service restart.
+- On repeated REST delivery failures with the WebSocket still alive, expect `Discord REST liveness probe failed` followed by `discord_rest_health_stale` and the same reconnect supervisor path.
+- For a full-loop wedge (API port accepts TCP but `/health` times out and gateway housekeeping stops), confirm systemd restarts the service after the event-loop threshold and the forensics log contains all-thread stacks.
 
 ### 21. MoA gateway safeguards (prompt echo + non-streaming acting turns)
 
@@ -1018,6 +1031,9 @@ python -m pytest \
   tests/agent/test_display.py \
   tests/gateway/test_display_config.py \
   tests/gateway/test_platform_base.py \
+  tests/gateway/test_config.py \
+  tests/gateway/test_stt_config.py \
+  tests/gateway/test_stt_transcript_echo_config.py \
   tests/gateway/test_voice_transcript_persistence.py \
   tests/gateway/test_voice_transcript_echo.py \
   tests/gateway/test_discord_voice_steer.py \
@@ -1039,6 +1055,7 @@ python -m pytest \
   tests/hermes_cli/test_runtime_provider_resolution.py \
   tests/providers/test_provider_profiles.py \
   tests/agent/test_auxiliary_main_first.py \
+  tests/agent/test_auxiliary_runtime_cache_key.py \
   tests/acp/test_session.py \
   tests/acp_adapter/test_acp_commands.py \
   tests/run_agent/test_image_shrink_recovery.py \
@@ -1051,6 +1068,12 @@ python -m pytest \
   tests/agent/test_codex_ttfb_watchdog.py \
   tests/run_agent/test_retry_status_buffer.py \
   tests/tools/test_mcp_tool.py \
+  tests/tools/test_mcp_parked_self_probe.py \
+  tests/tools/test_mcp_reconnect_retry_reset.py \
+  tests/gateway/test_discord_liveness.py \
+  tests/gateway/test_discord_liveness_watchdog.py \
+  tests/gateway/test_gateway_event_loop_watchdog.py \
+  tests/gateway/test_discord_connect.py \
   -o 'addopts=' -q
 ```
 

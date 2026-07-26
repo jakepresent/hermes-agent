@@ -1,6 +1,6 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-07-26 (v2026.7.20 integration in progress)
+Last audited: 2026-07-26 (v2026.7.20 integrated and preservation-tested)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
@@ -13,6 +13,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
 - Integration branch: `jake/integrate-v2026.7.20-20260726-033213`
 - Pre-merge fork HEAD: `34e62bfe1`
 - Upstream release integrated: `v2026.7.20` (peeled commit `3ef6bbd201263d354fd83ec55b3c306ded2eb72a`)
+- Merge commit: `62fc9178c86129e4a47860eb704f9fe66782c66a` (`merge: integrate Hermes v2026.7.20`)
 - Rollback marker: `jake/rollback-before-v2026.7.20-20260726-033213` at `34e62bfe1`
 - The merge was performed in isolated worktree `/tmp/hermes-v2026.7.20-integration-20260726-033213`; Jake's live checkout and gateway were not switched during conflict resolution or tests.
 - 29 files conflicted. The important resolutions were feature convergences rather than side-picks:

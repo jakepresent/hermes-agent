@@ -271,6 +271,26 @@ Live smoke:
 - Set `display.platforms.discord.expand_terminal_commands: true` while Discord tool progress remains `all`.
 - Trigger a terminal invocation with several shell actions. Discord must show the full cleaned command block, while a subsequent web/file tool call remains compact.
 
+#### Markdown-safe MCP progress labels (fork-only)
+
+Discord interprets the double-underscore separators in raw MCP registry names such as `mcp__ado__wiki_get_page_content` as Markdown emphasis, producing smashed progress text like `mcpadowiki_get_page_content`. Gateway/API display labels now generically split MCP server and operation identifiers, preserve common acronyms, handle snake_case and CamelCase, and render stable labels such as `ADO · Wiki Get Page Content`. The compact preview path uses the same display label instead of falling back to the raw registry name.
+
+Key files:
+
+- `agent/display.py` (`get_tool_display_label`, `_humanize_tool_identifier`)
+- `gateway/run.py` (compact custom/plugin/MCP preview rendering)
+- `tests/agent/test_display.py`
+
+Commit: `82e63bfc2` - human-readable, Markdown-safe MCP progress labels.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/agent/test_display.py tests/gateway/test_run_progress_topics.py -o 'addopts=' -q
+```
+
+Expected Discord shape: `⚙️ ADO · Wiki Get Page Content...` rather than the raw MCP registry name.
+
 ### 6. Voice note transcription, transcript persistence, transcript echo, and active-run voice steering
 
 Purpose: make Discord/native voice notes useful in Hermes, including local searchable capture and active-run steering.
@@ -916,6 +936,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 - `a21110f43` `2026-05-23` - `feat: add Discord guild message search`
 - `6adab27d8` `2026-05-23` - `fix: omit chat chunk pagination markers`
 - `feabad30f` `2026-05-23` - `feat: improve gateway tool progress labels`
+- `82e63bfc2` `2026-07-27` - `fix(discord): humanize MCP progress labels` (prevents Markdown from consuming `mcp__server__operation` separators)
 - `7731faed9` `2026-05-29` - `fix: reduce retry and memory-full noise`
 - `d1ff7aba6` `2026-07-02` - `fix(discord): watchdog for silently-wedged gateway (green service, dead bot)`
 - `87b33d621` - Gateway watchdog follow-up: reject stale finite Discord heartbeat latency and restart on wedged gateway event loop.

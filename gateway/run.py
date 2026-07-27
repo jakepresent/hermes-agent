@@ -19968,8 +19968,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Friendly labels: render a human-phrased line for built-in
                 # tools ("🔍 Searching the web for ...") by prefixing the verb
                 # onto the preview the callback already computed (so the
-                # command/url/query is preserved).  Custom/plugin/MCP tools
-                # have no verb and fall back to the raw "tool_name: ..." form.
+                # command/url/query is preserved). Custom/plugin/MCP tools
+                # have no verb; use the shared display label rather than the
+                # raw registry name because MCP ``__`` separators are consumed
+                # as emphasis markers on Markdown surfaces such as Discord.
                 _verb = get_tool_verb(tool_name)
                 if _verb:
                     if verb_drops_preview(tool_name):
@@ -19977,7 +19979,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     else:
                         msg = f"{emoji} {_verb}{tool_verb_connector(tool_name)}{preview}"
                 else:
-                    msg = f"{emoji} {tool_name}: \"{preview}\""
+                    msg = f"{emoji} {tool_label}: \"{preview}\""
                 last_was_terminal_block[0] = False
             else:
                 msg = f"{emoji} {tool_label}..."

@@ -214,6 +214,21 @@ class TestBuildToolPreview:
         assert get_tool_display_label("memory", {"action": "remove"}) == "Memory Remove"
         assert get_tool_display_label("search_files", {}) == "File Search"
 
+    def test_mcp_tool_display_labels_are_human_readable_and_markdown_safe(self):
+        assert (
+            get_tool_display_label("mcp__ado__wiki_get_page_content", {})
+            == "ADO · Wiki Get Page Content"
+        )
+        assert (
+            get_tool_display_label("mcp__teams__GetUserPresence", {})
+            == "Teams · Get User Presence"
+        )
+        assert (
+            get_tool_display_label("mcp__m365_copilot__copilot_chat", {})
+            == "M365 Copilot · Copilot Chat"
+        )
+        assert get_tool_display_label("mcp__malformed", {}) == "mcp__malformed"
+
     def test_memory_replace_missing_old_text_marked(self):
         # Avoid empty quotes "" in the preview when old_text is missing/None.
         result = build_tool_preview("memory", {"action": "replace", "target": "memory"})

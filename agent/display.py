@@ -170,6 +170,37 @@ def get_tool_emoji(tool_name: str, default: str = "⚡") -> str:
     return default
 
 
+_MCP_DISPLAY_ACRONYMS = {
+    "ado": "ADO",
+    "ai": "AI",
+    "api": "API",
+    "icm": "IcM",
+    "id": "ID",
+    "ids": "IDs",
+    "json": "JSON",
+    "m365": "M365",
+    "mcp": "MCP",
+    "pr": "PR",
+    "url": "URL",
+    "wiql": "WIQL",
+    "yaml": "YAML",
+}
+
+
+def _humanize_tool_identifier(value: str) -> str:
+    """Turn snake/camel-case registry identifiers into a stable UI label."""
+    text = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    tokens = re.sub(r"[_-]+", " ", text).split()
+    rendered = []
+    for token in tokens:
+        replacement = _MCP_DISPLAY_ACRONYMS.get(token.lower())
+        if replacement:
+            rendered.append(replacement)
+        elif token:
+            rendered.append(token[0].upper() + token[1:])
+    return " ".join(rendered)
+
+
 def get_tool_display_label(tool_name: str, args: dict | None = None) -> str:
     """Return a human-facing tool label for gateway/API progress UIs.
 
@@ -178,6 +209,18 @@ def get_tool_display_label(tool_name: str, args: dict | None = None) -> str:
     Unknown tools intentionally fall back to their registry name for debugging.
     """
     args = args if isinstance(args, dict) else {}
+    if tool_name.startswith("mcp__"):
+        parts = tool_name.split("__", 2)
+        if len(parts) == 3 and parts[1] and parts[2]:
+            server = _humanize_tool_identifier(parts[1])
+            operation = _humanize_tool_identifier(parts[2])
+            if server and operation:
+                # Raw MCP names contain double underscores, which Discord
+                # interprets as Markdown emphasis and renders as a smashed
+                # name such as ``mcpadowiki_get_page_content``.  A generic
+                # human label stays readable on Markdown and plain-text
+                # surfaces while retaining both server and operation.
+                return f"{server} · {operation}"
     if tool_name == "memory_search":
         return "Memory Search"
     if tool_name == "memory":

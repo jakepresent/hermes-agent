@@ -908,6 +908,46 @@ Preservation checks:
 python -m pytest tests/agent/test_prompt_builder.py -o 'addopts=' -q
 ```
 
+### 24. Inline top-level delegation mode
+
+Purpose: keep delegated review/research results inside the turn that commissioned
+them, rather than letting a stale completion wake a second full agent loop after
+the parent task has already finished or exhausted its turn budget.
+
+Core behavior:
+
+- `delegation.top_level_mode` accepts `background` (upstream-compatible default)
+  or `inline`.
+- In `inline` mode, model-facing top-level single tasks and batches wait inside
+  the current `delegate_task` tool call and return their final summary there. No
+  durable async completion is queued, so nothing can arrive later as a synthetic
+  user turn.
+- The model cannot override the operator's mode through the deprecated
+  `background` argument. Orchestrator children remain inline in either mode.
+- Dynamic tool-schema text reflects the configured mode, and changing the mode
+  invalidates the gateway's cached agent so future turns do not retain stale
+  background-delivery guidance.
+
+Key files:
+
+- `tools/delegate_tool.py` (`_get_top_level_mode`, `_model_background_value`, dynamic schema text)
+- `run_agent.py` (`_dispatch_delegate_task`)
+- `gateway/run.py` (`_CACHE_BUSTING_CONFIG_KEYS`)
+- `hermes_cli/config.py` (`delegation.top_level_mode` default)
+- `tests/tools/test_async_delegation.py`
+- `tests/gateway/test_agent_cache.py`
+
+Commits:
+
+- `a5a03d980` - add operator-controlled inline top-level delegation.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/tools/test_async_delegation.py tests/gateway/test_agent_cache.py tests/hermes_cli/test_config.py -o 'addopts=' -q
+cd website && npm run build
+```
+
 ## Complete commit ledger by feature bucket
 
 This is the raw commit map from the audited branch, grouped as the recommended history-cleanup overlay. It intentionally avoids rewriting history on a published branch.
@@ -1007,6 +1047,10 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 ### Skills system-prompt policy
 
 - `93295c914` `2026-07-18` - `fix(skills): reuse loaded skills for follow-ups`
+
+### Delegation lifecycle behavior
+
+- `a5a03d980` `2026-08-06` - `feat(delegation): add inline top-level mode`
 
 ### Test-only / no-net-change / integration bookkeeping
 

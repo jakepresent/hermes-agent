@@ -684,6 +684,22 @@ def test_invalid_top_level_mode_falls_back_to_background(monkeypatch, caplog):
     assert "delegation.top_level_mode" in caplog.text
 
 
+def test_bounded_completion_turn_blocks_recursive_delegation():
+    import run_agent
+
+    class _BoundedAgent:
+        _delegation_disabled_for_turn = True
+
+    result = json.loads(
+        run_agent.AIAgent._dispatch_delegate_task(  # type: ignore[arg-type]
+            _BoundedAgent(), {"goal": "spawn again"}
+        )
+    )
+
+    assert "error" in result
+    assert "bounded background-completion" in result["error"]
+
+
 def test_run_agent_dispatch_forces_background():
     """run_agent._dispatch_delegate_task — the live model path — forces
     background on for any top-level delegation (single OR batch) and off for a

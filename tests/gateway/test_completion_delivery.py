@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from gateway.config import Platform
-from gateway.run import GatewayRunner
+from gateway.run import GatewayRunner, _is_bounded_delegation_silence
 from gateway.session import SessionSource
 from tools.process_registry import ProcessRegistry, ProcessSession
 
@@ -110,6 +110,55 @@ def test_duplicate_async_queue_replay_injects_once(monkeypatch, isolated_registr
     asyncio.run(runner._async_delegation_watcher(interval=0))
 
     adapter.handle_message.assert_awaited_once()
+    delivered = adapter.handle_message.await_args.args[0]
+    assert delivered.text.count("Found it") == 1
+    assert "COALESCED 2" not in delivered.text
+
+
+def test_distinct_same_session_completions_are_coalesced(monkeypatch, isolated_registry):
+    isolated = queue.Queue()
+    monkeypatch.setattr(isolated_registry, "completion_queue", isolated)
+    first = _async_event("deleg_first")
+    second = _async_event("deleg_second")
+    second["summary"] = "Found a second issue"
+    isolated.put(first)
+    isolated.put(second)
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    _stop_after_sleeps(monkeypatch, runner, count=2)
+
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+
+    adapter.handle_message.assert_awaited_once()
+    delivered = adapter.handle_message.await_args.args[0]
+    assert "COALESCED 2" in delivered.text
+    assert "Found it" in delivered.text
+    assert "Found a second issue" in delivered.text
+
+
+def test_bounded_completion_event_carries_turn_policy(monkeypatch):
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    event = _async_event("deleg_bounded")
+    runner._enrich_async_delegation_routing(event)
+    monkeypatch.setattr("gateway.run._delegation_completion_max_turns", lambda: 5)
+
+    asyncio.run(runner._inject_watch_notification("review result", event))
+
+    delivered = adapter.handle_message.await_args.args[0]
+    assert delivered.internal is True
+    assert "BOUNDED BACKGROUND DELEGATION CONTINUATION" in delivered.text
+    assert delivered.metadata["delegation_completion_max_turns"] == 5
+    assert delivered.metadata["delegation_completion_payload"] == "review result"
+    assert delivered.metadata["disable_delegation_for_turn"] is True
+
+
+def test_bounded_completion_silence_is_suppressed_only_for_bounded_turns():
+    sentinel = "[NO_USER_VISIBLE_UPDATE]"
+    assert _is_bounded_delegation_silence(sentinel, bounded=True) is True
+    assert _is_bounded_delegation_silence(sentinel, bounded=False) is False
+    assert _is_bounded_delegation_silence("useful delta", bounded=True) is False
 
 
 def test_unroutable_async_event_is_not_requeued_forever(
@@ -154,6 +203,36 @@ def test_concurrent_claims_share_the_same_narrow_delivery_seam():
         return await asyncio.gather(first, second)
 
     assert sorted(asyncio.run(_exercise()), key=str) == [None, True]
+    adapter.handle_message.assert_awaited_once()
+
+
+def test_coalesced_delivery_claims_and_acknowledges_every_delegation(monkeypatch):
+    from tools import async_delegation
+
+    claimed = []
+    acknowledged = []
+    monkeypatch.setattr(
+        async_delegation,
+        "claim_completion_delivery",
+        lambda delegation_id, claim_id: claimed.append((delegation_id, claim_id)) or True,
+    )
+    monkeypatch.setattr(
+        async_delegation,
+        "complete_completion_delivery",
+        lambda delegation_id, claim_id: acknowledged.append((delegation_id, claim_id)) or True,
+    )
+
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    event = _async_event("deleg_one")
+    event["delegation_ids"] = ["deleg_one", "deleg_two"]
+
+    assert asyncio.run(
+        runner._deliver_completion_notification("combined", event)
+    ) is True
+
+    assert [item[0] for item in claimed] == ["deleg_one", "deleg_two"]
+    assert [item[0] for item in acknowledged] == ["deleg_one", "deleg_two"]
     adapter.handle_message.assert_awaited_once()
 
 

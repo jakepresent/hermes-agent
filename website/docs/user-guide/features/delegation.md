@@ -10,6 +10,27 @@ The `delegate_task` tool spawns child AIAgent instances with isolated context, i
 
 Top-level model calls run in the background by default. Hermes returns a handle immediately so the conversation can continue, then posts the result back as a new message. Set `delegation.top_level_mode: inline` to wait and return the result in the current turn instead, preventing late completion messages from waking a second agent loop. An orchestrator subagent always waits for its own workers so it can synthesize their results before returning.
 
+### Bound Late Completions Without Losing Background Work
+
+To keep background concurrency while preventing a late subagent from receiving a
+second full agent budget, set:
+
+```yaml
+delegation:
+  top_level_mode: background
+  completion_max_turns: 5
+```
+
+A completion that reaches the parent during active tool work is absorbed at the
+next safe tool boundary and uses the parent's remaining budget. If the parent has
+already ended, Hermes starts a continuation capped to five model/tool rounds.
+Completions drained together for the same originating session are coalesced into
+that continuation. Recursive delegation is blocked, and a redundant result can
+finish silently instead of posting a duplicate update.
+
+Set `completion_max_turns: 0` to retain the legacy behavior where every late
+completion starts an ordinary full-budget turn.
+
 ## Single Task
 
 ```python

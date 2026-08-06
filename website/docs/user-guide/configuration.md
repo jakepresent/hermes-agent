@@ -2047,6 +2047,7 @@ Configure subagent behavior for the delegate tool:
 ```yaml
 delegation:
   top_level_mode: background                 # background (default) | inline
+  completion_max_turns: 0                    # 0 = legacy full turn; e.g. 5 = bounded late continuation
   # model: "google/gemini-3-flash-preview"  # Override model (empty = inherit parent)
   # provider: "openrouter"                  # Override provider (empty = inherit parent)
   # base_url: "http://localhost:1234/v1"    # Direct OpenAI-compatible endpoint (takes precedence over provider)
@@ -2063,6 +2064,15 @@ the child or batch and returns its summary in the current `delegate_task` tool
 result. Use `inline` when a late completion would be confusing or when it must
 not start another full agent loop. The tradeoff is that the current turn remains
 busy until delegated work finishes.
+
+**Late completion budget:** `completion_max_turns: 0` preserves the legacy
+behavior where a background completion starts an ordinary full-budget turn.
+Set a positive value such as `5` to keep background execution without granting
+a late result the normal agent budget. When the parent is still running a tool,
+Hermes steers the result into that turn at the next safe boundary. Otherwise it
+starts one continuation capped to the configured rounds, coalesces completions
+for the same originating session, blocks recursive delegation, and suppresses
+the follow-up when the result adds no user-visible information.
 
 **Subagent provider:model override:** By default, subagents inherit the parent agent's provider and model. Set `delegation.provider` and `delegation.model` to route subagents to a different provider:model pair — e.g., use a cheap/fast model for narrowly-scoped subtasks while your primary agent runs an expensive reasoning model.
 

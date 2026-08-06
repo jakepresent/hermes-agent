@@ -2351,6 +2351,8 @@ DEFAULT_CONFIG = {
     "delegation": {
         "top_level_mode": "background",  # "background" = fresh completion turn later;
                                           # "inline" = wait and return in the current turn
+        "completion_max_turns": 0,        # max rounds for a late background completion;
+                                          # 0 = legacy full turn, positive = bounded continuation
         "model": "",       # e.g. "google/gemini-3-flash-preview" (empty = inherit parent model)
         "provider": "",    # e.g. "openrouter" (empty = inherit parent provider + credentials)
         "base_url": "",    # direct OpenAI-compatible endpoint for subagents

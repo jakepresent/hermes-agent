@@ -1669,6 +1669,75 @@ def _current_max_iterations() -> int:
         return 90
 
 
+def _delegation_completion_max_turns(config: Optional[dict] = None) -> int:
+    """Return the bounded budget for late delegation continuations.
+
+    ``0`` preserves the legacy full-turn behavior. Positive values are capped
+    only by the main agent budget when a late completion starts a fresh turn.
+    """
+    if config is None:
+        try:
+            config = _load_gateway_config()
+        except Exception:
+            config = {}
+    delegation = config.get("delegation") if isinstance(config, dict) else None
+    raw = delegation.get("completion_max_turns", 0) if isinstance(delegation, dict) else 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "delegation.completion_max_turns=%r is invalid; using legacy full-turn delivery",
+            raw,
+        )
+        return 0
+
+
+def _effective_turn_max_iterations(
+    configured_max: int,
+    override: Optional[int],
+) -> int:
+    """Clamp a one-turn override without ever expanding the configured budget."""
+    if override is None:
+        return configured_max
+    try:
+        return max(1, min(configured_max, int(override)))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid per-turn max_iterations override: %r", override)
+        return configured_max
+
+
+_BOUNDED_DELEGATION_SILENCE = "[NO_USER_VISIBLE_UPDATE]"
+
+
+def _bounded_delegation_completion_prompt(payload: str, max_turns: int) -> str:
+    """Wrap a late result with bounded, non-recursive continuation guidance."""
+    return (
+        f"[BOUNDED BACKGROUND DELEGATION CONTINUATION — max {max_turns} rounds]\n"
+        "A subagent result arrived after its commissioning turn ended. Reconcile "
+        "it with the current session state and use the limited rounds only for a "
+        "meaningful delta: inspect, make a small correction, run a focused check, "
+        "or explain what changed. Do not delegate again and do not start background "
+        "work. If the parent already handled everything and there is no useful "
+        f"user-visible update, respond exactly {_BOUNDED_DELEGATION_SILENCE}.\n\n"
+        f"{payload}"
+    )
+
+
+def _active_turn_delegation_completion_prompt(payload: str) -> str:
+    """Tail context for a result absorbed into the still-running parent turn."""
+    return (
+        "[BACKGROUND DELEGATION COMPLETED DURING THIS TURN]\n"
+        "Incorporate this result if it materially helps the current task. If it is "
+        "stale or already handled, continue the original task without restating it. "
+        "Do not start another delegation in response.\n\n"
+        f"{payload}"
+    )
+
+
+def _is_bounded_delegation_silence(response: object, *, bounded: bool) -> bool:
+    return bounded and str(response or "").strip() == _BOUNDED_DELEGATION_SILENCE
+
+
 from contextlib import contextmanager as _contextmanager
 
 
@@ -6342,18 +6411,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not adapter:
             return False  # let default path handle it
 
-        # --- Internal synthetic events must never interrupt/steer ---
-        # Async-delegation completions (delegate_task(background=true)) and
-        # background-process completions (terminal notify_on_complete) re-enter
-        # the originating session as internal MessageEvents. When the session
-        # is busy, treating them like a user TEXT message means interrupt-mode
-        # (the default busy_text_mode) aborts the active turn AND sends a "⚡
-        # Interrupting current task" ack — exactly the opposite of the design
-        # invariant that a completion surfaces as a NEW turn only when idle and
-        # never splices into a running turn. Fall through to the base adapter,
-        # which queues internal events silently (no interrupt, no ack) so they
-        # cascade after the current turn finishes.
+        # --- Internal synthetic events normally queue behind the active turn ---
+        # A bounded async-delegation completion is the exception: steer it into
+        # the still-running parent at the next safe model boundary so it uses the
+        # parent's remaining budget instead of spawning a fresh continuation.
         if getattr(event, "internal", False):
+            metadata = event.metadata if isinstance(event.metadata, dict) else {}
+            completion_turns = metadata.get("delegation_completion_max_turns", 0)
+            running_agent = self._running_agents.get(session_key)
+            current_tool = None
+            has_remaining_round = False
+            if (
+                running_agent is not None
+                and running_agent is not _AGENT_PENDING_SENTINEL
+                and hasattr(running_agent, "get_activity_summary")
+            ):
+                try:
+                    activity = running_agent.get_activity_summary()
+                    current_tool = activity.get("current_tool")
+                    api_calls = int(activity.get("api_call_count", 0))
+                    max_iterations = int(activity.get("max_iterations", 0))
+                    has_remaining_round = max_iterations > api_calls
+                except Exception:
+                    current_tool = None
+                    has_remaining_round = False
+            if (
+                metadata.get("synthetic_event_type") == "async_delegation"
+                and completion_turns
+                and current_tool
+                and has_remaining_round
+                and running_agent is not None
+                and running_agent is not _AGENT_PENDING_SENTINEL
+                and hasattr(running_agent, "steer")
+            ):
+                payload = str(
+                    metadata.get("delegation_completion_payload") or event.text or ""
+                )
+                try:
+                    if running_agent.steer(
+                        _active_turn_delegation_completion_prompt(payload)
+                    ):
+                        logger.info(
+                            "Absorbed async delegation completion into active session %s",
+                            session_key,
+                        )
+                        return True
+                except Exception as exc:
+                    logger.warning(
+                        "Active-turn delegation completion steer failed for %s: %s",
+                        session_key,
+                        exc,
+                    )
             return False
 
         running_agent = self._running_agents.get(session_key)
@@ -13456,6 +13564,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # below; a /new or another lifecycle transition may move
             # session_entry.session_id while the old run is still unwinding.
             _run_start_session_id = session_entry.session_id
+            _event_metadata = event.metadata if isinstance(event.metadata, dict) else {}
+            try:
+                _completion_turn_cap = max(
+                    0, int(_event_metadata.get("delegation_completion_max_turns", 0))
+                )
+            except (TypeError, ValueError):
+                _completion_turn_cap = 0
+            _is_bounded_delegation_completion = (
+                _event_metadata.get("synthetic_event_type") == "async_delegation"
+                and _completion_turn_cap > 0
+            )
             agent_result = await self._run_agent(
                 message=message_text,
                 context_prompt=context_prompt,
@@ -13469,6 +13588,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 moa_config=getattr(event, "_moa_config", None),
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                turn_max_iterations=(
+                    _completion_turn_cap if _is_bounded_delegation_completion else None
+                ),
+                turn_disable_delegation=bool(
+                    _event_metadata.get("disable_delegation_for_turn", False)
+                ),
             )
 
             # Stop persistent typing indicator now that the agent is done.
@@ -13509,6 +13634,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 return None
 
             response = agent_result.get("final_response") or ""
+            _bounded_completion_silent = _is_bounded_delegation_silence(
+                response,
+                bounded=_is_bounded_delegation_completion,
+            )
+            if _bounded_completion_silent:
+                response = ""
             # Hidden-reasoning-only retry exhaustion: the loop's sentinel text
             # ("Codex response remained incomplete after 3 continuation
             # attempts") doubles as final_response, so it would be delivered
@@ -13524,6 +13655,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
             except Exception:
                 _intentional_silence = False
+            if _bounded_completion_silent:
+                _intentional_silence = True
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
@@ -17472,8 +17605,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             parent_session_id = str(evt.get("parent_session_id") or "").strip()
             if parent_session_id:
                 metadata["gateway_session_id"] = parent_session_id
+            event_text = synth_text
+            if evt.get("type") == "async_delegation":
+                try:
+                    profile_home = self._resolve_profile_home_for_source(source)
+                    with _profile_runtime_scope(profile_home):
+                        completion_max_turns = _delegation_completion_max_turns()
+                except Exception:
+                    completion_max_turns = _delegation_completion_max_turns()
+                if completion_max_turns > 0:
+                    metadata.update(
+                        {
+                            "synthetic_event_type": "async_delegation",
+                            "delegation_completion_max_turns": completion_max_turns,
+                            "delegation_completion_payload": synth_text,
+                            "disable_delegation_for_turn": True,
+                        }
+                    )
+                    event_text = _bounded_delegation_completion_prompt(
+                        synth_text, completion_max_turns,
+                    )
             synth_event = MessageEvent(
-                text=synth_text,
+                text=event_text,
                 message_type=MessageType.TEXT,
                 source=source,
                 internal=True,
@@ -17493,6 +17646,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return False
 
     @staticmethod
+    def _delegation_event_ids(evt: dict) -> list[str]:
+        values = evt.get("delegation_ids")
+        if not isinstance(values, list):
+            values = [evt.get("delegation_id")]
+        return list(dict.fromkeys(str(value) for value in values if value))
+
+    @staticmethod
     def _completion_delivery_identity(evt: dict) -> Optional[tuple[str, str, object]]:
         """Return a producer-stable identity when one is available.
 
@@ -17504,7 +17664,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         """
         evt_type = str(evt.get("type") or "")
         if evt_type == "async_delegation":
-            producer_id = str(evt.get("delegation_id") or "")
+            producer_ids = GatewayRunner._delegation_event_ids(evt)
+            producer_id = "|".join(sorted(producer_ids))
             return (evt_type, producer_id, "") if producer_id else None
         if evt_type == "completion":
             producer_id = str(evt.get("session_id") or "")
@@ -17525,24 +17686,38 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         guarantee is claimed.
         """
         identity = self._completion_delivery_identity(evt)
-        durable_claim_id = ""
-        durable_delegation_id = ""
+        durable_claims: dict[str, str] = {}
         if evt.get("type") == "async_delegation":
-            durable_delegation_id = str(evt.get("delegation_id") or "")
-            if durable_delegation_id:
+            delegation_ids = self._delegation_event_ids(evt)
+            if delegation_ids:
                 try:
                     from tools.async_delegation import claim_completion_delivery
 
-                    durable_claim_id = f"gateway:{id(self)}:{__import__('uuid').uuid4().hex}"
-                    if not claim_completion_delivery(
-                        durable_delegation_id, durable_claim_id,
-                    ):
-                        return None
+                    for delegation_id in delegation_ids:
+                        claim_id = (
+                            f"gateway:{id(self)}:"
+                            f"{__import__('uuid').uuid4().hex}"
+                        )
+                        if not claim_completion_delivery(delegation_id, claim_id):
+                            from tools.async_delegation import release_completion_delivery
+
+                            for claimed_id, claimed_token in durable_claims.items():
+                                release_completion_delivery(claimed_id, claimed_token)
+                            return None
+                        durable_claims[delegation_id] = claim_id
                 except Exception as exc:
                     logger.warning(
-                        "Could not claim durable async completion %s: %s",
-                        durable_delegation_id, exc,
+                        "Could not claim durable async completion(s) %s: %s",
+                        delegation_ids,
+                        exc,
                     )
+                    try:
+                        from tools.async_delegation import release_completion_delivery
+
+                        for claimed_id, claimed_token in durable_claims.items():
+                            release_completion_delivery(claimed_id, claimed_token)
+                    except Exception:
+                        pass
                     return False
         if identity is not None:
             with self._completion_delivery_lock:
@@ -17570,33 +17745,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     ):
                         self._completion_deliveries_delivered.popitem(last=False)
 
-            # If the durable async-delegation producer branch is present, its
-            # SQLite row remains the authoritative replay state. Acknowledge it
-            # after adapter acceptance; this gateway keeps no parallel ledger.
-            if durable_claim_id:
+            # If durable async-delegation producer rows are present, SQLite
+            # remains the authoritative replay state. Acknowledge every member
+            # of a coalesced completion after adapter acceptance.
+            if durable_claims:
                 try:
                     from tools.async_delegation import complete_completion_delivery
 
-                    complete_completion_delivery(
-                        durable_delegation_id, durable_claim_id,
-                    )
+                    for delegation_id, claim_id in durable_claims.items():
+                        complete_completion_delivery(delegation_id, claim_id)
                 except Exception as exc:
                     logger.warning(
-                        "Could not acknowledge durable async completion %s: %s",
-                        durable_delegation_id, exc,
+                        "Could not acknowledge durable async completion(s) %s: %s",
+                        list(durable_claims),
+                        exc,
                     )
             return True
         finally:
             if identity is not None and not accepted:
                 with self._completion_delivery_lock:
                     self._completion_deliveries_inflight.discard(identity)
-            if durable_claim_id and not accepted:
+            if durable_claims and not accepted:
                 try:
                     from tools.async_delegation import release_completion_delivery
 
-                    release_completion_delivery(
-                        durable_delegation_id, durable_claim_id,
-                    )
+                    for delegation_id, claim_id in durable_claims.items():
+                        release_completion_delivery(delegation_id, claim_id)
                 except Exception:
                     logger.debug("Could not release durable completion claim", exc_info=True)
 
@@ -17655,17 +17829,61 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         requeue.append(evt)
                 for evt in requeue:
                     _pr.completion_queue.put(evt)
+
+                grouped: dict[tuple, list[dict]] = {}
                 for evt in async_events:
                     self._enrich_async_delegation_routing(evt)
-                    synth_text = _format_gateway_process_notification(evt)
-                    if not synth_text:
+                    group_key = (
+                        evt.get("session_key", ""),
+                        evt.get("parent_session_id", ""),
+                        evt.get("origin_ui_session_id", ""),
+                        evt.get("platform", ""),
+                        evt.get("chat_id", ""),
+                        evt.get("thread_id", ""),
+                    )
+                    grouped.setdefault(group_key, []).append(evt)
+
+                for group in grouped.values():
+                    unique_group = []
+                    seen_delegation_ids: set[str] = set()
+                    for item in group:
+                        delegation_id = str(item.get("delegation_id") or "")
+                        if delegation_id and delegation_id in seen_delegation_ids:
+                            continue
+                        if delegation_id:
+                            seen_delegation_ids.add(delegation_id)
+                        unique_group.append(item)
+                    group = unique_group
+                    rendered = [
+                        text
+                        for item in group
+                        if (text := _format_gateway_process_notification(item))
+                    ]
+                    if not rendered:
                         continue
+                    merged_evt = dict(group[0])
+                    merged_evt["delegation_ids"] = [
+                        item.get("delegation_id")
+                        for item in group
+                        if item.get("delegation_id")
+                    ]
+                    if len(rendered) > 1:
+                        synth_text = (
+                            f"[COALESCED {len(rendered)} BACKGROUND DELEGATION COMPLETIONS]\n\n"
+                            + "\n\n".join(rendered)
+                        )
+                    else:
+                        synth_text = rendered[0]
                     try:
-                        delivered = await self._deliver_completion_notification(synth_text, evt)
+                        delivered = await self._deliver_completion_notification(
+                            synth_text, merged_evt,
+                        )
                         if delivered is False:
-                            _pr.completion_queue.put(evt)
+                            for item in group:
+                                _pr.completion_queue.put(item)
                     except Exception as e:
-                        _pr.completion_queue.put(evt)
+                        for item in group:
+                            _pr.completion_queue.put(item)
                         logger.error("Async delegation injection error: %s", e)
             except Exception as e:
                 logger.debug("Async delegation watcher error: %s", e)
@@ -19338,6 +19556,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        turn_max_iterations: Optional[int] = None,
+        turn_disable_delegation: bool = False,
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
@@ -19356,6 +19576,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                turn_max_iterations=turn_max_iterations,
+                turn_disable_delegation=turn_disable_delegation,
             )
 
         profile_home = self._resolve_profile_home_for_source(source)
@@ -19367,6 +19589,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=channel_prompt, moa_config=moa_config,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+                turn_max_iterations=turn_max_iterations,
+                turn_disable_delegation=turn_disable_delegation,
             )
 
     def _profile_name_for_source(self, source: SessionSource) -> Optional[str]:
@@ -19488,6 +19712,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         moa_config: Optional[dict] = None,
         persist_user_message: Optional[Any] = None,
         persist_user_timestamp: Optional[float] = None,
+        turn_max_iterations: Optional[int] = None,
+        turn_disable_delegation: bool = False,
     ) -> Dict[str, Any]:
         """
         Run the agent with the given message and context.
@@ -20552,7 +20778,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             if cfg_channel_prompt:
                 combined_ephemeral = (combined_ephemeral + "\n\n" + cfg_channel_prompt).strip()
 
-            max_iterations = _current_max_iterations()
+            max_iterations = _effective_turn_max_iterations(
+                _current_max_iterations(),
+                turn_max_iterations,
+            )
 
             try:
                 model, runtime_kwargs = self._resolve_session_agent_runtime(
@@ -20959,6 +21188,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             # Per-message state — callbacks and reasoning config change every
             # turn and must not be baked into the cached agent constructor.
+            # Reset this flag on every turn so a bounded completion cannot leak
+            # its no-recursion policy into the next real user message.
+            setattr(
+                agent,
+                "_delegation_disabled_for_turn",
+                bool(turn_disable_delegation),
+            )
             # Gate on needs_progress_queue (tool_progress OR thinking_progress)
             # rather than tool_progress alone: the progress_callback also relays
             # _thinking assistant scratch text, which is gated on

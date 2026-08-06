@@ -388,6 +388,57 @@ async def test_handle_message_persists_agent_token_counts(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bounded_delegation_completion_plumbs_cap_and_suppresses_noop(monkeypatch):
+    import gateway.run as gateway_run
+
+    session_entry = SessionEntry(
+        session_key=build_session_key(_make_source()),
+        session_id="sess-bounded",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.TELEGRAM,
+        chat_type="dm",
+    )
+    runner = _make_runner(session_entry)
+    runner.session_store.load_transcript.return_value = [  # type: ignore[attr-defined]
+        {"role": "user", "content": "original task"},
+        {"role": "assistant", "content": "done"},
+    ]
+    runner._run_agent = AsyncMock(
+        return_value={
+            "final_response": "[NO_USER_VISIBLE_UPDATE]",
+            "messages": [],
+            "tools": [],
+            "history_offset": 0,
+            "api_calls": 1,
+        }
+    )
+    event = _make_event("late review result")
+    event.internal = True
+    event.metadata = {
+        "synthetic_event_type": "async_delegation",
+        "delegation_completion_max_turns": 5,
+        "disable_delegation_for_turn": True,
+    }
+
+    monkeypatch.setattr(
+        gateway_run, "_resolve_runtime_agent_kwargs", lambda: {"api_key": "***"}
+    )
+    monkeypatch.setattr(
+        "agent.model_metadata.get_model_context_length",
+        lambda *_args, **_kwargs: 100000,
+    )
+
+    result = await runner._handle_message(event)
+
+    assert result in {None, ""}
+    assert runner._run_agent.await_args is not None  # type: ignore[attr-defined]
+    call = runner._run_agent.await_args.kwargs  # type: ignore[attr-defined]
+    assert call["turn_max_iterations"] == 5
+    assert call["turn_disable_delegation"] is True
+
+
+@pytest.mark.asyncio
 async def test_first_run_slack_home_channel_onboarding_uses_parent_command(monkeypatch):
     import gateway.run as gateway_run
 

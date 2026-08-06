@@ -21,6 +21,7 @@ import time
 from types import SimpleNamespace
 
 from agent.iteration_budget import IterationBudget
+from gateway.run import _effective_turn_max_iterations
 
 
 def _make_cached_agent(max_iterations: int) -> SimpleNamespace:
@@ -90,3 +91,12 @@ def test_refreshed_max_iterations_propagates_to_turn_budget():
 
     assert agent.iteration_budget.max_total == 200
     assert agent.iteration_budget.remaining == 200
+
+
+def test_bounded_completion_override_reduces_turn_budget():
+    assert _effective_turn_max_iterations(200, 5) == 5
+
+
+def test_bounded_completion_override_never_expands_main_budget():
+    assert _effective_turn_max_iterations(3, 5) == 3
+    assert _effective_turn_max_iterations(200, None) == 200

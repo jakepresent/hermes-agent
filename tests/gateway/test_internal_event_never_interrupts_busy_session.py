@@ -10,12 +10,10 @@ default ``busy_input_mode='interrupt'`` path — calling
 completions (terminal ``notify_on_complete``), which also re-enter as internal
 events.
 
-The fix: ``_handle_active_session_busy_message`` returns ``False`` early for any
-event with ``internal=True``, so the base adapter queues it silently (no
-interrupt, no ack) and it cascades as a new turn after the current one finishes.
-This preserves strict message-role alternation and the design invariant that a
-completion surfaces as a NEW turn only when idle, never spliced into a running
-turn.
+The fix keeps ordinary internal events queue-only. Bounded async-delegation
+completions may instead use ``steer()`` to append tail context at the next safe
+model boundary, preserving the active turn while avoiding a fresh 200-round
+continuation. They still never interrupt or send a busy acknowledgement.
 """
 
 from __future__ import annotations
@@ -104,6 +102,14 @@ def _make_running_parent() -> MagicMock:
     return parent
 
 
+def _mark_bounded_delegation(event: MessageEvent, payload: str = "review result") -> None:
+    event.metadata = {
+        "synthetic_event_type": "async_delegation",
+        "delegation_completion_max_turns": 5,
+        "delegation_completion_payload": payload,
+    }
+
+
 @pytest.mark.asyncio
 async def test_internal_event_does_not_interrupt_busy_session() -> None:
     """The async-delegation completion must not abort the active turn."""
@@ -125,6 +131,98 @@ async def test_internal_event_does_not_interrupt_busy_session() -> None:
     parent.interrupt.assert_not_called()
     # No "⚡ Interrupting current task" (or any) ack for a synthetic event.
     adapter._send_with_retry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bounded_delegation_completion_steers_active_parent() -> None:
+    runner = _make_runner()
+    runner._busy_input_mode = "interrupt"
+    adapter = _make_adapter()
+    event = _make_internal_event()
+    _mark_bounded_delegation(event, "review found a race")
+    sk = build_session_key(event.source)
+    parent = _make_running_parent()
+    parent.steer.return_value = True
+    runner._running_agents[sk] = parent
+    runner.adapters[event.source.platform] = adapter
+
+    handled = await runner._handle_active_session_busy_message(event, sk)
+
+    assert handled is True
+    steer_text = parent.steer.call_args.args[0]
+    assert "COMPLETED DURING THIS TURN" in steer_text
+    assert "review found a race" in steer_text
+    parent.interrupt.assert_not_called()
+    adapter._send_with_retry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bounded_delegation_completion_queues_when_steer_rejected() -> None:
+    runner = _make_runner()
+    runner._busy_input_mode = "interrupt"
+    adapter = _make_adapter()
+    event = _make_internal_event()
+    _mark_bounded_delegation(event)
+    sk = build_session_key(event.source)
+    parent = _make_running_parent()
+    parent.steer.return_value = False
+    runner._running_agents[sk] = parent
+    runner.adapters[event.source.platform] = adapter
+
+    handled = await runner._handle_active_session_busy_message(event, sk)
+
+    assert handled is False
+    parent.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bounded_completion_queues_when_parent_has_no_safe_tool_boundary() -> None:
+    runner = _make_runner()
+    runner._busy_input_mode = "interrupt"
+    adapter = _make_adapter()
+    event = _make_internal_event()
+    _mark_bounded_delegation(event)
+    sk = build_session_key(event.source)
+    parent = _make_running_parent()
+    parent.get_activity_summary.return_value = {
+        "api_call_count": 5,
+        "max_iterations": 60,
+        "current_tool": None,
+    }
+    parent.steer.return_value = True
+    runner._running_agents[sk] = parent
+    runner.adapters[event.source.platform] = adapter
+
+    handled = await runner._handle_active_session_busy_message(event, sk)
+
+    assert handled is False
+    parent.steer.assert_not_called()
+    parent.interrupt.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_bounded_completion_queues_when_parent_budget_is_exhausted() -> None:
+    runner = _make_runner()
+    runner._busy_input_mode = "interrupt"
+    adapter = _make_adapter()
+    event = _make_internal_event()
+    _mark_bounded_delegation(event)
+    sk = build_session_key(event.source)
+    parent = _make_running_parent()
+    parent.get_activity_summary.return_value = {
+        "api_call_count": 60,
+        "max_iterations": 60,
+        "current_tool": "terminal",
+    }
+    parent.steer.return_value = True
+    runner._running_agents[sk] = parent
+    runner.adapters[event.source.platform] = adapter
+
+    handled = await runner._handle_active_session_busy_message(event, sk)
+
+    assert handled is False
+    parent.steer.assert_not_called()
+    parent.interrupt.assert_not_called()
 
 
 @pytest.mark.asyncio

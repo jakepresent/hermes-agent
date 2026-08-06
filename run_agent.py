@@ -6246,6 +6246,14 @@ class AIAgent:
         New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
         invocation paths (concurrent, sequential, inline).
         """
+        if getattr(self, "_delegation_disabled_for_turn", False):
+            from tools.registry import tool_error
+
+            return tool_error(
+                "Delegation is disabled during a bounded background-completion "
+                "continuation. Use the remaining turns to act on the completed "
+                "result directly."
+            )
         from tools.delegate_tool import (
             _model_background_value,
             _strip_model_hidden_task_fields,

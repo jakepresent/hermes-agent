@@ -2099,6 +2099,9 @@ class TestDelegationCapUnificationMigration:
     def test_default_top_level_mode_preserves_background_delivery(self):
         assert DEFAULT_CONFIG["delegation"]["top_level_mode"] == "background"
 
+    def test_late_completion_budget_is_opt_in(self):
+        assert DEFAULT_CONFIG["delegation"]["completion_max_turns"] == 0
+
 
 class TestConfigNormalizationDoesNotOverwriteUserValues:
     """Regression tests for #27354."""

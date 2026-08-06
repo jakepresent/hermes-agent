@@ -650,6 +650,40 @@ def test_model_dispatch_forces_background():
     ) is False
 
 
+def test_model_dispatch_respects_inline_top_level_mode(monkeypatch):
+    """Operator config can keep top-level delegation inside the current turn."""
+    import tools.delegate_tool as dt
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(dt, "_load_config", lambda: {"top_level_mode": "inline"})
+    top = MagicMock()
+    top._delegate_depth = 0
+    sub = MagicMock()
+    sub._delegate_depth = 1
+
+    assert dt._get_top_level_mode() == "inline"
+    assert dt._model_background_value({"goal": "x", "background": True}, top) is False
+    assert dt._model_background_value({"goal": "x"}, sub) is False
+
+    schema = dt._build_dynamic_schema_overrides()
+    assert "RUN INLINE" in schema["description"]
+    assert "never posts a late completion" in schema["description"]
+    assert "top_level_mode='inline'" in schema["parameters"]["properties"]["background"]["description"]
+
+
+def test_invalid_top_level_mode_falls_back_to_background(monkeypatch, caplog):
+    import tools.delegate_tool as dt
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(dt, "_load_config", lambda: {"top_level_mode": "surprise"})
+    top = MagicMock()
+    top._delegate_depth = 0
+
+    assert dt._get_top_level_mode() == "background"
+    assert dt._model_background_value({}, top) is True
+    assert "delegation.top_level_mode" in caplog.text
+
+
 def test_run_agent_dispatch_forces_background():
     """run_agent._dispatch_delegate_task — the live model path — forces
     background on for any top-level delegation (single OR batch) and off for a
@@ -680,6 +714,31 @@ def test_run_agent_dispatch_forces_background():
         sub._delegate_depth = 1
         run_agent.AIAgent._dispatch_delegate_task(sub, {"goal": "x"})
         assert captured["background"] is False
+
+
+def test_run_agent_dispatch_respects_inline_top_level_mode():
+    """The live run_agent intercept uses config, not the model's background arg."""
+    from unittest.mock import patch
+    import run_agent
+
+    class _FakeAgent:
+        _delegate_depth = 0
+
+    captured = {}
+
+    def _fake_delegate(**kwargs):
+        captured.update(kwargs)
+        return "{}"
+
+    with (
+        patch("tools.delegate_tool.delegate_task", _fake_delegate),
+        patch("tools.delegate_tool._load_config", return_value={"top_level_mode": "inline"}),
+    ):
+        run_agent.AIAgent._dispatch_delegate_task(  # type: ignore[arg-type]
+            _FakeAgent(), {"goal": "x", "background": True}
+        )
+
+    assert captured["background"] is False
 
 
 def test_dispatch_never_forwards_model_toolsets():

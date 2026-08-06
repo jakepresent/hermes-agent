@@ -243,6 +243,15 @@ class TestExtractCacheBustingConfig:
         assert out["compression.protect_last_n"] == 25
         assert out["compression.codex_app_server_auto"] == "hermes"
 
+    def test_reads_delegation_top_level_mode(self):
+        from gateway.run import GatewayRunner
+
+        out = GatewayRunner._extract_cache_busting_config(
+            {"delegation": {"top_level_mode": "inline"}}
+        )
+
+        assert out["delegation.top_level_mode"] == "inline"
+
     def test_missing_keys_yield_none(self):
         """Absent config keys must produce None values (still contribute to signature)."""
         from gateway.run import GatewayRunner

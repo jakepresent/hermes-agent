@@ -8,7 +8,7 @@ description: "Spawn isolated child agents for parallel workstreams with delegate
 
 The `delegate_task` tool spawns child AIAgent instances with isolated context, inherited tool access, and their own terminal sessions. Each child gets a fresh conversation and works independently — only its final summary enters the parent's context.
 
-Top-level model calls run in the background automatically. Hermes returns a handle immediately so the conversation can continue, then posts the result back as a new message. An orchestrator subagent waits for its own workers so it can synthesize their results before returning.
+Top-level model calls run in the background by default. Hermes returns a handle immediately so the conversation can continue, then posts the result back as a new message. Set `delegation.top_level_mode: inline` to wait and return the result in the current turn instead, preventing late completion messages from waking a second agent loop. An orchestrator subagent always waits for its own workers so it can synthesize their results before returning.
 
 ## Single Task
 
@@ -124,6 +124,16 @@ When a top-level agent provides a `tasks` array, Hermes returns one background h
 - **Cancellation:** Follow-up messages do not cancel a top-level background batch. `/stop` or closing/resetting the owning session cancels its active children. Synchronous orchestrator children still follow their parent's interrupt state
 
 Synchronous single-task delegation from an orchestrator runs directly without thread pool overhead.
+
+### Inline top-level mode
+
+Set `delegation.top_level_mode: inline` when predictable turn ownership matters
+more than continuing the chat while a child runs. Top-level single tasks and
+batches then block inside the current `delegate_task` call and return their final
+summary as that call's tool result. No durable completion is queued, so the
+delegation cannot arrive after you have moved on or start another full agent
+loop. The tradeoff is that the current turn stays busy until the child or batch
+finishes; `/stop` still interrupts it.
 
 ### Durable background completions
 
@@ -288,6 +298,7 @@ For **durable execution** that must survive session closure or process restart, 
 ```yaml
 # In ~/.hermes/config.yaml
 delegation:
+  top_level_mode: background                 # background (default) | inline
   max_iterations: 50                        # Max turns per child (default: 50)
   # max_concurrent_children: 3              # Parallel children per batch (default: 3)
   # max_spawn_depth: 1                      # Tree depth (floor 1, no ceiling, default 1 = flat). Raise to 2 to allow orchestrator children to spawn leaves; 3+ for deeper trees.

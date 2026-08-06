@@ -2046,6 +2046,7 @@ Configure subagent behavior for the delegate tool:
 
 ```yaml
 delegation:
+  top_level_mode: background                 # background (default) | inline
   # model: "google/gemini-3-flash-preview"  # Override model (empty = inherit parent)
   # provider: "openrouter"                  # Override provider (empty = inherit parent)
   # base_url: "http://localhost:1234/v1"    # Direct OpenAI-compatible endpoint (takes precedence over provider)
@@ -2055,6 +2056,13 @@ delegation:
   max_spawn_depth: 1                        # Delegation tree depth cap (1-3, clamped). 1 = flat (default): parent spawns leaves that cannot delegate. 2 = orchestrator children can spawn leaf grandchildren. 3 = three levels.
   orchestrator_enabled: true                # Global kill switch. When false, role="orchestrator" is ignored and every child is forced to leaf regardless of max_spawn_depth.
 ```
+
+**Top-level completion mode:** `background` returns a handle immediately and
+injects the completed subagent result as a fresh turn later. `inline` waits for
+the child or batch and returns its summary in the current `delegate_task` tool
+result. Use `inline` when a late completion would be confusing or when it must
+not start another full agent loop. The tradeoff is that the current turn remains
+busy until delegated work finishes.
 
 **Subagent provider:model override:** By default, subagents inherit the parent agent's provider and model. Set `delegation.provider` and `delegation.model` to route subagents to a different provider:model pair — e.g., use a cheap/fast model for narrowly-scoped subtasks while your primary agent runs an expensive reasoning model.
 

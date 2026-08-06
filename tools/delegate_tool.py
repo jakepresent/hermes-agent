@@ -117,6 +117,8 @@ def _get_subagent_approval_callback():
 # — the model has no toolsets argument. Subagents inherit the parent's toolsets.
 
 _DEFAULT_MAX_CONCURRENT_CHILDREN = 3
+_DEFAULT_TOP_LEVEL_MODE = "background"
+_VALID_TOP_LEVEL_MODES = {"background", "inline"}
 # One-shot guard: the high-concurrency cost advisory is emitted at most once
 # per process. _get_max_concurrent_children() runs on every get_definitions()
 # schema rebuild (via _build_top_level_description / _build_tasks_param_description),
@@ -391,6 +393,26 @@ def _get_max_concurrent_children() -> int:
         except (TypeError, ValueError):
             return _DEFAULT_MAX_CONCURRENT_CHILDREN
     return _DEFAULT_MAX_CONCURRENT_CHILDREN
+
+
+def _get_top_level_mode() -> str:
+    """Return how model-facing top-level delegations deliver their result.
+
+    ``background`` preserves the upstream behavior: return a handle now and
+    inject the completion as a fresh turn later. ``inline`` waits for the
+    child/batch and returns its summary in the current tool result, preventing
+    stale completions from waking a second full agent loop.
+    """
+    raw = _load_config().get("top_level_mode", _DEFAULT_TOP_LEVEL_MODE)
+    mode = str(raw or _DEFAULT_TOP_LEVEL_MODE).strip().lower()
+    if mode in _VALID_TOP_LEVEL_MODES:
+        return mode
+    logger.warning(
+        "delegation.top_level_mode=%r is invalid; using %s",
+        raw,
+        _DEFAULT_TOP_LEVEL_MODE,
+    )
+    return _DEFAULT_TOP_LEVEL_MODE
 
 
 _LEGACY_MAX_ASYNC_WARNED = False
@@ -3351,6 +3373,10 @@ def _build_top_level_description() -> str:
         orchestrator_on = _get_orchestrator_enabled()
     except Exception:
         orchestrator_on = True
+    try:
+        top_level_mode = _get_top_level_mode()
+    except Exception:
+        top_level_mode = _DEFAULT_TOP_LEVEL_MODE
 
     if max_depth >= 2 and orchestrator_on:
         nesting_clause = (
@@ -3374,6 +3400,24 @@ def _build_top_level_description() -> str:
             f"config.yaml to enable nesting."
         )
 
+    if top_level_mode == "inline":
+        execution_clause = (
+            "TOP-LEVEL DELEGATIONS RUN INLINE on this install "
+            "(delegation.top_level_mode=inline). delegate_task waits for the "
+            "child or batch and returns the final result in the CURRENT turn; "
+            "it never posts a late completion as a new message. Do not tell the "
+            "user to keep working while it runs.\n\n"
+        )
+    else:
+        execution_clause = (
+            "BOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
+            "you and the user keep working, and the completed result re-enters "
+            "the conversation as a new message. A batch returns one handle, runs "
+            "N subagents concurrently, and delivers one consolidated result after "
+            "ALL of them finish. Do NOT wait or poll; just continue with other work "
+            "after dispatching.\n\n"
+        )
+
     return (
         "Spawn one or more subagents to work on tasks in isolated contexts. "
         "Each subagent gets its own conversation, terminal session, and toolset. "
@@ -3384,12 +3428,7 @@ def _build_top_level_description() -> str:
         f"2. Batch (parallel): provide 'tasks' array with up to {max_children} "
         f"items concurrently for this user (configured via "
         f"delegation.max_concurrent_children in config.yaml). {nesting_clause}\n\n"
-        "BOTH MODES RUN IN THE BACKGROUND. delegate_task returns immediately — "
-        "you and the user keep working, and the completed result re-enters "
-        "the conversation as a new message. A "
-        "batch returns one handle, runs N subagents concurrently, and delivers "
-        "one consolidated result after ALL of them finish. Do NOT wait or poll; "
-        "just continue with other work after dispatching.\n\n"
+        f"{execution_clause}"
         "LIVE TRANSCRIPTS: the dispatch response includes 'live_transcripts' — "
         "one append-only human-readable log file per task (under "
         "cache/delegation/live/<delegation_id>/). Each child streams its "
@@ -3507,6 +3546,12 @@ def _build_dynamic_schema_overrides() -> dict:
     }
     overrides_params["properties"]["tasks"]["description"] = _build_tasks_param_description()
     overrides_params["properties"]["role"]["description"] = _build_role_param_description()
+    mode = _get_top_level_mode()
+    overrides_params["properties"]["background"]["description"] = (
+        "DEPRECATED / IGNORED. Top-level execution is controlled by "
+        f"delegation.top_level_mode={mode!r} in config.yaml; the model cannot "
+        "override it per call. Subagent/orchestrator delegations remain inline."
+    )
 
     return {
         "description": _build_top_level_description(),
@@ -3579,13 +3624,9 @@ DELEGATE_TASK_SCHEMA = {
             "background": {
                 "type": "boolean",
                 "description": (
-                    "DEPRECATED / IGNORED. Top-level single and batch "
-                    "delegations run in the background automatically — you do "
-                    "not need to (and cannot) opt in or out. A single result or "
-                    "consolidated batch result re-enters the conversation when "
-                    "the work finishes; just continue working in the meantime. "
-                    "Setting this has no effect; the parameter remains only for "
-                    "backward compatibility."
+                    "DEPRECATED / IGNORED. Top-level execution is controlled by "
+                    "delegation.top_level_mode in config.yaml; the model cannot "
+                    "override background versus inline delivery per call."
                 ),
             },
         },
@@ -3601,18 +3642,16 @@ from tools.registry import registry, tool_error
 def _model_background_value(args: dict, parent_agent=None) -> bool:
     """Background flag for the MODEL-facing dispatch path (registry fallback).
 
-    Delegations from the top-level agent always run in the background — the
-    model does not choose. This applies to both a single task and a fan-out
-    batch (the whole batch is one async unit that joins on all children and
-    returns one consolidated result). The one
-    exception is a delegation from an orchestrator subagent (depth > 0), which
-    needs its workers' results within its own turn. The live path is
+    Delegations from the top-level agent follow the operator-controlled
+    ``delegation.top_level_mode`` setting; the model does not choose. An
+    orchestrator subagent (depth > 0) always runs its workers inline because it
+    needs their results within its own turn. The live path is
     ``run_agent._dispatch_delegate_task``; this lambda mirrors it for the rare
     case the intercept is bypassed. Direct Python callers of ``delegate_task``
     keep the historical synchronous default.
     """
     is_subagent = getattr(parent_agent, "_delegate_depth", 0) > 0
-    return not is_subagent
+    return not is_subagent and _get_top_level_mode() == "background"
 
 
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}

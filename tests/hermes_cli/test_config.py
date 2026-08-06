@@ -2096,6 +2096,9 @@ class TestDelegationCapUnificationMigration:
     def test_default_config_has_no_max_async_children(self):
         assert "max_async_children" not in DEFAULT_CONFIG["delegation"]
 
+    def test_default_top_level_mode_preserves_background_delivery(self):
+        assert DEFAULT_CONFIG["delegation"]["top_level_mode"] == "background"
+
 
 class TestConfigNormalizationDoesNotOverwriteUserValues:
     """Regression tests for #27354."""

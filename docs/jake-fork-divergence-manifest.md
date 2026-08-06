@@ -908,11 +908,11 @@ Preservation checks:
 python -m pytest tests/agent/test_prompt_builder.py -o 'addopts=' -q
 ```
 
-### 24. Inline top-level delegation mode
+### 24. Top-level delegation completion controls
 
-Purpose: keep delegated review/research results inside the turn that commissioned
-them, rather than letting a stale completion wake a second full agent loop after
-the parent task has already finished or exhausted its turn budget.
+Purpose: preserve background subagent concurrency while preventing a late
+completion from waking another ordinary full-budget agent loop. Inline mode
+remains available for tasks that should never detach.
 
 Core behavior:
 
@@ -927,24 +927,42 @@ Core behavior:
 - Dynamic tool-schema text reflects the configured mode, and changing the mode
   invalidates the gateway's cached agent so future turns do not retain stale
   background-delivery guidance.
+- `delegation.completion_max_turns` defaults to `0` for upstream-compatible
+  full-turn delivery. A positive value enables bounded completion handling.
+- When a bounded completion arrives during active tool work and the parent has
+  budget remaining, Hermes steers it into the existing turn at the next safe
+  tool-result boundary. A finalizing or budget-exhausted parent queues it instead.
+- A completion delivered after the parent ends starts a continuation capped to
+  `min(agent.max_turns, completion_max_turns)`. Completions drained together for
+  the same originating session are deduplicated and coalesced.
+- Bounded continuations cannot recursively call `delegate_task`. They may return
+  `[NO_USER_VISIBLE_UPDATE]` when the result is stale or already handled; the
+  gateway treats that sentinel as intentional silence rather than posting a
+  duplicate user-facing message.
 
 Key files:
 
 - `tools/delegate_tool.py` (`_get_top_level_mode`, `_model_background_value`, dynamic schema text)
 - `run_agent.py` (`_dispatch_delegate_task`)
-- `gateway/run.py` (`_CACHE_BUSTING_CONFIG_KEYS`)
-- `hermes_cli/config.py` (`delegation.top_level_mode` default)
+- `gateway/run.py` (active-turn absorption, completion coalescing, per-turn cap,
+  intentional-silence handling)
+- `agent/agent_init.py` (per-turn recursion guard state)
+- `hermes_cli/config.py` (delegation completion defaults)
 - `tests/tools/test_async_delegation.py`
 - `tests/gateway/test_agent_cache.py`
+- `tests/gateway/test_completion_delivery.py`
+- `tests/gateway/test_internal_event_never_interrupts_busy_session.py`
+- `tests/gateway/test_status_command.py`
 
 Commits:
 
 - `a5a03d980` - add operator-controlled inline top-level delegation.
+- `26fe07d40` - absorb active completions and cap late continuations.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/tools/test_async_delegation.py tests/gateway/test_agent_cache.py tests/hermes_cli/test_config.py -o 'addopts=' -q
+python -m pytest tests/gateway/test_background_process_notifications.py tests/gateway/test_async_delegation_session_binding.py tests/gateway/test_completion_delivery.py tests/gateway/test_internal_event_never_interrupts_busy_session.py tests/gateway/test_cached_agent_max_iterations.py tests/gateway/test_agent_cache.py tests/gateway/test_stale_self_heal_agent_cache_eviction.py tests/gateway/test_status_command.py tests/tools/test_async_delegation.py tests/hermes_cli/test_config.py -o 'addopts=' -q
 cd website && npm run build
 ```
 
@@ -1051,6 +1069,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 ### Delegation lifecycle behavior
 
 - `a5a03d980` `2026-08-06` - `feat(delegation): add inline top-level mode`
+- `26fe07d40` `2026-08-06` - `fix(delegation): bound late completion continuations`
 
 ### Test-only / no-net-change / integration bookkeeping
 

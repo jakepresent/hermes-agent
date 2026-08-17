@@ -26,7 +26,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
 - Upstream reorganized or removed parts of nine fork-sensitive test modules. The 160 still-relevant fork assertions now live under `tests/fork_preservation/`; every pre-merge fork test name from those modules is covered either by the current upstream-shaped test or by this preservation residue.
 - Preservation result: the main 82-target fork gate passed **2,382 tests with 7 skips** in the isolated Python 3.11 environment. The 160-test fork-preservation residue also passed independently. Focused reruns passed for gateway/ACP reconciliation (**685 passed, 2 skipped**), MCP (**113 passed**), Discord liveness/delegation (**64 passed**), and the order-sensitive command-guard seam. The known `DEFAULT_ROOTS` assertion remains an environment-only exclusion under pytest's temporary `HERMES_HOME`, matching the prior integration behavior.
 - Non-Python verification also passed: reconciled Python files compile, import smoke passed, `uv lock --check` passed, the isolated CLI reports `Hermes Agent v0.20.2 (2026.8.16)`, and `web` TypeScript typechecking passed after installing its workspace dependencies with the repository-required npm version. Optional `anthropic` and semantic-search dependencies were installed only in the isolated test environment.
-- Merge commit: pending commit creation; replace this line with the resulting commit id immediately afterward.
+- Merge commit: `05aa01a058b38c1c89a8b9a77b22fbcc564fca7d` (`merge: integrate Hermes v2026.8.16`).
 - Live cutover: not performed as part of isolated reconciliation. The live checkout and gateway remain on the v2026.7.20 / Hermes 0.19.0 integration until an explicit cutover step.
 
 ### v2026.7.20 integration (2026-07-26)

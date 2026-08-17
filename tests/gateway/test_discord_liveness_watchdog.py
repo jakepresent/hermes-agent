@@ -96,8 +96,10 @@ async def test_repeated_rest_failures_trigger_retryable_fatal_reconnect(monkeypa
     monkeypatch.setattr(adapter, "_notify_fatal_error", notified)
 
     await asyncio.wait_for(adapter._rest_liveness_loop(), timeout=1.0)
-    if adapter._liveness_notification_task is not None:
-        await asyncio.wait_for(adapter._liveness_notification_task, timeout=1.0)
+    if adapter._rest_liveness_notification_task is not None:
+        await asyncio.wait_for(
+            adapter._rest_liveness_notification_task, timeout=1.0
+        )
 
     assert client.fetch_user.await_count == 2
     assert adapter.has_fatal_error is True

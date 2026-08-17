@@ -40,10 +40,18 @@ no-foreground invariant, click-dispatch internals — see
 
 ## Enabling
 
-Pick whichever path is most convenient — both run the same upstream
-installer:
+**Fresh installs already have the driver.** The Hermes installer
+(`install.sh` / `install.ps1`) pre-installs `cua-driver` (best-effort;
+pass `--skip-computer-use` / `-SkipComputerUse` to opt out), so enabling
+Computer Use is just a config flip:
 
-**Option 1: dedicated CLI command (most direct).**
+- **`hermes tools`** → pick `🖱️  Computer Use` — installs the driver
+  automatically if it's still missing.
+- **Dashboard / desktop app** → toggle the Computer Use toolset — if the
+  driver is missing, the toggle kicks off the install in the background
+  automatically (watch progress in the toolset panel).
+
+**Manual fallback (older installs, skipped installer step):**
 
 ```
 hermes computer-use install
@@ -52,11 +60,6 @@ hermes computer-use install
 This fetches and runs the upstream cua-driver installer — `install.sh`
 on macOS/Linux, `install.ps1` on Windows. Use `hermes computer-use
 status` to verify the install.
-
-**Option 2: enable the toolset interactively.**
-
-1. Run `hermes tools`, pick `🖱️  Computer Use (macOS/Windows/Linux)`.
-2. The setup runs the upstream installer (same as Option 1).
 
 After installing, regardless of which path you took, grant the
 platform-appropriate prereqs:
@@ -74,6 +77,83 @@ hermes -t computer_use chat
 ```
 
 or add `computer_use` to your enabled toolsets in `~/.hermes/config.yaml`.
+
+## Permission modes and logged-in browser profiles
+
+Hermes maps its existing approval UX onto cua-driver's immutable daemon
+modes. There is no second permission toggle to keep in sync:
+
+| Hermes session | cua-driver mode | Human intervention | `existing_profile` |
+|---|---|---|---|
+| Manual or smart approvals (default) | `standard` | Normal Hermes approvals; Cua stops at its protected boundary | Refuses unless `computer_use.grant_existing_profile: true` (one-time config opt-in) |
+| `computer_use.permission_mode: bounded` + reviewed manifest | private `bounded` daemon | You review and approve the capability manifest once, at launch | Allowed only within the manifest's declared profiles/origins/tools; everything else fails closed |
+| `--yolo`, `/yolo`, or `approvals.mode: off` | private `unrestricted` daemon | One explicit Hermes risk acceptance; no runtime Cua prompts | Allowed within Cua's built-in, managed, and user policy ceilings |
+
+### Attaching to your signed-in browser
+
+The agent can drive a Chrome/Edge window you already have open — including a
+signed-in profile — **without restarting the browser, copying the profile, or
+touching your tabs**. Because DevTools access exposes that profile's live
+pages, cookies, and storage, cua-driver requires an explicit human grant that
+ordinary tool approval cannot substitute for. You opt in once, in config.yaml:
+
+```yaml
+computer_use:
+  grant_existing_profile: true
+```
+
+Hermes then launches the cua-driver runtime with the trusted-launcher grant
+(`--grant existing-profile`, live-verified against cua-driver 0.19.3), and
+`cua_browser_prepare` with an existing profile succeeds against the exact
+`(pid, window_id)` the agent proves. Leave it `false` (the default) and
+existing-profile attachment fails closed; driver-owned isolated profiles work
+either way and are what the agent prefers.
+
+Older cua-driver builds also shipped an interactive `browser-approve` token
+verb; current drivers treat that token as a disabled legacy compatibility
+path. Hermes still exposes `hermes computer-use browser-approve` as a
+passthrough and forwards a pasted token as `approval_token`, but the config
+grant above is the supported route.
+
+### Bounded mode for repeatable automation
+
+For recurring browser automation (cron jobs, scheduled research against an
+authenticated app), per-run tokens are impractical. `bounded` mode replaces
+prompts with a capability manifest you review once:
+
+```yaml
+# config.yaml
+computer_use:
+  permission_mode: bounded
+  capability_manifest: ~/.hermes/cua-manifest.yaml
+```
+
+The manifest names the apps, browser profile kinds, allowed origins, and
+typed tools the session may use (see the
+[cua-driver permission modes reference](https://cua.ai/docs/reference/cua-driver/permission-modes)
+for the format). Hermes launches a private per-session daemon with
+`--capability-manifest ... --approve-capability-manifest`; anything outside
+the manifest fails closed inside cua-driver. A missing or unreadable manifest
+fails loudly at session start rather than silently downgrading. Session YOLO
+still overrides bounded for that one session.
+
+The bounded and unrestricted daemons are private to that Hermes session.
+Turning `/yolo` off, resetting/closing the session, cancellation cleanup, or
+process exit ends the Cua session and stops that daemon. It never changes the
+machine-wide daemon's mode or grants another Hermes conversation the same
+authority.
+
+`smart` approval remains `standard`: an LLM classification is not protected
+human consent, and it cannot mint a `browser-approve` token or stand in for a
+reviewed manifest.
+
+<div class="alert alert--warning">
+
+YOLO/unrestricted mode does not protect against prompt injection or unintended
+input. Use it only in a disposable VM or with accounts and data whose full
+compromise you accept.
+
+</div>
 
 ## `hermes computer-use doctor` — your first triage stop
 
@@ -130,7 +210,7 @@ halo).
 
 ## Going deeper — the cua-driver skill pack
 
-Hermes intentionally keeps its skill (`skills/computer-use/SKILL.md`)
+Hermes intentionally keeps its skill (`skills/autonomous-ai-agents/computer-use/SKILL.md`)
 focused on the Hermes-side `computer_use` action vocabulary — the
 single source of truth the agent loads. For the deeper material —
 platform-specific deep dives, recording semantics, browser page
@@ -289,6 +369,16 @@ real headless Chromium and is the right answer for web-only tasks.
 
 ## Configuration
 
+Permission mode and manifest (see
+[Permission modes](#permission-modes-and-logged-in-browser-profiles) above):
+
+```yaml
+computer_use:
+  permission_mode: standard        # standard (default) | bounded
+  capability_manifest: ""          # session-policy path, required for bounded
+  grant_existing_profile: false    # opt-in: attach to signed-in browser in standard mode
+```
+
 Override the driver binary path (tests / CI / local builds):
 
 ```
@@ -390,14 +480,12 @@ HERMES_CUA_DRIVER_CMD=/path/to/cua/libs/cua-driver/rust/target/debug/cua-driver
 
 ### Notes & gotchas
 
-- **Hermes spawns its own `cua-driver mcp` child over stdio** — it does
-  *not* attach to the long-running `cua-driver serve` autostart daemon
-  or its named pipe. So the scheduled task / LaunchAgent is unnecessary
-  for testing (`-NoAutoStart` is fine). The autostart daemon and the
-  Windows UIAccess worker (`cua-driver-uia.exe`) only matter for
-  foreground-safe input on some apps (e.g. WPF); the standard tool
-  surface works through the stdio child. On Windows SSH sessions, the
-  autostart pattern IS needed — see the Limitations section.
+- **Hermes spawns a `cua-driver mcp` stdio proxy.** In a normal session the
+  proxy connects to (and may start) the standard machine daemon. In explicit
+  Hermes YOLO, Hermes instead owns a private `cua-driver serve --embedded`
+  child and points the proxy at its private socket or named pipe. The Windows
+  autostart/UIAccess pattern still matters for interactive Session 1+ input
+  from SSH — see the Limitations section.
 - **Locked binary on Windows.** A running `cua-driver-serve` daemon can
   hold `cua-driver.exe` and block an overwrite on rebuild.
   `install-local.ps1` renames the locked binary out of the way
@@ -449,7 +537,7 @@ autostart pattern — see
 
 ## See also
 
-- **Hermes-side skill** — `skills/computer-use/SKILL.md` — teaches the
+- **Hermes-side skill** — `skills/autonomous-ai-agents/computer-use/SKILL.md` — teaches the
   Hermes `computer_use` action vocabulary; this is what the agent loads.
 - **cua-driver skill pack** — for platform-specific deep dives
   (macOS no-foreground contract, Windows UIA + Session 0, Linux AT-SPI

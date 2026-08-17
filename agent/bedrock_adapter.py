@@ -433,6 +433,29 @@ def _model_supports_tool_use(model_id: str) -> bool:
     return not any(pattern in model_lower for pattern in _NON_TOOL_CALLING_PATTERNS)
 
 
+# ---------------------------------------------------------------------------
+# Prompt-cache capability detection (Converse API cachePoint)
+# ---------------------------------------------------------------------------
+# Claude on Bedrock already gets prompt caching through the AnthropicBedrock
+# SDK path (see is_anthropic_bedrock_model / runtime_provider.py's dual-path
+# routing) — it never reaches build_converse_kwargs unless bearer-token auth
+# forces the Converse path (#28156). This allowlist covers the Converse API
+# itself: sending an unsupported model a cachePoint block raises a
+# ValidationException, so — like _model_supports_tool_use but inverted —
+# unknown models default to NOT receiving cache markers until confirmed.
+# Ref: https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html
+_CACHE_POINT_PATTERNS = [
+    "anthropic.claude",  # bearer-token fallback path
+    "amazon.nova",
+]
+
+
+def _model_supports_prompt_cache(model_id: str) -> bool:
+    """Return True if the model accepts a Converse API cachePoint block."""
+    model_lower = model_id.lower()
+    return any(pattern in model_lower for pattern in _CACHE_POINT_PATTERNS)
+
+
 def is_anthropic_bedrock_model(model_id: str) -> bool:
     """Return True if the model is an Anthropic Claude model on Bedrock.
 
@@ -764,14 +787,22 @@ def normalize_converse_response(response: Dict) -> SimpleNamespace:
         reasoning_content="\n\n".join(reasoning_parts) if reasoning_parts else None,
     )
 
-    # Build usage stats
+    # Build usage stats. Converse's inputTokens excludes cache read/write
+    # tokens (unlike OpenAI's prompt_tokens, which includes them) — restore
+    # the OpenAI-style "total includes cache" convention here so downstream
+    # normalize_usage() can subtract them back out consistently, and surface
+    # the Anthropic-named fields it already falls back to for cache reads.
     usage_data = response.get("usage", {})
+    input_tokens = usage_data.get("inputTokens", 0)
+    cache_read_tokens = usage_data.get("cacheReadInputTokens", 0)
+    cache_write_tokens = usage_data.get("cacheWriteInputTokens", 0)
+    output_tokens = usage_data.get("outputTokens", 0)
     usage = SimpleNamespace(
-        prompt_tokens=usage_data.get("inputTokens", 0),
-        completion_tokens=usage_data.get("outputTokens", 0),
-        total_tokens=(
-            usage_data.get("inputTokens", 0) + usage_data.get("outputTokens", 0)
-        ),
+        prompt_tokens=input_tokens + cache_read_tokens + cache_write_tokens,
+        completion_tokens=output_tokens,
+        total_tokens=input_tokens + cache_read_tokens + cache_write_tokens + output_tokens,
+        cache_read_input_tokens=cache_read_tokens,
+        cache_creation_input_tokens=cache_write_tokens,
     )
 
     finish_reason = _converse_stop_reason_to_openai(stop_reason)
@@ -936,6 +967,8 @@ def stream_converse_with_callbacks(
             usage_data = {
                 "inputTokens": meta_usage.get("inputTokens", 0),
                 "outputTokens": meta_usage.get("outputTokens", 0),
+                "cacheReadInputTokens": meta_usage.get("cacheReadInputTokens", 0),
+                "cacheWriteInputTokens": meta_usage.get("cacheWriteInputTokens", 0),
             }
 
     # Flush remaining text
@@ -949,12 +982,16 @@ def stream_converse_with_callbacks(
         reasoning_content="\n\n".join(reasoning_parts) if reasoning_parts else None,
     )
 
+    input_tokens = usage_data.get("inputTokens", 0)
+    cache_read_tokens = usage_data.get("cacheReadInputTokens", 0)
+    cache_write_tokens = usage_data.get("cacheWriteInputTokens", 0)
+    output_tokens = usage_data.get("outputTokens", 0)
     usage = SimpleNamespace(
-        prompt_tokens=usage_data.get("inputTokens", 0),
-        completion_tokens=usage_data.get("outputTokens", 0),
-        total_tokens=(
-            usage_data.get("inputTokens", 0) + usage_data.get("outputTokens", 0)
-        ),
+        prompt_tokens=input_tokens + cache_read_tokens + cache_write_tokens,
+        completion_tokens=output_tokens,
+        total_tokens=input_tokens + cache_read_tokens + cache_write_tokens + output_tokens,
+        cache_read_input_tokens=cache_read_tokens,
+        cache_creation_input_tokens=cache_write_tokens,
     )
 
     finish_reason = _converse_stop_reason_to_openai(stop_reason)
@@ -982,7 +1019,7 @@ def build_converse_kwargs(
     model: str,
     messages: List[Dict],
     tools: Optional[List[Dict]] = None,
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = 4096,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
@@ -991,18 +1028,29 @@ def build_converse_kwargs(
     """Build kwargs for ``bedrock-runtime.converse()`` or ``converse_stream()``.
 
     Converts OpenAI-format inputs to Converse API parameters.
+
+    ``max_tokens=None`` omits ``inferenceConfig.maxTokens`` entirely, in which
+    case Bedrock defaults to the model's maximum allowed output — the Converse
+    field is optional per the AWS API reference. The default stays 4096 so
+    existing callers are unaffected; callers that want the model's full output
+    budget (e.g. uncapped auxiliary vision calls) pass ``None`` explicitly.
     """
     system_prompt, converse_messages = convert_messages_to_converse(messages)
+    cache_enabled = _model_supports_prompt_cache(model)
+
+    inference_config: Dict[str, Any] = {}
+    if max_tokens is not None:
+        inference_config["maxTokens"] = max_tokens
 
     kwargs: Dict[str, Any] = {
         "modelId": model,
         "messages": converse_messages,
-        "inferenceConfig": {
-            "maxTokens": max_tokens,
-        },
+        "inferenceConfig": inference_config,
     }
 
     if system_prompt:
+        if cache_enabled:
+            system_prompt = system_prompt + [{"cachePoint": {"type": "default"}}]
         kwargs["system"] = system_prompt
 
     from agent.anthropic_adapter import _forbids_sampling_params
@@ -1026,6 +1074,8 @@ def build_converse_kwargs(
             # Strip tools for known non-tool-calling models and warn the user.
             # Ref: PR #7920 feedback from @ptlally, pattern from PR #4346.
             if _model_supports_tool_use(model):
+                if cache_enabled:
+                    converse_tools = converse_tools + [{"cachePoint": {"type": "default"}}]
                 kwargs["toolConfig"] = {"tools": converse_tools}
             else:
                 logger.warning(
@@ -1033,8 +1083,20 @@ def build_converse_kwargs(
                     "The agent will operate in text-only mode.", model
                 )
 
+    if cache_enabled and len(converse_messages) >= 2:
+        # Checkpoint everything up to (not including) the newest turn, so the
+        # marker survives unchanged across requests as only the tail grows —
+        # mirroring the Anthropic system_and_3 strategy in prompt_caching.py.
+        content = converse_messages[-2].get("content")
+        if isinstance(content, list) and content:
+            content.append({"cachePoint": {"type": "default"}})
+
     if guardrail_config:
         kwargs["guardrailConfig"] = guardrail_config
+
+    if not kwargs["inferenceConfig"]:
+        # inferenceConfig is optional on the wire; don't send an empty object.
+        del kwargs["inferenceConfig"]
 
     return kwargs
 
@@ -1044,7 +1106,7 @@ def call_converse(
     model: str,
     messages: List[Dict],
     tools: Optional[List[Dict]] = None,
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = 4096,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,
@@ -1085,7 +1147,7 @@ def call_converse_stream(
     model: str,
     messages: List[Dict],
     tools: Optional[List[Dict]] = None,
-    max_tokens: int = 4096,
+    max_tokens: Optional[int] = 4096,
     temperature: Optional[float] = None,
     top_p: Optional[float] = None,
     stop_sequences: Optional[List[str]] = None,

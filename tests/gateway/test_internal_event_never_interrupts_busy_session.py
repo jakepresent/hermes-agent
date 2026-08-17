@@ -124,9 +124,10 @@ async def test_internal_event_does_not_interrupt_busy_session() -> None:
 
     handled = await runner._handle_active_session_busy_message(event, sk)
 
-    # Returns False so the base adapter silently queues the internal event
-    # as a cascading next turn — it must NOT be handled-with-interrupt here.
-    assert handled is False
+    # The gateway now owns the FIFO queue directly and returns handled=True;
+    # the invariant is still that the event is queued, never interrupted.
+    assert handled is True
+    assert adapter._pending_messages[sk] is event
     # The active turn must survive.
     parent.interrupt.assert_not_called()
     # No "⚡ Interrupting current task" (or any) ack for a synthetic event.
@@ -171,7 +172,8 @@ async def test_bounded_delegation_completion_queues_when_steer_rejected() -> Non
 
     handled = await runner._handle_active_session_busy_message(event, sk)
 
-    assert handled is False
+    assert handled is True
+    assert adapter._pending_messages[sk] is event
     parent.interrupt.assert_not_called()
 
 
@@ -195,7 +197,8 @@ async def test_bounded_completion_queues_when_parent_has_no_safe_tool_boundary()
 
     handled = await runner._handle_active_session_busy_message(event, sk)
 
-    assert handled is False
+    assert handled is True
+    assert adapter._pending_messages[sk] is event
     parent.steer.assert_not_called()
     parent.interrupt.assert_not_called()
 
@@ -220,7 +223,8 @@ async def test_bounded_completion_queues_when_parent_budget_is_exhausted() -> No
 
     handled = await runner._handle_active_session_busy_message(event, sk)
 
-    assert handled is False
+    assert handled is True
+    assert adapter._pending_messages[sk] is event
     parent.steer.assert_not_called()
     parent.interrupt.assert_not_called()
 

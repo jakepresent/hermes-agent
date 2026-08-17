@@ -15,7 +15,7 @@ def _tool_call(name: str = "terminal") -> dict:
 
 
 def test_replay_guard_does_not_misread_intentional_replay_cleanup_as_disk_lag():
-    """An interrupted tool tail is intentionally absent from replay history.
+    """An interrupted read-only tool tail is absent from replay history.
 
     The persisted transcript includes a session metadata row plus the interrupted
     assistant→tool pair. Both are removed before the next model request. The
@@ -25,11 +25,11 @@ def test_replay_guard_does_not_misread_intentional_replay_cleanup_as_disk_lag():
     persisted_raw = [
         {"role": "session_meta", "content": None},
         {"role": "user", "content": "run the command"},
-        {"role": "assistant", "content": "", "tool_calls": [_tool_call()]},
+        {"role": "assistant", "content": "", "tool_calls": [_tool_call("read_file")]},
         {
             "role": "tool",
             "tool_call_id": "call_1",
-            "tool_name": "terminal",
+            "tool_name": "read_file",
             "content": "[Command interrupted] exit_code: 130",
         },
     ]

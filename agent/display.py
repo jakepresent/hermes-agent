@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from difflib import unified_diff
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from utils import safe_json_loads
 from agent.redact import redact_sensitive_text
@@ -410,6 +411,15 @@ def build_terminal_command_preview(
     return _truncate_preview(preview, max_len)
 
 
+@dataclass(frozen=True)
+class ToolPreview:
+    """A compact tool preview plus presentation facts lost to truncation."""
+
+    text: str
+    truncated: bool = False
+    url: str | None = None
+
+
 _SHELL_SILENT_HEADS = {"cd", "pushd", "popd", "export", "set", "unset", "source", ".", "true", "false", ":"}
 _SHELL_PIPE_TAIL_HEADS = {"head", "tail", "wc", "sort", "uniq"}
 
@@ -640,6 +650,22 @@ def _delegate_task_goal_parts(tasks: Any, *, per_goal_len: int) -> tuple[int, li
     return len(goals), goals
 
 
+def _browser_exec_step_label(args: dict, max_chars: int = 80) -> str | None:
+    """User-friendly step label from browser_exec code's leading comment."""
+    code = str(args.get("code", "") or "").strip()
+    if not code:
+        return None
+    first = code.split("\n", 1)[0].strip()
+    if not first.startswith("#"):
+        return None
+    label = first.lstrip("#").strip()
+    if not label:
+        return None
+    if len(label) > max_chars:
+        label = label[: max_chars - 1] + "…"
+    return label
+
+
 def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -> str | None:
     """Build a short preview of a tool call's primary argument for display.
 
@@ -660,13 +686,26 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
         "vision_analyze": "question",
         "skill_view": "name", "skills_list": "category",
         "cronjob": "action",
-        "execute_code": "code", "delegate_task": "goal",
+        "execute_code": "code", "browser_exec": "code", "delegate_task": "goal",
         "clarify": "question", "skill_manage": "name",
         "memory_search": "query",
     }
 
+    # browser_exec: prefer the leading `# …` comment as a friendly step label
+    if tool_name == "browser_exec":
+        label = _browser_exec_step_label(args)
+        if label is not None:
+            return _truncate_preview(label, max_len)
+        preview = _oneline(str(args.get("code", "") or ""))
+        return _truncate_preview(preview, max_len) if preview else None
+
     # delegate_task: show goal (single) or individual task goals (batch)
     if tool_name == "delegate_task":
+        action = str(args.get("action") or "").strip().lower()
+        if action in ("list", "steer", "stop"):
+            sid = str(args.get("subagent_id") or "").strip()
+            preview = f"{action} {sid}".strip()
+            return _truncate_preview(preview, max_len)
         tasks = args.get("tasks")
         if tasks and isinstance(tasks, list):
             task_count, goals = _delegate_task_goal_parts(tasks, per_goal_len=40)
@@ -790,6 +829,35 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     if max_len > 0 and len(preview) > max_len:
         preview = preview[:max_len - 3] + "..."
     return preview
+
+
+def prepare_tool_preview(
+    tool_name: str,
+    args: dict | None,
+    *,
+    fallback: str,
+    max_len: int,
+) -> ToolPreview:
+    """Build one canonical compact preview before platform formatting.
+
+    The uncapped preview is rebuilt from the tool arguments when possible so
+    an upstream display cap cannot discard its link target.  Platforms then
+    receive explicit truncation and URL metadata instead of inferring either
+    fact from the rendered text.
+    """
+    full_text = build_tool_preview(tool_name, args, max_len=0) or fallback
+    text = _truncate_preview(full_text, max_len)
+    truncated = text != full_text
+    url = None
+    if truncated:
+        candidate = _display_url(full_text)
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            parsed = None
+        if parsed and parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+            url = candidate
+    return ToolPreview(text=text, truncated=truncated, url=url)
 
 
 # =========================================================================
@@ -1716,7 +1784,20 @@ def _get_cute_tool_message(
         code = args.get("code", "")
         first_line = code.strip().split("\n")[0] if code.strip() else ""
         return _wrap(f"┊ 🐍 exec      {_trunc(first_line, 35)}  {dur}")
+    if tool_name == "browser_exec":
+        label = _browser_exec_step_label(args)
+        if label is not None:
+            # Leading `# …` comment (the tool description asks for one):
+            # surface it as the user-facing step label; the code itself stays
+            # collapsed behind display.tool_preview_length.
+            return _wrap(f"┊ 🌐 browser   {label}  {dur}")
+        code = " ".join(str(args.get("code", "") or "").split())
+        return _wrap(f"┊ 🌐 browser   {_trunc(code, 35)}  {dur}")
     if tool_name == "delegate_task":
+        _action = str(args.get("action") or "").strip().lower()
+        if _action in ("list", "steer", "stop"):
+            _sid = str(args.get("subagent_id") or "").strip()
+            return _wrap(f"┊ 🔀 delegate  {_trunc(f'{_action} {_sid}'.strip(), 35)}  {dur}")
         tasks = args.get("tasks")
         if tasks and isinstance(tasks, list):
             task_count, goals = _delegate_task_goal_parts(tasks, per_goal_len=30)
@@ -1745,5 +1826,3 @@ def get_cute_tool_message(
 # =========================================================================
 # Honcho session line (one-liner with clickable OSC 8 hyperlink)
 # =========================================================================
-
-

@@ -132,26 +132,6 @@ class TestVisionAnalyzeNative:
         url = next(p["image_url"]["url"] for p in parts if p.get("type") == "image_url")
         assert url.startswith("data:image/")
 
-    def test_missing_file_returns_error_string(self, tmp_path):
-        result = asyncio.get_event_loop().run_until_complete(
-            _vision_analyze_native(str(tmp_path / "nope.png"), "?")
-        )
-        # tool_error returns a JSON string, not the multimodal envelope
-        assert isinstance(result, str)
-        parsed = json.loads(result)
-        assert parsed.get("success") is False
-        # Unified resolver: local backend reports a clean not-found.
-        err = parsed.get("error", "").lower()
-        assert "image file not found" in err or "no active sandbox" in err
-
-    def test_empty_image_url_returns_error(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            _vision_analyze_native("", "?")
-        )
-        assert isinstance(result, str)
-        parsed = json.loads(result)
-        assert parsed.get("success") is False
-        assert "image_url is required" in parsed.get("error", "")
 
     def test_file_url_scheme_resolves(self, tmp_path):
         img = tmp_path / "t.png"

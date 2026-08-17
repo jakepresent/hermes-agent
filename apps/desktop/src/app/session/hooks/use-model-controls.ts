@@ -4,8 +4,10 @@ import { useCallback, useRef } from 'react'
 import type { ModelSelection } from '@/app/shell/model-menu-panel'
 import { getGlobalModelInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
-import { manualPickRemoved } from '@/lib/model-options'
+import { isBusySessionModelSwitch } from '@/lib/gateway-rpc'
+import { manualPickRemoved, modelOptionsQueryKey } from '@/lib/model-options'
 import { notifyError } from '@/store/notifications'
+import { $activeGatewayProfile } from '@/store/profile'
 import {
   $activeSessionId,
   $currentModel,
@@ -36,16 +38,56 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
   // callbacks once and never re-evaluate — a captured prop would be stale
   // forever. The store read is always current.
   const updateModelOptionsCache = useCallback(
-    (sessionId: null | string, provider: string, model: string, includeGlobal: boolean) => {
-      const patch = (prev: ModelOptionsResponse | undefined) => ({ ...(prev ?? {}), provider, model })
+    (
+      sessionId: null | string,
+      provider: string,
+      model: string,
+      includeGlobal: boolean,
+      profile = $activeGatewayProfile.get()
+    ) => {
+      const patch = (prev: ModelOptionsResponse | undefined) => {
+        // Selection state can update before the catalog query has resolved.
+        // Keep that optimistic cache structurally complete; the composer
+        // interprets a response without `providers` as an empty catalog.
+        const providers = prev?.providers?.length
+          ? prev.providers
+          : provider && model
+            ? [{ models: [model], name: provider, slug: provider }]
+            : []
 
-      queryClient.setQueryData<ModelOptionsResponse>(['model-options', sessionId || 'global'], patch)
+        return { ...prev, provider, model, providers }
+      }
+
+      queryClient.setQueryData<ModelOptionsResponse>(modelOptionsQueryKey(profile, sessionId), patch)
 
       if (includeGlobal) {
-        queryClient.setQueryData<ModelOptionsResponse>(['model-options', 'global'], patch)
+        queryClient.setQueryData<ModelOptionsResponse>(modelOptionsQueryKey(profile), patch)
       }
     },
     [queryClient]
+  )
+
+  // Settings → Model writes the profile default, which the backend applies to
+  // new sessions only. Keep a live session's renderer state and session-scoped
+  // model-options cache authoritative instead of briefly painting the saved
+  // default as if the active agent had switched. Marking the composer as
+  // default-derived still lets the next fresh draft reseed from profile config.
+  const applySavedMainModel = useCallback(
+    (provider: string, model: string) => {
+      const liveSessionId = $activeSessionId.get()
+
+      setCurrentModelSource('default')
+
+      if (!liveSessionId) {
+        setCurrentProvider(provider)
+        setCurrentModel(model)
+      }
+
+      // A null session id is the profile-global model-options key. Never patch
+      // the live session key here: only config.set --session may change it.
+      updateModelOptionsCache(null, provider, model, false)
+    },
+    [updateModelOptionsCache]
   )
 
   // Seed the composer's model state from the profile default. `force` reseeds
@@ -78,7 +120,9 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
             return false
           }
 
-          const options = queryClient.getQueryData<ModelOptionsResponse>(['model-options', 'global'])
+          const options = queryClient.getQueryData<ModelOptionsResponse>(
+            modelOptionsQueryKey($activeGatewayProfile.get())
+          )
 
           return !manualPickRemoved(options?.providers, $currentProvider.get(), $currentModel.get())
         }
@@ -144,6 +188,7 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
         : ($sessionStates.get()[liveSessionId!]?.provider ?? '')
 
       const prevSource = getCurrentModelSource()
+      const liveGatewayProfile = $activeGatewayProfile.get()
 
       if (touchesPrimary) {
         setCurrentModel(selection.model)
@@ -158,7 +203,13 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
         }))
       }
 
-      updateModelOptionsCache(liveSessionId, selection.provider, selection.model, touchesPrimary && !liveSessionId)
+      updateModelOptionsCache(
+        liveSessionId,
+        selection.provider,
+        selection.model,
+        touchesPrimary && !liveSessionId,
+        liveGatewayProfile
+      )
 
       // No live session yet: the pick is pure UI state. session.create reads
       // $currentModel/$currentProvider and applies it as that session's override.
@@ -167,16 +218,49 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
       }
 
       try {
-        await requestGateway('config.set', {
+        // The PRIMARY profile's main agent is the profile's default — its
+        // model/provider choice IS the default, so persist it to config.yaml
+        // (model.default + model.provider) via --global. This is what makes
+        // the selection "stick": a set model.provider outranks a leftover
+        // OPENAI_API_KEY env var in resolve_provider(), so the main agent
+        // keeps the chosen (e.g. subscription) provider across restarts
+        // instead of silently falling back to an env key.
+        //
+        // Two things stay --session, deliberately:
+        //  - a SECONDARY chat tile: picking a model there must not rewrite the
+        //    profile default (the cross-session-contamination guard).
+        //  - MoA (mixture-of-agents) presets: a transient orchestration choice
+        //    that must never become the persisted global gateway default.
+        const isSessionOnlyPreset = (selection.provider || '').toLowerCase() === 'moa'
+        const persistsAsDefault = touchesPrimary && !isSessionOnlyPreset
+        const scope = persistsAsDefault ? '--global' : '--session'
+
+        const result = await requestGateway<{ deferred?: boolean }>('config.set', {
           session_id: liveSessionId,
           key: 'model',
-          value: `${selection.model} --provider ${selection.provider} --session`
+          value: `${selection.model} --provider ${selection.provider} ${scope}`
         })
 
-        void queryClient.invalidateQueries({ queryKey: ['model-options', liveSessionId] })
+        // A pick made DURING a turn is queued by the gateway and applied at the
+        // next turn start (`deferred`). Re-fetching now would answer with the
+        // model still running and repaint the old name over the user's choice —
+        // the switch publishes session.info when it lands, and that is what
+        // re-syncs every surface.
+        if (!result?.deferred) {
+          void queryClient.invalidateQueries({ queryKey: modelOptionsQueryKey(liveGatewayProfile, liveSessionId) })
+        }
 
         return true
       } catch (err) {
+        // An OLDER gateway refuses a mid-turn switch outright (4009) instead of
+        // deferring it. Don't punish the user for a backend they haven't
+        // updated: keep the pick painted as the composer's selection, which is
+        // what the NEXT turn runs anyway. Current gateways never take this
+        // path — they answer `deferred`.
+        if (isBusySessionModelSwitch(err)) {
+          return true
+        }
+
         if (touchesPrimary) {
           setCurrentModel(prevModel)
           setCurrentProvider(prevProvider)
@@ -189,7 +273,13 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
           }))
         }
 
-        updateModelOptionsCache(liveSessionId, prevProvider, prevModel, touchesPrimary && !liveSessionId)
+        updateModelOptionsCache(
+          liveSessionId,
+          prevProvider,
+          prevModel,
+          touchesPrimary && !liveSessionId,
+          liveGatewayProfile
+        )
         notifyError(err, copy.modelSwitchFailed)
 
         return false
@@ -198,5 +288,5 @@ export function useModelControls({ queryClient, requestGateway }: ModelControlsO
     [copy.modelSwitchFailed, queryClient, requestGateway, updateModelOptionsCache]
   )
 
-  return { refreshCurrentModel, selectModel, updateModelOptionsCache }
+  return { applySavedMainModel, refreshCurrentModel, selectModel }
 }

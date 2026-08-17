@@ -65,6 +65,38 @@ def _drain_for(delegation_id, timeout=5.0):
     return None
 
 
+def test_active_for_session_counts_every_live_delegation_state():
+    with ad._records_lock:
+        ad._records.update(
+            {
+                "running": {
+                    "status": "running",
+                    "origin_ui_session_id": "desktop-sid",
+                },
+                "stalling": {
+                    "status": "stalling",
+                    "origin_ui_session_id": "desktop-sid",
+                },
+                "finalizing": {
+                    "status": "finalizing",
+                    "origin_ui_session_id": "desktop-sid",
+                },
+                "completed": {
+                    "status": "completed",
+                    "origin_ui_session_id": "desktop-sid",
+                },
+                "other-session": {
+                    "status": "running",
+                    "origin_ui_session_id": "other-sid",
+                },
+            }
+        )
+
+    assert ad.active_for_session("desktop-sid") == 3
+    assert ad.active_for_session("other-sid") == 1
+    assert ad.active_for_session("") == 0
+
+
 def test_dispatch_returns_immediately_without_blocking():
     gate = threading.Event()
 
@@ -229,44 +261,244 @@ def test_interrupt_all_signals_running_children():
     assert evt["status"] == "interrupted"
 
 
-def test_completed_records_pruned_to_cap():
-    # Run more than the retention cap quickly; ensure list doesn't grow forever.
-    for i in range(ad._MAX_RETAINED_COMPLETED + 10):
-        ad.dispatch_async_delegation(
-            goal=f"t{i}", context=None, toolsets=None, role="leaf", model="m",
-            session_key="", runner=lambda: {"status": "completed", "summary": "ok"},
-            max_async_children=ad._MAX_RETAINED_COMPLETED + 20,
-        )
-    # let workers finish
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and ad.active_count() > 0:
-        time.sleep(0.05)
-    assert len(ad.list_async_delegations()) <= ad._MAX_RETAINED_COMPLETED
+def _fast_stale_monitor(monkeypatch, *, idle=0.15, in_tool=0.3, grace=0.15):
+    """Shrink the stale-monitor cadence so tests run in milliseconds."""
+    monkeypatch.setattr(ad, "_STALE_CHECK_INTERVAL", 0.03)
+    monkeypatch.setattr(ad, "_STALE_IDLE_SECONDS", idle)
+    monkeypatch.setattr(ad, "_STALE_IN_TOOL_SECONDS", in_tool)
+    monkeypatch.setattr(ad, "_STALL_GRACE_SECONDS", grace)
 
 
-def test_completion_is_persisted_and_delivery_can_be_acknowledged(tmp_path, monkeypatch):
-    """A finished child remains pending on disk until its queue consumer acks it."""
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    dispatched = ad.dispatch_async_delegation(
-        goal="durable", context="ctx", toolsets=["terminal"], role="leaf",
-        model="m", session_key="owner", parent_session_id="parent",
-        runner=lambda: {"status": "completed", "summary": "survived"},
+def test_stalled_runner_is_interrupted_then_finalized(monkeypatch):
+    _fast_stale_monitor(monkeypatch)
+    gate = threading.Event()
+    interrupted = {"count": 0}
+
+    def stuck_runner():
+        gate.wait(timeout=10)
+        return {"status": "completed", "summary": "too late"}
+
+    def interrupt_fn():
+        interrupted["count"] += 1
+
+    res = ad.dispatch_async_delegation(
+        goal="stuck child", context=None, toolsets=None, role="leaf",
+        model="m", session_key="", runner=stuck_runner,
+        interrupt_fn=interrupt_fn, max_async_children=1,
+        # Frozen progress token: the child never advances an API call.
+        progress_fn=lambda: ((0, None), False),
     )
-    assert _drain_one() is not None
+    assert res["status"] == "dispatched"
 
-    restored = queue.Queue()
-    assert ad.restore_undelivered_completions(restored) == 1
-    row = ad.get_durable_delegation(dispatched["delegation_id"])
-    assert row["origin_session"] == "owner"
-    assert row["state"] == "completed"
-    assert row["result"]["summary"] == "survived"
-    assert row["delivery_state"] == "pending"
-    # Queue publication/restoration is not a destination delivery attempt.
-    assert row["delivery_attempts"] == 0
+    evt = _drain_for(res["delegation_id"], timeout=5.0)
+    try:
+        assert evt is not None
+        assert evt["type"] == "async_delegation"
+        assert evt["status"] == "stalled"
+        assert evt["delegation_id"] == res["delegation_id"]
+        assert evt["api_calls"] == 0
+        assert "stalled" in evt["error"]
+        # Interrupt was requested BEFORE force-finalization (grace window).
+        assert interrupted["count"] >= 1
+        assert ad.active_count() == 0
+    finally:
+        gate.set()
 
-    assert ad.mark_completion_delivered(dispatched["delegation_id"])
-    assert ad.restore_undelivered_completions(queue.Queue()) == 0
-    assert ad.get_durable_delegation(dispatched["delegation_id"])["delivery_state"] == "delivered"
+    # If the ignored runner eventually returns, it must not enqueue a second
+    # completion for a delegation the monitor already finalized.
+    assert _drain_one(timeout=0.5) is None
+
+
+def test_progressing_runner_is_never_stalled(monkeypatch):
+    """A child that keeps advancing is left alone no matter how long it runs."""
+    _fast_stale_monitor(monkeypatch)
+    gate = threading.Event()
+    ticks = {"n": 0}
+
+    def slow_but_alive_runner():
+        gate.wait(timeout=10)
+        return {"status": "completed", "summary": "done", "api_calls": 7}
+
+    def progress_fn():
+        # Token advances on every sample — simulates a child making steady
+        # API-call progress.
+        ticks["n"] += 1
+        return (ticks["n"], None), False
+
+    res = ad.dispatch_async_delegation(
+        goal="slow child", context=None, toolsets=None, role="leaf",
+        model="m", session_key="", runner=slow_but_alive_runner,
+        max_async_children=1, progress_fn=progress_fn,
+    )
+    assert res["status"] == "dispatched"
+
+    # Run well past the (shrunk) idle threshold — several monitor sweeps.
+    time.sleep(0.6)
+    assert ad.active_count() == 1
+    assert process_registry.completion_queue.empty()
+
+    gate.set()
+    evt = _drain_for(res["delegation_id"], timeout=5.0)
+    assert evt is not None
+    assert evt["status"] == "completed"
+    assert evt["summary"] == "done"
+
+
+def test_stalling_runner_that_honors_interrupt_keeps_its_result(monkeypatch):
+    """Interrupt-responsive children finalize through the NORMAL path.
+
+    The monitor's interrupt gives a wedged-looking child a grace window; if
+    the runner returns during it, the real result (partial work, api_calls)
+    is delivered instead of a synthetic stalled event.
+    """
+    _fast_stale_monitor(monkeypatch, grace=5.0)
+    interrupted = threading.Event()
+
+    def runner():
+        # "Wedged" until interrupted, then unwinds and reports partial work.
+        interrupted.wait(timeout=10)
+        return {
+            "status": "interrupted",
+            "summary": "partial work saved",
+            "api_calls": 3,
+        }
+
+    res = ad.dispatch_async_delegation(
+        goal="responsive child", context=None, toolsets=None, role="leaf",
+        model="m", session_key="", runner=runner,
+        interrupt_fn=interrupted.set, max_async_children=1,
+        progress_fn=lambda: ((3, None), False),
+    )
+    assert res["status"] == "dispatched"
+
+    evt = _drain_for(res["delegation_id"], timeout=5.0)
+    assert evt is not None
+    assert evt["status"] == "interrupted"
+    assert evt["summary"] == "partial work saved"
+    assert evt["api_calls"] == 3
+    assert ad.active_count() == 0
+
+
+def test_streaming_child_counts_as_alive(monkeypatch):
+    """A child mid-stream (api_call_count frozen, last_activity_ts ticking)
+    must never be stalled — streamed chunks tick _touch_activity, and the
+    progress token includes that timestamp (same liveness signal as the
+    compaction inactivity budget, PR #71508)."""
+    _fast_stale_monitor(monkeypatch)
+    gate = threading.Event()
+    now = {"ts": 1000.0}
+
+    def progress_fn():
+        # api_call_count and current_tool frozen (long streaming response in
+        # flight), but the activity timestamp advances with every chunk.
+        now["ts"] += 1.0
+        return ((1, None, now["ts"]),), False
+
+    res = ad.dispatch_async_delegation(
+        goal="streaming child", context=None, toolsets=None, role="leaf",
+        model="m", session_key="", max_async_children=1,
+        runner=lambda: (gate.wait(timeout=10), {"status": "completed", "summary": "streamed"})[1],
+        progress_fn=progress_fn,
+    )
+    assert res["status"] == "dispatched"
+
+    time.sleep(0.6)  # several sweeps past the shrunk idle threshold
+    assert ad.active_count() == 1
+    assert process_registry.completion_queue.empty()
+
+    gate.set()
+    evt = _drain_for(res["delegation_id"], timeout=5.0)
+    assert evt is not None
+    assert evt["status"] == "completed"
+
+
+def test_stalled_event_carries_structured_stall_metadata(monkeypatch):
+    """The terminal stalled event must expose machine-readable stall context
+    (#51690) — quiet duration, tripped threshold, phase, grace — mirroring
+    the sync path's timeout_seconds/timed_out_after_seconds/timeout_phase."""
+    _fast_stale_monitor(monkeypatch)
+    gate = threading.Event()
+
+    res = ad.dispatch_async_delegation(
+        goal="stall metadata", context=None, toolsets=None, role="leaf",
+        model="m", session_key="", max_async_children=1,
+        runner=lambda: {} if gate.wait(timeout=10) else {},
+        progress_fn=lambda: ((0, "terminal"), True),
+    )
+    assert res["status"] == "dispatched"
+
+    evt = _drain_for(res["delegation_id"], timeout=5.0)
+    try:
+        assert evt is not None
+        assert evt["status"] == "stalled"
+        assert evt["stalled_after_quiet_seconds"] >= 0.3  # in-tool threshold
+        assert evt["stall_threshold_seconds"] == ad._STALE_IN_TOOL_SECONDS
+        assert evt["stall_phase"] == "in_tool"
+        assert evt["stall_grace_seconds"] == ad._STALL_GRACE_SECONDS
+    finally:
+        gate.set()
+
+
+def test_list_async_delegations_exposes_live_activity(monkeypatch):
+    """list_async_delegations must expose per-child live activity sampled
+    from progress_fn plus seconds_since_progress, for /agents UIs (#51690)."""
+    monkeypatch.setattr(ad, "_STALE_CHECK_INTERVAL", 0.03)
+    gate = threading.Event()
+    base_ts = time.time() - 12.0
+
+    res = ad.dispatch_async_delegation(
+        goal="live listing", context=None, toolsets=None, role="leaf",
+        model="m", session_key="", max_async_children=1,
+        runner=lambda: {} if gate.wait(timeout=10) else {},
+        progress_fn=lambda: (((3, "web_search", base_ts),), True),
+    )
+    try:
+        time.sleep(0.1)  # let the monitor stamp _progress_ts at least once
+        item = next(
+            d for d in ad.list_async_delegations()
+            if d["delegation_id"] == res["delegation_id"]
+        )
+        assert item["status"] == "running"
+        assert item["in_tool"] is True
+        assert "seconds_since_progress" in item
+        (child,) = item["children_activity"]
+        assert child["api_calls"] == 3
+        assert child["current_tool"] == "web_search"
+        assert 10.0 <= child["seconds_since_activity"] <= 20.0
+        # Callables and private bookkeeping must never leak.
+        assert "progress_fn" not in item
+        assert "interrupt_fn" not in item
+        assert not any(k.startswith("_") for k in item)
+    finally:
+        gate.set()
+
+
+def test_in_tool_stall_uses_higher_threshold(monkeypatch):
+    """A frozen child inside a tool gets the in-tool ceiling, not the idle one."""
+    _fast_stale_monitor(monkeypatch, idle=0.1, in_tool=10.0, grace=0.1)
+    gate = threading.Event()
+
+    def runner():
+        gate.wait(timeout=10)
+        return {"status": "completed", "summary": "long tool finished"}
+
+    res = ad.dispatch_async_delegation(
+        goal="long tool child", context=None, toolsets=None, role="leaf",
+        model="m", session_key="", runner=runner, max_async_children=1,
+        # Frozen token but in_tool=True — a legitimately slow terminal
+        # command / web fetch. Must NOT be stalled at the idle threshold.
+        progress_fn=lambda: ((1, "terminal"), True),
+    )
+    assert res["status"] == "dispatched"
+
+    time.sleep(0.5)  # far past idle threshold, well under in-tool threshold
+    assert ad.active_count() == 1
+    assert process_registry.completion_queue.empty()
+
+    gate.set()
+    evt = _drain_for(res["delegation_id"], timeout=5.0)
+    assert evt is not None
+    assert evt["status"] == "completed"
 
 
 def test_real_process_restart_restores_owned_completion_once(tmp_path):
@@ -321,102 +553,6 @@ assert ad.mark_completion_delivered({delegation_id!r})
         cwd=repo, env=env, text=True, capture_output=True, timeout=15, check=True,
     )
     assert probe.stdout.strip().splitlines()[-1] == "0"
-
-
-def test_submit_failure_removes_durable_running_record(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-    class _BrokenExecutor:
-        def submit(self, *_args, **_kwargs):
-            raise RuntimeError("submit failed")
-
-    monkeypatch.setattr(ad, "_get_executor", lambda _max_workers: _BrokenExecutor())
-    result = ad.dispatch_async_delegation(
-        goal="never ran", context=None, toolsets=None, role="leaf", model="m",
-        session_key="owner", runner=lambda: {},
-    )
-
-    assert result["status"] == "rejected"
-    with ad._DB_LOCK, ad._connect() as conn:
-        assert conn.execute("SELECT COUNT(*) FROM async_delegations").fetchone()[0] == 0
-
-
-def test_pending_retention_prunes_delivered_before_undelivered(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    monkeypatch.setattr(ad, "_MAX_RETAINED_COMPLETED", 2)
-    for index, delivery_state in enumerate(("pending", "delivered", "pending")):
-        delegation_id = f"deleg_{index}"
-        record = {
-            "delegation_id": delegation_id,
-            "session_key": "owner",
-            "origin_ui_session_id": "",
-            "parent_session_id": None,
-            "dispatched_at": float(index + 1),
-        }
-        ad._persist_dispatch(record)
-        ad._persist_completion(
-            {
-                "delegation_id": delegation_id,
-                "status": "completed",
-                "completed_at": float(index + 1),
-            },
-            {"status": "completed", "summary": delegation_id},
-        )
-        if delivery_state == "delivered":
-            ad.mark_completion_delivered(delegation_id)
-
-    ad._prune_durable_records()
-
-    assert ad.get_durable_delegation("deleg_0") is not None
-    assert ad.get_durable_delegation("deleg_1") is None
-    assert ad.get_durable_delegation("deleg_2") is not None
-
-
-def test_recover_marks_abandoned_running_record_unknown(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    record = {
-        "delegation_id": "deleg_abandoned",
-        "session_key": "owner",
-        "origin_ui_session_id": "",
-        "parent_session_id": None,
-        "dispatched_at": 1.0,
-    }
-    ad._persist_dispatch(record)
-    with ad._DB_LOCK, ad._connect() as conn:
-        conn.execute(
-            "UPDATE async_delegations SET owner_pid=?, owner_started_at=NULL WHERE delegation_id=?",
-            (99999999, "deleg_abandoned"),
-        )
-
-    assert ad.recover_abandoned_delegations() == 1
-    durable = ad.get_durable_delegation("deleg_abandoned")
-    assert durable["state"] == "unknown"
-    assert durable["delivery_state"] == "pending"
-    restored = queue.Queue()
-    assert ad.restore_undelivered_completions(restored) == 1
-    assert restored.get_nowait()["status"] == "unknown"
-
-
-def test_durable_delivery_claim_is_exclusive_and_retryable(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    record = {
-        "delegation_id": "deleg_claim", "session_key": "owner",
-        "origin_ui_session_id": "", "parent_session_id": None,
-        "dispatched_at": 1.0,
-    }
-    ad._persist_dispatch(record)
-    ad._persist_completion(
-        {"delegation_id": "deleg_claim", "status": "completed", "completed_at": 2.0},
-        {"status": "completed", "summary": "done"},
-    )
-
-    assert ad.claim_completion_delivery("deleg_claim", "consumer-a")
-    assert not ad.claim_completion_delivery("deleg_claim", "consumer-b")
-    assert ad.release_completion_delivery("deleg_claim", "consumer-a")
-    assert ad.claim_completion_delivery("deleg_claim", "consumer-b")
-    assert ad.complete_completion_delivery("deleg_claim", "consumer-b")
-    assert not ad.claim_completion_delivery("deleg_claim", "consumer-c")
-    assert ad.get_durable_delegation("deleg_claim")["delivery_state"] == "delivered"
 
 
 # ---------------------------------------------------------------------------
@@ -589,8 +725,9 @@ def test_delegate_task_background_batch_runs_as_one_unit(monkeypatch):
     monkeypatch.setattr(dt, "_build_child_agent", lambda **kw: fake_child)
     monkeypatch.setattr(dt, "_run_single_child", _blocking_child)
     monkeypatch.setattr(dt, "_resolve_delegation_credentials", lambda *a, **k: creds)
+    goals = ["analyze component a", "analyze component b", "analyze component c"]
     out = dt.delegate_task(
-        tasks=[{"goal": "a"}, {"goal": "b"}, {"goal": "c"}],
+        tasks=[{"goal": goal} for goal in goals],
         background=True,
         parent_agent=parent,
     )
@@ -600,7 +737,7 @@ def test_delegate_task_background_batch_runs_as_one_unit(monkeypatch):
     assert parsed["mode"] == "background"
     assert parsed["count"] == 3
     assert parsed["delegation_id"].startswith("deleg_")
-    assert parsed["goals"] == ["a", "b", "c"]
+    assert parsed["goals"] == goals
     # ONE background unit for the whole fan-out (not three), and the call
     # returned while all children are still blocked → chat not blocked.
     assert process_registry.completion_queue.empty()
@@ -614,12 +751,12 @@ def test_delegate_task_background_batch_runs_as_one_unit(monkeypatch):
     assert evt.get("is_batch") is True
     assert len(evt["results"]) == 3
     summaries = sorted(r["summary"] for r in evt["results"])
-    assert summaries == ["done: a", "done: b", "done: c"]
+    assert summaries == [f"done: {goal}" for goal in goals]
     # The consolidated notification names all three tasks in one block.
     text = format_process_notification(evt)
     assert text is not None
     assert "TASK 1/3" in text and "TASK 2/3" in text and "TASK 3/3" in text
-    assert "done: a" in text and "done: b" in text and "done: c" in text
+    assert all(f"done: {goal}" in text for goal in goals)
     # No more events — it's a single combined completion, not N of them.
     assert _drain_one() is None
 
@@ -883,17 +1020,6 @@ def _make_async_evt(**over):
     return evt
 
 
-def test_gateway_enriches_routing_from_session_key():
-    from gateway.run import GatewayRunner
-
-    runner = object.__new__(GatewayRunner)
-    evt = _make_async_evt()
-    runner._enrich_async_delegation_routing(evt)
-    assert evt["platform"] == "telegram"
-    assert evt["chat_id"] == "12345"
-    assert evt["thread_id"] == "678"
-
-
 def test_gateway_formatter_renders_async_block():
     from gateway.run import _format_gateway_process_notification
 
@@ -902,40 +1028,6 @@ def test_gateway_formatter_renders_async_block():
     assert "ASYNC DELEGATION COMPLETE" in txt
     assert "Found the bug in test_foo" in txt
     assert "Investigate flaky test" in txt
-
-
-def test_gateway_watch_drain_requeues_async_without_looping():
-    from gateway.run import _drain_gateway_watch_events
-
-    q = queue.Queue()
-    async_evt = _make_async_evt()
-    watch_evt = {
-        "type": "watch_match",
-        "session_id": "proc_1",
-        "command": "pytest",
-        "pattern": "READY",
-        "output": "READY",
-    }
-    q.put(async_evt)
-    q.put(watch_evt)
-
-    watch_events = _drain_gateway_watch_events(q)
-
-    assert watch_events == [watch_evt]
-    assert q.qsize() == 1
-    assert q.get_nowait() == async_evt
-
-
-def test_gateway_builds_routable_source_from_enriched_event():
-    from gateway.run import GatewayRunner
-
-    runner = object.__new__(GatewayRunner)
-    evt = _make_async_evt()
-    runner._enrich_async_delegation_routing(evt)
-    src = runner._build_process_event_source(evt)
-    assert src is not None
-    assert src.platform.value == "telegram"
-    assert src.chat_id == "12345"
 
 
 def test_gateway_cli_origin_event_left_unrouted():
@@ -947,4 +1039,67 @@ def test_gateway_cli_origin_event_left_unrouted():
     runner._enrich_async_delegation_routing(evt)
     assert "platform" not in evt
 
+
+def test_single_task_truncation_banner_when_max_iterations():
+    """A single async subagent that hit its iteration cap (exit_reason=
+    max_iterations) must surface a TRUNCATED marker in the formatted result,
+    even though status stays 'completed' (a summary exists)."""
+    evt = _make_async_evt(
+        status="completed",
+        summary="Did part of the work then ran out of budget.",
+        exit_reason="max_iterations",
+    )
+    text = format_process_notification(evt)
+    assert text is not None
+    assert "TRUNCATED" in text
+    assert "max_iterations" in text
+    # The summary is still shown, just flagged.
+    assert "Did part of the work" in text
+
+
+def test_single_task_no_banner_when_clean():
+    """A cleanly-finished subagent must NOT get a truncation banner."""
+    evt = _make_async_evt(status="completed", summary="All done.", exit_reason="completed")
+    text = format_process_notification(evt)
+    assert text is not None
+    assert "TRUNCATED" not in text
+
+
+def test_batch_truncation_banner_marks_only_truncated_task():
+    """In a batch, only the task that hit max_iterations gets the TRUNCATED
+    marker; a clean sibling keeps the normal check icon."""
+    evt = _make_async_evt(
+        is_batch=True,
+        goals=["clean task", "truncated task"],
+        results=[
+            {
+                "task_index": 0,
+                "status": "completed",
+                "summary": "finished cleanly",
+                "api_calls": 5,
+                "exit_reason": "completed",
+                "truncated": False,
+            },
+            {
+                "task_index": 1,
+                "status": "completed",
+                "summary": "cut off mid-work",
+                "api_calls": 250,
+                "exit_reason": "max_iterations",
+                "truncated": True,
+            },
+        ],
+    )
+    text = format_process_notification(evt)
+    assert text is not None
+    assert "TRUNCATED" in text
+    # The clean task's summary and the truncated one's both render...
+    assert "finished cleanly" in text
+    assert "cut off mid-work" in text
+    # ...but the banner is tied to the truncated task, not the clean one.
+    trunc_pos = text.index("cut off mid-work")
+    clean_pos = text.index("finished cleanly")
+    banner_pos = text.index("TRUNCATED")
+    # The header banner for task 2 appears after task 1's summary.
+    assert banner_pos > clean_pos
 

@@ -37,6 +37,7 @@ from typing import Any, Dict, List, Optional
 import yaml
 
 from hermes_constants import get_hermes_home, get_optional_mcps_dir
+from hermes_cli._subprocess_compat import noninteractive_git_env
 from hermes_cli.colors import Colors, color
 from hermes_cli.config import (
     load_config,
@@ -114,6 +115,28 @@ class ToolsSpec:
 
 
 @dataclass
+class SuggestSpec:
+    """Composer-suggestion metadata (desktop "brand pill" triggers).
+
+    Optional. When present, UI surfaces (currently the desktop composer)
+    may suggest installing this entry when the user's draft contains one
+    of the keywords as a completed whole word, or pastes a link whose
+    hostname ends with one of the host suffixes. Purely advisory — the
+    install itself always flows through the ordinary validated paths.
+
+    NOTE: GitHub is intentionally NOT in the catalog and must not be
+    suggested here: its hosted MCP requires a per-host OAuth app (generic
+    DCR 404s), and the bundled github/* skills (gh CLI) are the far more
+    capable integration. Point users at the skills instead.
+    """
+
+    # Lowercase whole-word/phrase triggers matched against the draft.
+    keywords: List[str] = field(default_factory=list)
+    # Hostname suffixes ("atlassian.net") matched against pasted links.
+    hosts: List[str] = field(default_factory=list)
+
+
+@dataclass
 class CatalogEntry:
     name: str
     description: str
@@ -123,6 +146,7 @@ class CatalogEntry:
     tools: ToolsSpec = field(default_factory=ToolsSpec)
     install: Optional[InstallSpec] = None
     post_install: str = ""
+    suggest: Optional[SuggestSpec] = None
     manifest_path: Path = field(default_factory=Path)
 
 
@@ -229,6 +253,21 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         scopes=list(auth_raw.get("scopes") or []),
         env_var=auth_raw.get("env_var"),
     )
+    if t_type == "http" and a_type == "api_key":
+        # _build_server_config emits an Authorization header referencing
+        # ${MCP_<NAME>_API_KEY} (via _bearer_auth_headers), but install_entry
+        # only persists the env vars DECLARED in auth.env. Enforce the naming
+        # contract at parse time, or a manifest declaring e.g. N8N_API_KEY
+        # would install cleanly yet send a literal-placeholder header (401)
+        # at connect time.
+        from hermes_cli.mcp_config import _env_key_for_server
+
+        _required_key = _env_key_for_server(name)
+        if not any(spec.name == _required_key for spec in env_list):
+            raise CatalogError(
+                f"{path}: http + api_key auth requires auth.env to declare "
+                f"'{_required_key}' (the key the Authorization header references)"
+            )
 
     tools_raw = data.get("tools") or {}
     if not isinstance(tools_raw, dict):
@@ -242,6 +281,36 @@ def _parse_manifest(path: Path) -> CatalogEntry:
                 f"{path}: tools.default_enabled must be a list of strings"
             )
     tools_spec = ToolsSpec(default_enabled=default_enabled)
+
+    suggest: Optional[SuggestSpec] = None
+    suggest_raw = data.get("suggest")
+    if suggest_raw is not None:
+        if not isinstance(suggest_raw, dict):
+            raise CatalogError(f"{path}: 'suggest' must be a mapping")
+        kw_raw = suggest_raw.get("keywords") or []
+        hosts_raw = suggest_raw.get("hosts") or []
+        if not isinstance(kw_raw, list) or not all(
+            isinstance(k, str) and k.strip() for k in kw_raw
+        ):
+            raise CatalogError(
+                f"{path}: suggest.keywords must be a list of non-empty strings"
+            )
+        if not isinstance(hosts_raw, list) or not all(
+            isinstance(h, str) and h.strip() for h in hosts_raw
+        ):
+            raise CatalogError(
+                f"{path}: suggest.hosts must be a list of non-empty strings"
+            )
+        if not kw_raw and not hosts_raw:
+            raise CatalogError(
+                f"{path}: 'suggest' requires at least one keyword or host"
+            )
+        # Normalize: matching is case-insensitive whole-word / host-suffix,
+        # so store lowercase and let UIs match without re-normalizing.
+        suggest = SuggestSpec(
+            keywords=[k.strip().lower() for k in kw_raw],
+            hosts=[h.strip().lower().lstrip(".") for h in hosts_raw],
+        )
 
     install: Optional[InstallSpec] = None
     install_raw = data.get("install")
@@ -274,6 +343,7 @@ def _parse_manifest(path: Path) -> CatalogEntry:
         tools=tools_spec,
         install=install,
         post_install=str(data.get("post_install") or ""),
+        suggest=suggest,
         manifest_path=path,
     )
 
@@ -412,9 +482,16 @@ def _do_git_install(entry: CatalogEntry) -> Path:
     # SHA ref before we fall back to full-clone-then-checkout).
     is_sha_ref = bool(re.fullmatch(r"[0-9a-f]{7,40}", install.ref))
 
+    # Never let an install hang on a credential prompt: catalog installs run
+    # from CLI commands and dashboard flows where nobody can answer git's
+    # username/password prompt (private repo, bad remote, auth required).
+    _git_env = noninteractive_git_env()
+
     if not is_sha_ref:
         proc = subprocess.run(
             [git, "clone", "--depth", "1", "--branch", install.ref, install.url, str(dest)],
+            stdin=subprocess.DEVNULL,
+            env=_git_env,
         )
         if proc.returncode == 0:
             pass
@@ -426,10 +503,18 @@ def _do_git_install(entry: CatalogEntry) -> Path:
             is_sha_ref = True  # treat the same as a SHA ref from here
 
     if is_sha_ref:
-        proc = subprocess.run([git, "clone", install.url, str(dest)])
+        proc = subprocess.run(
+            [git, "clone", install.url, str(dest)],
+            stdin=subprocess.DEVNULL,
+            env=_git_env,
+        )
         if proc.returncode != 0:
             raise CatalogError(f"git clone failed for {install.url}")
-        proc = subprocess.run([git, "-C", str(dest), "checkout", install.ref])
+        proc = subprocess.run(
+            [git, "-C", str(dest), "checkout", install.ref],
+            stdin=subprocess.DEVNULL,
+            env=_git_env,
+        )
         if proc.returncode != 0:
             raise CatalogError(f"git checkout {install.ref} failed")
 
@@ -490,6 +575,10 @@ def _build_server_config(
         cfg["url"] = t.url
         if entry.auth.type == "oauth":
             cfg["auth"] = "oauth"
+        elif entry.auth.type == "api_key":
+            from hermes_cli.mcp_config import _bearer_auth_headers
+
+            cfg["headers"] = _bearer_auth_headers(entry.name)
     return cfg
 
 

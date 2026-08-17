@@ -66,6 +66,12 @@ export function hasSessionInfoStatePatch(patch: SessionRuntimeStatePatch): boole
 // `scripts/profile-typing-lag.md` for the measurement work behind this.
 export const STREAM_DELTA_FLUSH_MS = 33
 
+// Ceiling for the ADAPTIVE flush gap (see scheduleDeltaFlush). Under heavy
+// multi-stream load the gap stretches to 3x the measured flush cost so the
+// main thread stays responsive to input; this cap guarantees streaming text
+// still visibly updates at least ~4x per second no matter the load.
+export const MAX_STREAM_FLUSH_GAP_MS = 250
+
 // Gateway/provider failures sometimes arrive as message.complete text instead
 // of an explicit error event. Treat matches as inline assistant errors so they
 // persist like real error events and don't get erased by hydrate fallback.
@@ -141,7 +147,9 @@ export function delegateTaskPayloads(
   const result = parseMaybeRecord(payload.result)
   const rawTasks = Array.isArray(args.tasks) ? args.tasks : []
   const tasks = rawTasks.length ? rawTasks.map(parseMaybeRecord) : [args]
-  const status = phase === 'complete' ? (payload.error ? 'failed' : 'completed') : 'running'
+  const resultStatus = typeof result.status === 'string' ? result.status.toLowerCase() : ''
+  const failedResult = Boolean(payload.error) || ['timeout', 'error', 'failed', 'failure'].includes(resultStatus)
+  const status = phase === 'complete' ? (failedResult ? 'failed' : 'completed') : 'running'
   const toolId = payload.tool_id || payload.tool_call_id || payload.id || 'delegate_task'
   const progressText = firstString(payload.preview, payload.message, payload.context)
 

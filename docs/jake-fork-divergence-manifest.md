@@ -1,12 +1,33 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-07-26 (v2026.7.20 integrated and preservation-tested)
+Last audited: 2026-08-17 (v2026.8.16 / Hermes 0.20.2 integration complete; live cutover pending)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
 It is intentionally a feature manifest, not a perfect design doc. Use it to answer: "what does this fork intentionally carry that upstream Hermes may not?" and "what tests/symbols should an upgrade preserve?"
 
 ## Scope and anchors
+
+### v2026.8.16 integration (2026-08-17)
+
+- Integration branch: `jake/integrate-v2026.8.16-20260817-135953`
+- Pre-merge fork HEAD: `896a5ea3b219d173bee68a778fb9ae3a0bdba05f`
+- Upstream release integrated: `v2026.8.16` (peeled commit `df4b65147d7ddd74dd449f9067aabbca5aef0ec7`; Hermes Agent v0.20.2)
+- Rollback marker: `jake/rollback-before-v2026.8.16-20260817-135953` at `896a5ea3b219d173bee68a778fb9ae3a0bdba05f`
+- The merge was performed in isolated worktree `/tmp/hermes-v2026.8.16-integration-20260817-135953`; Jake's live checkout and gateway remained on the v2026.7.20 integration branch during reconciliation and tests.
+- Initial merge conflict inventory: 55 files. The reconciliation retained fork behavior across file-backed memory, content-first Discord UX, API/Copilot routing, MCP reconnect, native-image recovery, ACP provenance, recent-session ordering, and bounded delegation completion while adopting upstream's current config, gateway, MCP, provider, and dashboard architecture.
+- Important convergence decisions:
+  - upstream's `DEFAULT_CONFIG` extraction is authoritative; fork-only defaults were migrated to `hermes_cli/config_defaults.py` instead of restoring the obsolete giant block in `hermes_cli/config.py`;
+  - upstream's `TurnRunner` extraction remains the only gateway turn owner; fork terminal-only expansion, friendly/MCP-safe labels, bounded delegation state, long-turn mentions, replay normalization, approval metadata, and voice policy were ported to that path rather than reviving the old closure;
+  - upstream's dashboard route extraction remains authoritative, with the fork's recent-activity default restored in `hermes_cli/web_routers/sessions.py`;
+  - upstream MCP permanent-failure parking and timed revival remain intact alongside the fork's bounded tool-call reconnect/retry path;
+  - upstream Discord WebSocket liveness and profile-scoped authorization were combined with the fork's independent REST probe, event-loop watchdog, and content-first approval/clarify UX.
+- Reconciliation testing found and fixed four non-obvious integration regressions: terminal progress had bypassed fork command cleanup/labels after the `TurnRunner` move; fast OCR missed upstream's lazy auxiliary-client initializer; duplicate async-delegation queue replays could enter the same coalesced completion prompt twice; and the extracted sessions route had reverted the dashboard default from recent activity to creation time.
+- Upstream reorganized or removed parts of nine fork-sensitive test modules. The 160 still-relevant fork assertions now live under `tests/fork_preservation/`; every pre-merge fork test name from those modules is covered either by the current upstream-shaped test or by this preservation residue.
+- Preservation result: the main 82-target fork gate passed **2,382 tests with 7 skips** in the isolated Python 3.11 environment. The 160-test fork-preservation residue also passed independently. Focused reruns passed for gateway/ACP reconciliation (**685 passed, 2 skipped**), MCP (**113 passed**), Discord liveness/delegation (**64 passed**), and the order-sensitive command-guard seam. The known `DEFAULT_ROOTS` assertion remains an environment-only exclusion under pytest's temporary `HERMES_HOME`, matching the prior integration behavior.
+- Non-Python verification also passed: reconciled Python files compile, import smoke passed, `uv lock --check` passed, the isolated CLI reports `Hermes Agent v0.20.2 (2026.8.16)`, and `web` TypeScript typechecking passed after installing its workspace dependencies with the repository-required npm version. Optional `anthropic` and semantic-search dependencies were installed only in the isolated test environment.
+- Merge commit: pending commit creation; replace this line with the resulting commit id immediately afterward.
+- Live cutover: not performed as part of isolated reconciliation. The live checkout and gateway remain on the v2026.7.20 / Hermes 0.19.0 integration until an explicit cutover step.
 
 ### v2026.7.20 integration (2026-07-26)
 

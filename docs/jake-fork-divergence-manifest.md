@@ -24,7 +24,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
   - upstream Discord WebSocket liveness and profile-scoped authorization were combined with the fork's independent REST probe, event-loop watchdog, and content-first approval/clarify UX.
 - Reconciliation testing found and fixed four non-obvious integration regressions: terminal progress had bypassed fork command cleanup/labels after the `TurnRunner` move; fast OCR missed upstream's lazy auxiliary-client initializer; duplicate async-delegation queue replays could enter the same coalesced completion prompt twice; and the extracted sessions route had reverted the dashboard default from recent activity to creation time.
 - Upstream reorganized or removed parts of nine fork-sensitive test modules. The 160 still-relevant fork assertions now live under `tests/fork_preservation/`; every pre-merge fork test name from those modules is covered either by the current upstream-shaped test or by this preservation residue.
-- Preservation result: the main 82-target fork gate passed **2,382 tests with 7 skips** in the isolated Python 3.11 environment. The 160-test fork-preservation residue also passed independently. Focused reruns passed for gateway/ACP reconciliation (**685 passed, 2 skipped**), MCP (**113 passed**), Discord liveness/delegation (**64 passed**), and the order-sensitive command-guard seam. The known `DEFAULT_ROOTS` assertion remains an environment-only exclusion under pytest's temporary `HERMES_HOME`, matching the prior integration behavior.
+- Preservation result: the main 82-target fork gate passed **2,382 tests with 7 skips** in the isolated Python 3.11 environment. The 160-test fork-preservation residue also passed independently. Focused reruns passed for gateway/ACP reconciliation (**685 passed, 2 skipped**), MCP (**114 passed across the core and stdio-init timeout suites**), Discord liveness/delegation (**64 passed**), and the order-sensitive command-guard seam. The known `DEFAULT_ROOTS` assertion remains an environment-only exclusion under pytest's temporary `HERMES_HOME`, matching the prior integration behavior.
 - Non-Python verification also passed: reconciled Python files compile, import smoke passed, `uv lock --check` passed, the isolated CLI reports `Hermes Agent v0.20.2 (2026.8.16)`, and `web` TypeScript typechecking passed after installing its workspace dependencies with the repository-required npm version. Optional `anthropic` and semantic-search dependencies were installed only in the isolated test environment.
 - Merge commit: `05aa01a058b38c1c89a8b9a77b22fbcc564fca7d` (`merge: integrate Hermes v2026.8.16`).
 - Live cutover: not performed as part of isolated reconciliation. The live checkout and gateway remain on the v2026.7.20 / Hermes 0.19.0 integration until an explicit cutover step.
@@ -275,7 +275,7 @@ Key files:
 
 - `gateway/display_config.py` (`expand_terminal_commands` resolution and normalization)
 - `gateway/run.py` (terminal code-block selection)
-- `hermes_cli/config.py`
+- `hermes_cli/config_defaults.py`
 - `tests/gateway/test_display_config.py`, `tests/gateway/test_run_progress_topics.py`
 - `website/docs/user-guide/configuration.md`, `website/docs/user-guide/messaging/index.md`
 
@@ -719,7 +719,7 @@ Core behavior:
 
 Key files:
 
-- `hermes_cli/web_server.py`
+- `hermes_cli/web_routers/sessions.py`
 - `web/src/lib/api.ts`
 - `tests/hermes_cli/test_web_server.py`
 
@@ -808,7 +808,7 @@ Commits: `890a012db` (historical standby implementation, now upstream-covered), 
 Preservation checks:
 
 ```bash
-python -m pytest tests/tools/test_mcp_tool.py::TestReconnection tests/tools/test_mcp_tool.py::TestToolHandler tests/tools/test_mcp_parked_self_probe.py tests/tools/test_mcp_reconnect_retry_reset.py -o 'addopts=' -q
+python -m pytest tests/tools/test_mcp_tool.py::TestReconnection tests/tools/test_mcp_tool.py::TestToolHandler tests/tools/test_mcp_parked_self_probe.py tests/tools/test_mcp_reconnect_retry_reset.py tests/tools/test_mcp_stdio_init_timeout.py -o 'addopts=' -q
 ```
 
 Live smoke for Jake's profile:
@@ -831,7 +831,7 @@ Key files:
 
 - `plugins/platforms/discord/adapter.py` (upstream WebSocket liveness plus fork `_rest_liveness_*` state/methods)
 - `gateway/run.py` (process event-loop heartbeat/monitor and restart exit)
-- `hermes_cli/config.py` (event-loop watchdog config)
+- `hermes_cli/config_defaults.py` (event-loop watchdog defaults)
 - `tests/gateway/test_discord_liveness.py` (upstream WebSocket baseline)
 - `tests/gateway/test_discord_liveness_watchdog.py` (fork REST probe isolation, success/failure, and cancellation)
 - `tests/gateway/test_gateway_event_loop_watchdog.py`
@@ -968,7 +968,7 @@ Key files:
 - `gateway/run.py` (active-turn absorption, completion coalescing, per-turn cap,
   intentional-silence handling)
 - `agent/agent_init.py` (per-turn recursion guard state)
-- `hermes_cli/config.py` (delegation completion defaults)
+- `hermes_cli/config_defaults.py` (delegation completion defaults)
 - `tests/tools/test_async_delegation.py`
 - `tests/gateway/test_agent_cache.py`
 - `tests/gateway/test_completion_delivery.py`

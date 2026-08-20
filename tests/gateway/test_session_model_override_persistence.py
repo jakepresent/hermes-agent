@@ -36,6 +36,13 @@ OVERRIDE = {
 }
 
 
+COPILOT_CLAUDE_OVERRIDE = {
+    "model": "claude-opus-5",
+    "provider": "copilot",
+    "base_url": "https://api.githubcopilot.com",
+}
+
+
 def _make_source() -> SessionSource:
     return SessionSource(
         platform=Platform.TELEGRAM,
@@ -112,7 +119,7 @@ def test_runner_rehydrates_override_after_restart(store_factory):
             "base_url": "https://api.openai.example/v1",
             "provider": "openai",
         },
-    ):
+    ) as resolve_provider:
         runner._rehydrate_session_model_override(session_key)
 
     override = runner._session_model_overrides[session_key]
@@ -122,6 +129,44 @@ def test_runner_rehydrates_override_after_restart(store_factory):
     # Credentials come from live resolution, never from disk.
     assert override["api_key"] == "sk-fresh-from-keychain"
     assert override["api_mode"] == "responses"
+    resolve_provider.assert_called_once_with(
+        "openai",
+        target_model="gpt-5o",
+    )
+
+
+def test_runner_rehydrates_copilot_transport_from_persisted_target_model(
+    store_factory,
+):
+    """A restarted Opus session must not inherit the GPT default's Responses wire."""
+    store = store_factory()
+    entry = store.get_or_create_session(_make_source())
+    session_key = entry.session_key
+    store.set_model_override(session_key, COPILOT_CLAUDE_OVERRIDE)
+
+    runner = _make_runner(store_factory())
+
+    def _resolve_runtime_provider(*, requested, target_model=None):
+        assert requested == "copilot"
+        assert target_model == "claude-opus-5"
+        return {
+            "api_key": "copilot-token",
+            "api_mode": "chat_completions",
+            "base_url": "https://api.githubcopilot.com",
+            "provider": "copilot",
+            "credential_pool": object(),
+        }
+
+    with patch(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        side_effect=_resolve_runtime_provider,
+    ):
+        runner._rehydrate_session_model_override(session_key)
+
+    override = runner._session_model_overrides[session_key]
+    assert override["model"] == "claude-opus-5"
+    assert override["provider"] == "copilot"
+    assert override["api_mode"] == "chat_completions"
 
 
 def test_sanitize_model_override():

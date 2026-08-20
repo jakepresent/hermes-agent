@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -4075,11 +4076,138 @@ def _compress_context_via_codex_app_server(
     return messages, existing_prompt
 
 
+_IMAGE_SHRINK_CACHE_MAX_ENTRIES = 16
+_IMAGE_SHRINK_CACHE_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _image_shrink_cache_key(data_url: str) -> str:
+    return hashlib.sha256(data_url.encode("utf-8")).hexdigest()
+
+
+def _remember_shrunk_image(
+    shrink_cache: Optional[Dict[str, str]],
+    original_url: str,
+    resized_url: str,
+) -> None:
+    """Remember one provider-confirmed request rewrite without storing its giant key."""
+    if not isinstance(shrink_cache, dict) or not original_url or not resized_url:
+        return
+    if len(resized_url) > _IMAGE_SHRINK_CACHE_MAX_BYTES:
+        return
+    key = _image_shrink_cache_key(original_url)
+    # Plain dicts preserve insertion order. Refresh an existing entry so the
+    # bounded cache behaves like a tiny LRU without another dependency.
+    shrink_cache.pop(key, None)
+    while shrink_cache and (
+        len(shrink_cache) >= _IMAGE_SHRINK_CACHE_MAX_ENTRIES
+        or sum(len(value) for value in shrink_cache.values()) + len(resized_url)
+        > _IMAGE_SHRINK_CACHE_MAX_BYTES
+    ):
+        shrink_cache.pop(next(iter(shrink_cache)))
+    shrink_cache[key] = resized_url
+
+
+def apply_cached_image_shrinks(
+    api_messages: list,
+    *,
+    shrink_cache: Optional[Dict[str, str]],
+) -> int:
+    """Apply prior 413 image rewrites to a fresh request clone.
+
+    Durable conversation history retains the original image. Once a provider
+    rejects that request and the reactive shrinker finds a usable replacement,
+    subsequent model/tool rounds in the same provider/model session reuse the
+    replacement instead of rediscovering the same HTTP 413 on every call.
+    """
+    if not api_messages or not isinstance(shrink_cache, dict) or not shrink_cache:
+        return 0
+
+    changed = 0
+    for msg in api_messages:
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        replacement_content: list | None = None
+        for part_idx, part in enumerate(content):
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype == "image":
+                source = part.get("source")
+                if not isinstance(source, dict) or source.get("type") != "base64":
+                    continue
+                data = source.get("data")
+                if not isinstance(data, str) or not data:
+                    continue
+                media_type = str(source.get("media_type") or "image/jpeg").strip()
+                if not media_type.startswith("image/"):
+                    media_type = "image/jpeg"
+                original_url = f"data:{media_type};base64,{data}"
+                cached = shrink_cache.get(_image_shrink_cache_key(original_url))
+                if not cached:
+                    continue
+                header, _, cached_data = cached.partition(",")
+                cached_media_type = "image/jpeg"
+                if header.startswith("data:"):
+                    candidate = header[len("data:"):].split(";", 1)[0].strip()
+                    if candidate.startswith("image/"):
+                        cached_media_type = candidate
+                if replacement_content is None:
+                    replacement_content = list(content)
+                replacement_content[part_idx] = {
+                    **part,
+                    "source": {
+                        **source,
+                        "type": "base64",
+                        "media_type": cached_media_type,
+                        "data": cached_data,
+                    },
+                }
+                changed += 1
+                continue
+
+            if ptype not in {"image_url", "input_image"}:
+                continue
+            image_value = part.get("image_url")
+            if isinstance(image_value, dict):
+                original_url = image_value.get("url", "")
+            else:
+                original_url = image_value
+            if not isinstance(original_url, str) or not original_url.startswith("data:"):
+                continue
+            cached = shrink_cache.get(_image_shrink_cache_key(original_url))
+            if not cached:
+                continue
+            if replacement_content is None:
+                replacement_content = list(content)
+            if isinstance(image_value, dict):
+                replacement_content[part_idx] = {
+                    **part,
+                    "image_url": {**image_value, "url": cached},
+                }
+            else:
+                replacement_content[part_idx] = {**part, "image_url": cached}
+            changed += 1
+
+        if replacement_content is not None:
+            msg["content"] = replacement_content
+
+    if changed:
+        logger.info(
+            "image-shrink recovery: reused %d session-local cached image rewrite(s)",
+            changed,
+        )
+    return changed
+
+
 def try_shrink_image_parts_in_messages(
     api_messages: list,
     *,
     max_dimension: int = 8000,
     target_total_base64_bytes: Optional[int] = None,
+    shrink_cache: Optional[Dict[str, str]] = None,
 ) -> bool:
     """Re-encode native image parts at a smaller size to recover from
     image-too-large errors and whole-request payload 413s.
@@ -4325,6 +4453,7 @@ def try_shrink_image_parts_in_messages(
                 url = _source_to_data_url(source)
                 resized, unshrinkable = _shrink_data_url(url or "")
                 if resized and isinstance(source, dict):
+                    _remember_shrunk_image(shrink_cache, url or "", resized)
                     if new_content is None:
                         new_content = list(content)
                     new_content[part_idx] = {
@@ -4379,6 +4508,7 @@ def try_shrink_image_parts_in_messages(
             max_base64_bytes=per_image_budget,
         )
         if resized:
+            _remember_shrunk_image(shrink_cache, url, resized)
             current_content = msg.get("content")
             replacement_content = list(
                 current_content if isinstance(current_content, list) else original_content
@@ -4424,5 +4554,6 @@ __all__ = [
     "check_compression_model_feasibility",
     "replay_compression_warning",
     "compress_context",
+    "apply_cached_image_shrinks",
     "try_shrink_image_parts_in_messages",
 ]

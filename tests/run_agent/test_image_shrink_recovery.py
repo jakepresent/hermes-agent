@@ -18,6 +18,7 @@ payload rewriter.
 from __future__ import annotations
 
 import base64
+import copy
 import sys
 from types import SimpleNamespace
 
@@ -320,6 +321,43 @@ class TestShrinkImagePartsHelper:
         assert resize_hits["count"] == 0
         assert msgs[0]["content"][0]["image_url"]["url"] == img1
         assert msgs[0]["content"][1]["image_url"]["url"] == img2
+
+    def test_confirmed_shrink_reused_on_fresh_request_clone(self, monkeypatch):
+        """A later tool/model round must not rediscover the same 413."""
+        agent = _make_agent()
+        original_url = _big_png_data_url(5000)
+        shrunk = "data:image/jpeg;base64," + "R" * 1000
+        resize_hits = {"count": 0}
+
+        def _fake_resize(*_args, **_kwargs):
+            resize_hits["count"] += 1
+            return shrunk
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            _fake_resize,
+            raising=False,
+        )
+
+        durable_history = [{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": original_url}}],
+        }]
+        first_request = copy.deepcopy(durable_history)
+        assert agent._try_shrink_image_parts_in_messages(first_request) is True
+        assert first_request[0]["content"][0]["image_url"]["url"] == shrunk
+        assert durable_history[0]["content"][0]["image_url"]["url"] == original_url
+
+        next_request = copy.deepcopy(durable_history)
+        assert agent._apply_cached_image_shrinks(next_request) == 1
+        assert next_request[0]["content"][0]["image_url"]["url"] == shrunk
+        assert resize_hits["count"] == 1
+
+        # Rewrites are scoped to the destination that rejected the original.
+        setattr(agent, "model", "claude-opus-different-route")
+        other_route_request = copy.deepcopy(durable_history)
+        assert agent._apply_cached_image_shrinks(other_route_request) == 0
+        assert other_route_request[0]["content"][0]["image_url"]["url"] == original_url
 
     def test_http_url_images_not_touched(self, monkeypatch):
         """Only data: URLs are candidates — http URLs are server-fetched."""

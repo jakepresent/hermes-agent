@@ -12,6 +12,7 @@ import pytest
 
 
 from types import SimpleNamespace
+import copy
 from unittest.mock import MagicMock, patch
 
 
@@ -175,6 +176,72 @@ class TestHTTP413Compression:
         mock_compress.assert_called_once()
         assert result["completed"] is True
         assert result["final_response"] == "Success after compression"
+
+    def test_image_shrink_cache_applies_before_next_model_round(self, agent, monkeypatch):
+        """A successful 413 image retry becomes the next round's wire image."""
+        original_url = "data:image/png;base64," + ("A" * (5 * 1024 * 1024))
+        shrunk_url = "data:image/jpeg;base64," + ("B" * 1000)
+        seen_urls = []
+
+        monkeypatch.setattr(
+            "tools.vision_tools._resize_image_for_vision",
+            lambda *_a, **_k: shrunk_url,
+            raising=False,
+        )
+
+        def _image_url(messages):
+            for message in messages:
+                content = message.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "image_url":
+                        value = part.get("image_url")
+                        return value.get("url") if isinstance(value, dict) else value
+                    if part.get("type") == "image":
+                        source = part.get("source")
+                        if isinstance(source, dict) and source.get("type") == "base64":
+                            return (
+                                f"data:{source.get('media_type') or 'image/jpeg'};base64,"
+                                f"{source.get('data') or ''}"
+                            )
+            return None
+
+        def _provider_call(**kwargs):
+            seen_urls.append(_image_url(kwargs["messages"]))
+            if len(seen_urls) == 1:
+                raise _make_413_error()
+            return _mock_response(content=f"success-{len(seen_urls)}", finish_reason="stop")
+
+        agent.provider = "copilot"
+        agent.model = "claude-opus-5"
+        monkeypatch.setattr(agent, "_model_supports_vision", lambda: True)
+        agent.client.chat.completions.create.side_effect = _provider_call
+        original_turn = [{
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": original_url}}],
+        }]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            first = agent.run_conversation(
+                copy.deepcopy(original_turn[0]["content"]),
+                conversation_history=[],
+            )
+            history = copy.deepcopy(original_turn) + [
+                {"role": "assistant", "content": first["final_response"]}
+            ]
+            second = agent.run_conversation("continue", conversation_history=history)
+
+        assert first["completed"] is True
+        assert second["completed"] is True
+        assert seen_urls == [original_url, shrunk_url, shrunk_url]
+        assert original_turn[0]["content"][0]["image_url"]["url"] == original_url
 
 
 

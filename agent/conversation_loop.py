@@ -2219,6 +2219,13 @@ def run_conversation(
             # The signature field helps maintain reasoning continuity
             api_messages.append(api_msg)
 
+        # Reactive 413 recovery keeps durable history lossless, but without a
+        # session-local request cache every following tool/model round rebuilds
+        # the original oversized inline image and pays for the same failed call.
+        # Reapply only rewrites learned for this exact provider/model; the
+        # persisted transcript remains untouched.
+        agent._apply_cached_image_shrinks(api_messages)
+
         # Build the final system message: cached prompt + ephemeral system prompt.
         # Ephemeral additions are API-call-time only (not persisted to session DB).
         # External recall context is injected into the user message, not the system

@@ -7354,6 +7354,32 @@ class AIAgent:
             api_messages,
             max_dimension=max_dimension,
             target_total_base64_bytes=target_total_base64_bytes,
+            shrink_cache=self._image_shrink_cache_for_active_model(),
+        )
+
+    def _image_shrink_cache_for_active_model(self) -> Dict[str, str]:
+        """Return the bounded request-rewrite cache for the active destination."""
+        caches = getattr(self, "_image_shrink_request_caches", None)
+        if not isinstance(caches, dict):
+            caches = {}
+            self._image_shrink_request_caches = caches
+        scope = (
+            (getattr(self, "provider", "") or "").strip().lower(),
+            (getattr(self, "model", "") or "").strip(),
+        )
+        if scope not in caches:
+            while len(caches) >= 4:
+                caches.pop(next(iter(caches)))
+            caches[scope] = {}
+        return caches[scope]
+
+    def _apply_cached_image_shrinks(self, api_messages: list) -> int:
+        """Reuse prior 413 rewrites on a fresh request clone."""
+        from agent.conversation_compression import apply_cached_image_shrinks
+
+        return apply_cached_image_shrinks(
+            api_messages,
+            shrink_cache=self._image_shrink_cache_for_active_model(),
         )
 
     def _try_strip_image_parts_from_tool_messages(

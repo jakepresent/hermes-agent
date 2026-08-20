@@ -27,7 +27,7 @@ import threading
 import time
 import uuid
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 from agent.context_compressor import ContextCompressor
@@ -1082,6 +1082,13 @@ def init_agent(
     # single tool loop does not repeatedly re-run auxiliary vision on the
     # same image history.
     agent._anthropic_image_fallback_cache: Dict[str, str] = {}
+
+    # Per provider/model, remember reactive 413 image rewrites for the life of
+    # this agent. Durable history keeps the original image; fresh request clones
+    # reuse the smaller wire representation after the first confirmed rejection.
+    agent._image_shrink_request_caches: Dict[
+        Tuple[str, str], Dict[str, str]
+    ] = {}
 
     # Initialize LLM client via centralized provider router.
     # The router handles auth resolution, base URL, headers, and

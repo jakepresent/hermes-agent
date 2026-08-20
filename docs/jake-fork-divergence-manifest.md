@@ -1,6 +1,6 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-08-19 (v2026.8.18 / Hermes 0.20.4 integration complete; live cutover pending)
+Last audited: 2026-08-19 (v2026.8.18 / Hermes 0.20.4 live; post-cutover runtime and MCP repair verified)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
@@ -14,7 +14,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
 - Pre-merge/live fork HEAD: `7a685cbfa0f9396172abf88ddf9c7b69457b3b0f`
 - Upstream release integrated: `v2026.8.18` (peeled commit `e624e9fde561e1add9388384012b295fde669ade`; Hermes Agent v0.20.4)
 - Rollback marker: `jake/rollback-before-v2026.8.18-20260819-205622` at `7a685cbfa0f9396172abf88ddf9c7b69457b3b0f`, pushed before reconciliation.
-- The merge was performed in isolated worktree `/tmp/hermes-v2026.8.18-integration-20260819-205622`; the live checkout and gateway remain on v0.20.2 until explicit cutover.
+- The merge was performed in isolated worktree `/tmp/hermes-v2026.8.18-integration-20260819-205622`; the live checkout and gateway remained on v0.20.2 until Jake explicitly approved and performed the cutover.
 - Scope: 417 upstream commits changed 655 files after v0.20.2. The fork differed on 133 paths, 37 overlapped upstream, and only four files conflicted: `gateway/run.py`, `tests/gateway/test_api_server.py`, `tools/mcp_tool.py`, and `uv.lock`.
 - Conflict decisions:
   - `gateway/run.py` keeps upstream's shared gateway model-context resolver and the fork's target-model-aware provider resolution, so persisted Opus sessions still select Chat Completions while GPT-5.x selects Responses;
@@ -25,7 +25,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
 - Preservation result: the 83-file manifest gate completed with **2,265 passed and 7 skipped**; its only failure was the already-documented `DEFAULT_ROOTS` assertion under pytest's mandatory temporary `HERMES_HOME`, and the same assertion passed in a fresh process against the real home. The independent fork-preservation residue passed **160 tests**. The full `tests/tools/test_mcp*.py` surface passed **523 tests**, including upstream protocol negotiation/schema-cache coverage and fork reconnect/parked-server behavior. Focused gateway/API persisted-model routing passed **28 tests**.
 - Non-Python verification passed: conflict files compile, import and target-model transport probes passed, `uv lock --check` passed, the isolated CLI reports `Hermes Agent v0.20.4 (2026.8.18)`, and the web TypeScript typecheck passed with npm 11.17.0.
 - Merge commit: `ef9eb20fd35de3647704586af891b1b4ea8bcf58` (`merge: integrate Hermes v2026.8.18`).
-- Live cutover: pending. Do not replace/restart the live checkout until this branch is committed, pushed, and explicitly selected for cutover.
+- Live cutover completed 2026-08-19. `/home/jakepresent/.hermes/hermes-agent` is on this branch; `/health` reports Hermes Agent v0.20.4 and the gateway remained active with zero service restarts after cutover. Post-cutover repair provisioned managed Python 3.11.16 linked to SQLite 3.53.1, replacing the vulnerable 3.50.4 runtime with an atomic rollback venv. Semantic preindex restored both chunk and observation coverage above the 95% broad-search threshold; commit `07a04bf64387b5f0f182e71ab261234aeb2c779b` invalidates same-process semantic caches after preindex and declares the `google-genai` dependency needed by live Gemini query embedding after a clean venv rebuild. IcM and ADO required LocalOps compatibility/auth bridges for MCP 2.0 and Windows-owned Microsoft authentication; fresh handshakes and real read calls passed for IcM, ADO, EngHub, Teams, M365 Copilot, and Xcode.
 
 ### v2026.8.16 integration (2026-08-17)
 
@@ -172,6 +172,8 @@ Core behavior:
 - Normal search embeds only the query; document/chunk vectors are persisted.
 - `memory_search(action='status', granularity='all')` exposes semantic-cache coverage, missing counts, and top missing path prefixes so degradation is visible to the agent/user.
 - `memory_search(action='preindex', granularity='all')` is the one-call cache-regenerate path agents should use when status reports large missing chunks/observations; it is resumable and can be bounded with `max_batches`.
+- Successful preindex batches invalidate process-local semantic reference and sqlite-vec readiness caches, so a status/search call in the same process immediately sees the newly persisted vectors.
+- The `google` extra declares `google-genai`; batch preindex uses direct HTTP, but live Gemini query embedding imports this SDK and must survive clean managed-runtime rebuilds.
 - Cold rebuilds are bounded and explicit/background preindexing is preferred.
 - Vectors are stored as float32 blobs and queried via sqlite-vec when coverage is complete.
 
@@ -190,6 +192,7 @@ Commits:
 - `c78b39c3b` - bound cold Gemini semantic rebuilds so searches do not hang.
 - `796d971d1` - persist Gemini embeddings.
 - `f7e43b8c5` - use sqlite-vec for KNN retrieval.
+- `07a04bf643` - refresh semantic runtime caches after preindex and preserve the live Gemini query dependency across venv rebuilds.
 
 Preservation checks:
 

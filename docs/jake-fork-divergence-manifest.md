@@ -560,7 +560,7 @@ Commits:
 - `73224a581` - route auxiliary auto model overrides through correct transport.
 - `789611291` - support Copilot Opus 4.8 max reasoning.
 - `73fe8e1a0` - restore Copilot xhigh behavior and isolate auxiliary main-first tests after merge.
-- _(pending current fix)_ - derive gateway persisted-session and channel-override transport from the target model, preserving long-lived Opus sessions across gateway restarts.
+- `a26e52cdd` - derive gateway persisted-session and channel-override transport from the target model, preserving long-lived Opus sessions across gateway restarts.
 - _(pending)_ - re-restore `max` reasoning gate after v2026.6.19 merge reverted `VALID_REASONING_EFFORTS`; route gateway/slash_commands `/reasoning` gate through the canonical tuple to harden against future reverts.
 
 Preservation checks:

@@ -902,6 +902,21 @@ _SQLITE_VEC_READY_CACHE: "OrderedDict[tuple[str, str, str, str, str], tuple[floa
 _SQLITE_VEC_READY_CACHE_MAX = 16
 
 
+def _clear_semantic_runtime_caches() -> None:
+    """Invalidate process-local row/vector metadata after index mutations.
+
+    SQLite WAL writes do not update the main database file's mtime, and the
+    row-reference cache is keyed by the candidate-row fingerprint rather than
+    embedding-table contents. Without explicit invalidation, a successful
+    ``preindex`` in a long-running gateway keeps reporting the old missing rows
+    and broad hybrid search continues falling back to keyword until restart.
+    """
+    _SEMANTIC_CANDIDATE_ROWS_CACHE.clear()
+    _GEMINI_ROW_REF_CACHE.clear()
+    _SQLITE_VEC_ID_CACHE.clear()
+    _SQLITE_VEC_READY_CACHE.clear()
+
+
 def _extract_gemini_values(embedding: Any) -> list[float]:
     values = getattr(embedding, "values", None) or getattr(embedding, "embedding", None) or []
     if isinstance(values, dict):
@@ -2977,6 +2992,10 @@ def preindex_semantic_embeddings(
             # Keep manual/agent-triggered repair bounded when requested.
             break
 
+    # The persistent embedding/vector tables changed underneath this process.
+    # Explicitly invalidate metadata caches: in WAL mode the main DB mtime may
+    # not move, so mtime/fingerprint-based caches cannot detect this write.
+    _clear_semantic_runtime_caches()
     sqlite_vec_meta = (per_granularity[0].get("sqlite_vec") if len(per_granularity) == 1 else {})
     return {
         "success": not errors,

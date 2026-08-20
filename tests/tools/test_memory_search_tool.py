@@ -593,6 +593,49 @@ def test_preindex_semantic_embeddings_syncs_sqlite_vec_table(tmp_path, monkeypat
     assert result["sqlite_vec"]["persisted_count"] == 2
 
 
+def test_preindex_invalidates_cached_missing_refs_in_same_process(tmp_path, monkeypatch):
+    import tools.memory_search_tool as mst
+
+    root = tmp_path / "ChatWorkspace"
+    root.mkdir()
+    (root / "note.md").write_text("# Note\n\nDurable semantic fact.\n")
+    index_path = tmp_path / "memory.sqlite"
+    roots = [(root, "chatworkspace")]
+
+    mst._clear_semantic_runtime_caches()
+    before = mst.semantic_cache_status(
+        index_path=index_path,
+        roots=roots,
+        granularity="chunk",
+        freshness_seconds=9999,
+    )["granularities"][0]
+    assert before["missing_count"] == 1
+
+    monkeypatch.setattr(
+        mst,
+        "_embed_gemini_texts_batched",
+        lambda texts, *, model, max_retries=0: [[1.0, 0.0, 0.0] for _ in texts],
+    )
+    repaired = mst.preindex_semantic_embeddings(
+        index_path=index_path,
+        roots=roots,
+        granularity="chunk",
+        freshness_seconds=9999,
+        retry_429=False,
+    )
+    assert repaired["processed"] == 1
+
+    after = mst.semantic_cache_status(
+        index_path=index_path,
+        roots=roots,
+        granularity="chunk",
+        freshness_seconds=9999,
+    )["granularities"][0]
+    assert after["embedded_count"] == 1
+    assert after["missing_count"] == 0
+    assert after["needs_preindex"] is False
+
+
 def test_preindex_semantic_embeddings_processes_limited_batches(tmp_path, monkeypatch):
     import tools.memory_search_tool as mst
 

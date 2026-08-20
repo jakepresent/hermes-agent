@@ -24,7 +24,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
 - The final result differs from v0.20.4 on all 133 prior fork paths. The only two additional result paths are `tests/tools/test_mcp_circuit_breaker.py` and `tests/tools/test_mcp_tool_session_expired.py`, whose upstream fire-and-forget reconnect fixtures were aligned to the fork's stronger bounded `request_reconnect` contract. No prior fork path silently converged or disappeared.
 - Preservation result: the 83-file manifest gate completed with **2,265 passed and 7 skipped**; its only failure was the already-documented `DEFAULT_ROOTS` assertion under pytest's mandatory temporary `HERMES_HOME`, and the same assertion passed in a fresh process against the real home. The independent fork-preservation residue passed **160 tests**. The full `tests/tools/test_mcp*.py` surface passed **523 tests**, including upstream protocol negotiation/schema-cache coverage and fork reconnect/parked-server behavior. Focused gateway/API persisted-model routing passed **28 tests**.
 - Non-Python verification passed: conflict files compile, import and target-model transport probes passed, `uv lock --check` passed, the isolated CLI reports `Hermes Agent v0.20.4 (2026.8.18)`, and the web TypeScript typecheck passed with npm 11.17.0.
-- Merge commit: pending final commit creation.
+- Merge commit: `ef9eb20fd35de3647704586af891b1b4ea8bcf58` (`merge: integrate Hermes v2026.8.18`).
 - Live cutover: pending. Do not replace/restart the live checkout until this branch is committed, pushed, and explicitly selected for cutover.
 
 ### v2026.8.16 integration (2026-08-17)

@@ -644,6 +644,7 @@ Core behavior:
 
 - Native image payloads shrink/retry after provider 413 or image-size errors.
 - Aggregate native image payloads can be shrunk, not just individual tool images.
+- After a confirmed 413 rewrite, the active provider/model session reuses the smaller wire image on later tool/model rounds. Durable history retains the original image, while a bounded request-only cache prevents the same historical payload from failing and re-encoding on every call.
 - OCR exposes a dedicated fast `ocr_extract` transcription tool separate from general visual reasoning, but native-vision sessions hide it from the model-facing schema by default so already-attached images are read directly. `agent.expose_ocr_extract_with_native_vision: true` opts the tool back in for legacy/automation use.
 - `vision_analyze` is framed as an escape hatch for non-visible images, non-vision fallback, or targeted second-pass inspection when native vision is insufficient, not as a routine re-check for already-attached images. When `ocr_extract` is hidden, the `vision_analyze` schema also stops mentioning the missing tool name.
 - Vision routing fast path continues to work with native image support.
@@ -651,9 +652,11 @@ Core behavior:
 Key files:
 
 - `run_agent.py`
+- `agent/agent_init.py`
 - `agent/conversation_loop.py`
 - `agent/conversation_compression.py`
 - `tools/vision_tools.py`
+- `tests/run_agent/test_413_compression.py`
 - `tests/run_agent/test_image_shrink_recovery.py`
 - `tests/tools/test_ocr_extract_tool.py`
 - `tests/tools/test_vision_native_fast_path.py`
@@ -666,11 +669,12 @@ Commits:
 - `78fac29d5` - hide `ocr_extract` from native-vision tool schemas by default; add `agent.expose_ocr_extract_with_native_vision` opt-in.
 - `716e70408` - route the 413 image-shrink guard through `TurnRetryState` so native-image 413 recovery cannot crash with `UnboundLocalError` before retrying.
 - `ab55c4655` - thread the aggregate image-payload budget through the shrink helper so native-image 413 recovery cannot crash with a keyword mismatch and can shrink multi-image batches below the request budget.
+- `6a0eb2a5ce` - cache confirmed image rewrites per provider/model session so later request clones stop rediscovering the same historical-image 413 while the durable transcript remains lossless.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/agent/test_turn_retry_state.py tests/run_agent/test_image_shrink_recovery.py tests/tools/test_ocr_extract_tool.py tests/tools/test_vision_native_fast_path.py -o 'addopts=' -q
+python -m pytest tests/agent/test_turn_retry_state.py tests/run_agent/test_413_compression.py tests/run_agent/test_image_shrink_recovery.py tests/tools/test_ocr_extract_tool.py tests/tools/test_vision_native_fast_path.py -o 'addopts=' -q
 ```
 
 **v2026.7.1 convergence note:** upstream added transcoding of non-universal image formats (BMP/TIFF/HEIC/AVIF/ICO → PNG via Pillow, `_transcode_to_png` + `_UNIVERSALLY_SUPPORTED_MIMES`) so providers that reject those formats (Anthropic HTTP 400 "Could not process image") still work. The fork's contribution (`f93fd7510`, 2026-07-06) is the opposite guard: genuine non-images (text/log/PDF/document attachments sent alongside an image in a PHOTO message) must be REJECTED from native routing rather than mislabeled as `image/jpeg`. Resolution keeps BOTH: `_guess_mime` now returns a real image MIME for any actual image (including rare formats, so they can be transcoded) but `None` for genuine non-images (so they are skipped), and `_file_to_data_url` skips on `None` first, then transcodes non-universal formats. `tests/agent/test_image_routing.py` carries both sets (non-image-rejection AND transcode) and both pass. Also verify `gateway/run.py` classifies per-attachment via `_event_media_is_image/_audio/_video` (upstream helpers) rather than the fork's inline `_is_image_media_attachment` — the merged code uses the upstream helpers, and `tests/gateway/test_mixed_attachment_routing.py` asserts both the end-to-end buffering and the per-attachment classification.

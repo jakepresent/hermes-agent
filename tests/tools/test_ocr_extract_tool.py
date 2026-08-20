@@ -291,4 +291,3 @@ def test_ocr_extract_native_vision_opt_in_keeps_tool_exposed(monkeypatch):
     names = {tool["function"]["name"] for tool in tools}
 
     assert "ocr_extract" in names
-

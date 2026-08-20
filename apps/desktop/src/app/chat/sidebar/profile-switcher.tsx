@@ -69,6 +69,7 @@ import { RenameProfileDialog } from '../../profiles/rename-profile-dialog'
 import { PROFILES_ROUTE, SETTINGS_ROUTE } from '../../routes'
 
 import { useProfilePrewarm } from './use-profile-prewarm'
+import { useProfileRailRefreshOnActive } from './use-profile-rail-refresh-on-active'
 
 const RAIL_GAP = 4 // px — matches gap-1 between squares.
 
@@ -204,11 +205,13 @@ export function ProfileRail() {
     }
   }
 
-  // Re-pull the running profile + list on mount so a profile created elsewhere
-  // shows up; cheap and best-effort.
-  useEffect(() => {
-    void refreshActiveProfile()
-  }, [])
+  // Re-pull the running profile + list on mount, and again whenever the window
+  // regains focus/visibility -- a profile created, deleted, or renamed by
+  // another surface (Manage Profiles, another window, the CLI) leaves this
+  // rail's cached $profiles stale until something re-fetches it. See
+  // use-profile-rail-refresh-on-active.ts for the extracted (and tested)
+  // wiring.
+  useProfileRailRefreshOnActive()
 
   // Open the create dialog when the `profile.create` hotkey fires (the dialog
   // state lives here, so the global keybind bumps a request atom we watch).
@@ -316,15 +319,16 @@ export function ProfileRail() {
       <ProfilePill active={false} glyph="ellipsis" label={p.manageProfiles} onSelect={() => navigate(PROFILES_ROUTE)} />
 
       {/* Multi-gateway discoverability: a plug pinned beside Manage deep-links
-          to Settings → Connections. The registry (local runtime + remote
-          gateways + Hermes Cloud + SSH) is otherwise buried three levels into
-          Settings, and the rail is exactly where a user looks when they wonder
-          "how do I get my other machine's agents in here". */}
+          to Settings → Gateways (the connections registry lives on the unified
+          Gateways page now). The registry (local runtime + remote gateways +
+          Hermes Cloud + SSH) is otherwise buried three levels into Settings,
+          and the rail is exactly where a user looks when they wonder "how do I
+          get my other machine's agents in here". */}
       <ProfilePill
         active={false}
         glyph="plug"
         label={p.connectGateway}
-        onSelect={() => navigate(`${SETTINGS_ROUTE}?tab=connections`)}
+        onSelect={() => navigate(`${SETTINGS_ROUTE}?tab=gateway`)}
       />
 
       {/* Land in the new profile on a fresh chat (selectProfile triggers the

@@ -120,6 +120,12 @@ def _install_stub_server(name: str = "wpcom"):
 
     server._reconnect_event = _EventAdapter()
 
+    async def _request_reconnect(reason, timeout=15.0):
+        server._reconnect_event.set()
+        return server.session is not None
+
+    server.request_reconnect = _request_reconnect
+
     # session attr must be truthy for the handler's initial check
     # (``if not server or not server.session``) and for the post-
     # reconnect readiness probe (``srv.session is not None``).
@@ -157,9 +163,9 @@ def test_call_tool_handler_rebuilds_configured_server_transport(
             if call_count["n"] == 1:
                 raise ClosedResourceError
             result = MagicMock()
-            result.isError = False
+            result.is_error = False
             result.content = [MagicMock(type="text", text="reconnected")]
-            result.structuredContent = None
+            result.structured_content = None
             return result
 
     class _LifecycleTask(MCPServerTask):
@@ -247,9 +253,9 @@ def test_session_expired_retry_waits_for_new_session(monkeypatch, tmp_path):
 
     async def _new_call(*a, **kw):
         result = MagicMock()
-        result.isError = False
+        result.is_error = False
         result.content = [MagicMock(type="text", text="bank ok")]
-        result.structuredContent = None
+        result.structured_content = None
         return result
 
     new_session.call_tool = _new_call
@@ -262,6 +268,12 @@ def test_session_expired_retry_waits_for_new_session(monkeypatch, tmp_path):
             ready_flag.set()
 
     server._reconnect_event = _ReconnectAdapter()
+
+    async def _request_reconnect(reason, timeout=15.0):
+        server._reconnect_event.set()
+        return server.session is new_session
+
+    server.request_reconnect = _request_reconnect
     mcp_tool._servers["hindsight"] = server
     mcp_tool._server_error_counts["hindsight"] = 7
     # Stamp the breaker "open" far enough in the past that the cooldown has
@@ -285,10 +297,10 @@ def test_session_expired_retry_waits_for_new_session(monkeypatch, tmp_path):
         mcp_tool._server_breaker_opened_at.pop("hindsight", None)
 
 
-def test_session_expired_handler_returns_none_without_loop(monkeypatch):
+def test_session_expired_handler_returns_bounded_error_without_loop(monkeypatch):
     """Defensive: if the MCP loop isn't running (cold start / shutdown
     race), the handler must fall through cleanly instead of hanging
-    or raising."""
+    or raising, while still telling the caller the bounded recovery did not run."""
     from tools import mcp_tool
     from tools.mcp_tool import _handle_session_expired_and_retry
 
@@ -298,6 +310,11 @@ def test_session_expired_handler_returns_none_without_loop(monkeypatch):
     server._ready = MagicMock()
     server._ready.is_set = MagicMock(return_value=True)
     server.session = MagicMock()
+
+    async def _request_reconnect(reason, timeout=15.0):
+        return True
+
+    server.request_reconnect = _request_reconnect
     mcp_tool._servers["srv-noloop"] = server
 
     monkeypatch.setattr(mcp_tool, "_mcp_loop", None)
@@ -309,10 +326,9 @@ def test_session_expired_handler_returns_none_without_loop(monkeypatch):
             lambda: '{"ok": true}',
             "tools/call",
         )
-        assert out is None, (
-            "Without an event loop, session-expired handler must fall "
-            "through to caller's generic error path — not hang or raise."
-        )
+        parsed = json.loads(out)
+        assert "did not complete" in parsed.get("error", "")
+        assert "Do NOT retry immediately" in parsed.get("error", "")
     finally:
         mcp_tool._servers.pop("srv-noloop", None)
 

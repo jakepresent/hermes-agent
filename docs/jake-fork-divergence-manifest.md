@@ -1,12 +1,31 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-08-19 (v2026.8.16 / Hermes 0.20.2 live cutover complete)
+Last audited: 2026-08-19 (v2026.8.18 / Hermes 0.20.4 integration complete; live cutover pending)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
 It is intentionally a feature manifest, not a perfect design doc. Use it to answer: "what does this fork intentionally carry that upstream Hermes may not?" and "what tests/symbols should an upgrade preserve?"
 
 ## Scope and anchors
+
+### v2026.8.18 integration (2026-08-19)
+
+- Integration branch: `jake/integrate-v2026.8.18-20260819-205622`
+- Pre-merge/live fork HEAD: `7a685cbfa0f9396172abf88ddf9c7b69457b3b0f`
+- Upstream release integrated: `v2026.8.18` (peeled commit `e624e9fde561e1add9388384012b295fde669ade`; Hermes Agent v0.20.4)
+- Rollback marker: `jake/rollback-before-v2026.8.18-20260819-205622` at `7a685cbfa0f9396172abf88ddf9c7b69457b3b0f`, pushed before reconciliation.
+- The merge was performed in isolated worktree `/tmp/hermes-v2026.8.18-integration-20260819-205622`; the live checkout and gateway remain on v0.20.2 until explicit cutover.
+- Scope: 417 upstream commits changed 655 files after v0.20.2. The fork differed on 133 paths, 37 overlapped upstream, and only four files conflicted: `gateway/run.py`, `tests/gateway/test_api_server.py`, `tools/mcp_tool.py`, and `uv.lock`.
+- Conflict decisions:
+  - `gateway/run.py` keeps upstream's shared gateway model-context resolver and the fork's target-model-aware provider resolution, so persisted Opus sessions still select Chat Completions while GPT-5.x selects Responses;
+  - `tools/mcp_tool.py` keeps upstream MCP 2026-07-28 protocol negotiation and schema-cache metadata while routing every transport through the fork's bounded handshake/discovery helper and preserving server-local `request_reconnect` generation tracking;
+  - API-server recovery-net alias tests were retained alongside the fork's provider/model override tests;
+  - `uv.lock` started from upstream and was regenerated with `uv lock`.
+- The final result differs from v0.20.4 on all 133 prior fork paths. The only two additional result paths are `tests/tools/test_mcp_circuit_breaker.py` and `tests/tools/test_mcp_tool_session_expired.py`, whose upstream fire-and-forget reconnect fixtures were aligned to the fork's stronger bounded `request_reconnect` contract. No prior fork path silently converged or disappeared.
+- Preservation result: the 83-file manifest gate completed with **2,265 passed and 7 skipped**; its only failure was the already-documented `DEFAULT_ROOTS` assertion under pytest's mandatory temporary `HERMES_HOME`, and the same assertion passed in a fresh process against the real home. The independent fork-preservation residue passed **160 tests**. The full `tests/tools/test_mcp*.py` surface passed **523 tests**, including upstream protocol negotiation/schema-cache coverage and fork reconnect/parked-server behavior. Focused gateway/API persisted-model routing passed **28 tests**.
+- Non-Python verification passed: conflict files compile, import and target-model transport probes passed, `uv lock --check` passed, the isolated CLI reports `Hermes Agent v0.20.4 (2026.8.18)`, and the web TypeScript typecheck passed with npm 11.17.0.
+- Merge commit: pending final commit creation.
+- Live cutover: pending. Do not replace/restart the live checkout until this branch is committed, pushed, and explicitly selected for cutover.
 
 ### v2026.8.16 integration (2026-08-17)
 

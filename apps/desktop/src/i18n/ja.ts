@@ -68,6 +68,7 @@ export const ja = defineLocale({
       connectingGateway: 'ライブデスクトップゲートウェイに接続中',
       loadingSettings: 'Hermes の設定を読み込み中',
       loadingSessions: '最近のセッションを読み込み中',
+      retryingRemoteBackend: 'リモート Hermes バックエンドに再接続中…',
       startingDesktopConnection: 'デスクトップ接続を開始中',
       startingHermesDesktop: 'Hermes Desktop を起動中…'
     },
@@ -343,6 +344,21 @@ export const ja = defineLocale({
       terminalFontReset: '既定値を使用',
       translucencyTitle: 'ウィンドウの透過',
       translucencyDesc: 'ウィンドウ全体を透過させてデスクトップを表示します。macOS と Windows のみ。',
+      translucencyGlassDesc: 'マットガラス: デスクトップが滑らかなぼかしとして透け、テキストは鮮明なまま。macOS のみ。',
+      translucencyModeClear: 'クリア',
+      translucencyModeGlass: 'ガラス',
+      translucencyFrostTitle: 'くもりの質感',
+      translucencyFrost: {
+        'under-window': '深い',
+        popover: 'やわらか',
+        titlebar: '明るい',
+        header: 'まぶしい'
+      },
+      translucencyScopeTitle: '適用範囲',
+      translucencyScope: {
+        window: 'ウィンドウ全体',
+        sidebar: 'サイドバーのみ'
+      },
       backdropTitle: 'チャット背景',
       backdropDesc: '会話の背後に表示される淡い彫像の画像。',
       reactionsTitle: 'メッセージリアクション',
@@ -643,6 +659,10 @@ export const ja = defineLocale({
       heading: 'Hermes Desktop',
       version: value => `バージョン ${value}`,
       versionUnavailable: 'バージョンを取得できません',
+      bundleOutOfSync: 'アプリのビルドが古くなっています',
+      bundleOutOfSyncDesc:
+        'Hermes ランタイムは更新されましたが、デスクトップアプリ自体は古いビルドのままです。アプリを更新するまで、新しいインターフェース機能(Bot Mode など)は表示されません。下の更新を実行してアプリを再ビルドしてください。それでもこの警告が消えない場合は、最新のデスクトップインストーラーから再インストールしてください。',
+      bundleOutOfSyncAction: 'インストーラーを入手',
       updates: '更新',
       checkNow: '今すぐ確認',
       checking: '確認中…',
@@ -724,20 +744,13 @@ export const ja = defineLocale({
       title: 'ゲートウェイ接続',
       envOverride: 'env オーバーライド',
       intro:
-        'Hermes Desktop はデフォルトで独自のローカルゲートウェイを起動します。別のマシンや信頼できるプロキシの背後で既に動作している Hermes バックエンドをこのアプリで制御する場合は、リモートゲートウェイを使用してください。以下でプロファイルを選択して、それぞれのリモートホストを設定します。',
-      appliesTo: '適用対象',
-      allProfiles: 'すべてのプロファイル',
-      defaultConnection: '独自のオーバーライドがないすべてのプロファイルのデフォルト接続。',
-      profileConnection: profile =>
-        `"${profile}" がアクティブプロファイルのときのみ使用される接続。「デフォルトゲートウェイを使用」を選ぶとオーバーライドが削除されます。`,
+        'Hermes Desktop はデフォルトで独自のローカルゲートウェイを起動します。別のマシンや信頼できるプロキシの背後で既に動作している Hermes バックエンドをこのアプリで制御する場合は、リモートゲートウェイを使用してください。ゲートウェイ接続はマシン単位の設定で、プロファイルは接続したゲートウェイから検出されます。',
       envOverrideTitle: '環境変数がこのデスクトップセッションを制御しています。',
       envOverrideDesc:
         '保存された設定を使用するには HERMES_DESKTOP_REMOTE_URL と HERMES_DESKTOP_REMOTE_TOKEN の設定を解除してください。',
       localTitle: 'ローカルゲートウェイ',
       localDesc:
         'ローカルホストでプライベートな Hermes バックエンドを起動します。これがデフォルトで、オフラインでも動作します。',
-      inheritTitle: 'デフォルトゲートウェイを使用',
-      inheritDesc: 'このプロファイルのオーバーライドを削除し、デフォルト接続を使用します。',
       remoteTitle: 'リモートゲートウェイ',
       remoteDesc:
         'このデスクトップシェルをリモートの Hermes バックエンドに接続します。ホスト型ゲートウェイは OAuth またはユーザー名とパスワードを使用します。自己ホスト型はセッショントークンを使用する場合があります。',
@@ -818,8 +831,6 @@ export const ja = defineLocale({
       sshHermesPathTitle: 'Hermes パス（任意）',
       sshHermesPathDesc: 'リモートの hermes バイナリへのフルパス。空欄 = 自動検出。',
       sshHermesPathPlaceholder: '自動検出',
-      sshRemoteProfileTitle: 'リモートプロファイル（任意）',
-      sshRemoteProfileDesc: 'リモートホスト上のプロファイル名。空欄 = Desktop のプロファイル名を使用。',
       sshTestConnection: 'SSH をテスト',
       sshConnect: '接続',
       sshButtonsHint: '「保存」は次回起動時に適用され、「接続」は今すぐ再接続します。',
@@ -842,6 +853,10 @@ export const ja = defineLocale({
       loading: 'API キーと認証情報を読み込み中...',
       failedLoad: 'API キーの読み込みに失敗しました',
       empty: 'このカテゴリーにはまだ設定がありません。'
+    },
+    profileScope: {
+      appliesTo: '適用対象',
+      editsProfile: profile => `このページの変更は「${profile}」プロファイルに適用されます。`
     },
     mcp: {
       loading: 'MCP サーバーを読み込み中...',
@@ -1798,6 +1813,8 @@ export const ja = defineLocale({
       baseBranchPlaceholder: 'ブランチを検索…',
       baseBranchNone: 'ブランチが見つかりません',
       startWorkFailed: 'ワークツリーを作成できませんでした',
+      worktreeStaleBackend:
+        'このリモート接続でワークツリーを作成するには Hermes バックエンドを更新してください — git ワークツリー API 以前のバージョンです。',
       worktreeProjectLabel: 'プロジェクト',
       worktreeProjectPlaceholder: 'プロジェクトを検索…',
       worktreeProjectNone: 'フォルダのあるプロジェクトがありません',
@@ -2367,6 +2384,7 @@ export const ja = defineLocale({
       inferenceNotReady: '推論準備未完了',
       checkingInference: '推論を確認中',
       disconnected: '切断済み',
+      reconnectGateway: 'ゲートウェイに再接続',
       openSystem: 'システムパネルを開く',
       connection: label => `接続: ${label}`,
       recentActivity: '最近のアクティビティ',

@@ -73,6 +73,12 @@ def _install_stub_server(mcp_tool_module, name: str, call_tool_impl):
             assert self.set_calls == 1, f"set() called {self.set_calls} times"
 
     server._reconnect_event = _ReconnectAdapter()
+
+    async def _request_reconnect(reason, timeout=15.0):
+        server._reconnect_event.set()
+        return server.session is not None
+
+    server.request_reconnect = _request_reconnect
     server._ready = _ReadyAdapter()
     # A bare MagicMock returns a truthy Mock for every method, so
     # ``_is_recycled_stdio()`` would spuriously report this stub as a recycled
@@ -116,11 +122,11 @@ def test_circuit_breaker_half_opens_after_cooldown(monkeypatch, tmp_path):
     async def _call_tool_success(*a, **kw):
         call_count["n"] += 1
         result = MagicMock()
-        result.isError = False
+        result.is_error = False
         block = MagicMock()
         block.text = "ok"
         result.content = [block]
-        result.structuredContent = None
+        result.structured_content = None
         return result
 
     _install_stub_server(mcp_tool, "srv", _call_tool_success)
@@ -239,8 +245,9 @@ def test_half_open_probe_on_dead_session_requests_reconnect(monkeypatch, tmp_pat
     server = _install_stub_server(mcp_tool, "srv", None)
     # Simulate a dead/parked transport: no live session.
     server.session = None
-    # Drive _signal_reconnect down its direct .set() path (no live loop).
-    monkeypatch.setattr(mcp_tool, "_mcp_loop", None)
+    # The fork's bounded recovery executes request_reconnect on the dedicated
+    # MCP loop rather than fire-and-forget signalling from the caller thread.
+    mcp_tool._ensure_mcp_loop()
 
     try:
         mcp_tool._server_error_counts["srv"] = mcp_tool._CIRCUIT_BREAKER_THRESHOLD
@@ -279,11 +286,11 @@ def test_half_open_dead_session_recovers_after_reconnect(monkeypatch, tmp_path):
 
     async def _call_tool_success(*a, **kw):
         result = MagicMock()
-        result.isError = False
+        result.is_error = False
         block = MagicMock()
         block.text = "ok"
         result.content = [block]
-        result.structuredContent = None
+        result.structured_content = None
         return result
 
     server = _install_stub_server(mcp_tool, "srv", _call_tool_success)
@@ -301,23 +308,13 @@ def test_half_open_dead_session_recovers_after_reconnect(monkeypatch, tmp_path):
 
         handler = _make_tool_handler("srv", "tool1", 10.0)
 
-        # Probe 1: transport down → reconnect requested, clean error.
-        parsed = json.loads(handler({}))
-        assert "reconnect" in parsed.get("error", "").lower(), parsed
-
-        # Simulate the run loop rebuilding the session + resetting the breaker
-        # (what _run_stdio does on successful re-init).
-        live = MagicMock()
-        live.call_tool = _call_tool_success
-        server.session = live
-        mcp_tool._reset_server_error("srv")
-
-        # Advance past the re-armed cooldown so the next call is a fresh probe.
-        fake_now[0] += cooldown + 1.0
-
-        # Next call goes straight through.
+        # Probe 1 performs the fork's bounded reconnect and retries once. The
+        # stub restores a fresh session immediately, so the same call succeeds
+        # rather than returning the old fire-and-forget "reconnecting" error.
         parsed = json.loads(handler({}))
         assert parsed.get("result") == "ok", parsed
+        assert mcp_tool._server_error_counts.get("srv", 0) == 0
+        assert "srv" not in mcp_tool._server_breaker_opened_at
     finally:
         _cleanup(mcp_tool, "srv")
 

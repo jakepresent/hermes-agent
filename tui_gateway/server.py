@@ -1760,6 +1760,7 @@ def _compute_host_turn_frame(
     text: Any,
     image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
+    display_kind: str | None = None,
 ) -> dict:
     with session["history_lock"]:
         history = list(session.get("history", []))
@@ -1775,6 +1776,7 @@ def _compute_host_turn_frame(
         "request_id": rid,
         "session_key": session.get("session_key") or sid,
         "text": text,
+        **({"display_kind": display_kind} if display_kind else {}),
         "history": history,
         "history_version": history_version,
         "cols": int(session.get("cols", 80) or 80),
@@ -1863,6 +1865,7 @@ def _submit_prompt_to_compute_host(
     text: Any,
     image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
+    display_kind: str | None = None,
 ) -> dict:
     cfg = _load_dashboard_process_isolation_config()
     frame = _compute_host_turn_frame(
@@ -1872,6 +1875,7 @@ def _submit_prompt_to_compute_host(
         text,
         image_paths=image_paths,
         queued_prompt_generation=queued_prompt_generation,
+        display_kind=display_kind,
     )
 
     def _complete(done: dict) -> None:
@@ -2374,6 +2378,14 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 agent = _make_agent(sid, key, **kw)
             finally:
                 _clear_session_context(tokens)
+
+            # Bot Mode gate hint: the DB title lands post-first-turn
+            # (pending_title), but the system prompt builds at turn START —
+            # hand the agent its intended title so the "Bot Chat" protocol
+            # gate (agent/system_prompt.py) doesn't depend on write order.
+            _title_hint = str(current.get("pending_title") or "").strip()
+            if _title_hint:
+                agent._session_title_hint = _title_hint
 
             # Session DB row deferred to first run_conversation() call.
             # pending_title applied post-first-message (see cli.exec handler).
@@ -4940,6 +4952,68 @@ def _apply_model_switch(
         "confirm_required": False,
         "scope": "once" if one_turn else ("global" if persist_global else "session"),
     }
+
+
+def _sync_bot_capabilities(sid: str, session: dict) -> None:
+    """Rebuild a Bot Chat session's agent when its capability surface changed.
+
+    Bot Chats are eternal sessions; toolsets/MCP tool definitions are baked
+    into the live agent at construction, so a capability edit (Settings →
+    Capabilities, skill install, MCP toggle) would otherwise not apply until
+    /new. At turn start, hash the profile's capability surface
+    (tools/bot_mode_probe.capability_fingerprint) and, on change, swap in a
+    freshly built agent for the SAME session — history is session/DB-backed,
+    and the prompt-restore epoch check rebuilds the system prompt to match.
+    One rebuild per user-initiated change; identical state is a no-op.
+    """
+    agent = session.get("agent")
+    if agent is None:
+        return
+    try:
+        title = str(getattr(agent, "_session_title_hint", "") or "").strip()
+        if not title:
+            db = getattr(agent, "_session_db", None)
+            key = session.get("session_key") or ""
+            title = str((db.get_session_title(key) if (db and key) else None) or "").strip()
+        if title != "Bot Chat":
+            return
+        from tools.bot_mode_probe import capability_fingerprint
+
+        home = session.get("profile_home") or None
+        current = capability_fingerprint(home)
+        if current == "unavailable":
+            return
+        seen = session.get("bot_caps_seen")
+        session["bot_caps_seen"] = current
+        if seen is None or seen == current:
+            return
+    except Exception:
+        return
+
+    # Capability surface changed — rebuild the agent in place. Same
+    # session_id/key, so the DB-backed history and (epoch-refreshed) system
+    # prompt carry over; only tool definitions and prompt bytes change.
+    try:
+        tokens = _set_session_context(sid, cwd=_session_cwd(session))
+        try:
+            new_agent = _make_agent(
+                sid,
+                session["session_key"],
+                session_id=session["session_key"],
+                platform_override=_session_source(session),
+            )
+        finally:
+            _clear_session_context(tokens)
+        new_agent._session_title_hint = "Bot Chat"
+        session["agent"] = new_agent
+        session["config_model_seen"] = _config_model_target()
+        _emit(
+            "notice",
+            sid,
+            {"message": "Capabilities updated — this bot's tools and prompt were refreshed."},
+        )
+    except Exception as e:
+        logger.warning("Bot capability sync failed for %s: %s", sid, e)
 
 
 def _sync_agent_model_with_config(sid: str, session: dict) -> None:
@@ -10461,6 +10535,10 @@ def _run_prompt_submit(
         # child; delegate_task then captures it as non-serializable authority.
         transport_token = bind_transport(session.get("transport"))
         runtime_session_token = _current_runtime_session_record.set(session)
+        # Bound eagerly so the except/finally paths below always have an agent
+        # even if turn setup throws; re-read after _sync_bot_capabilities,
+        # which may swap in a rebuilt agent for Bot Chat sessions.
+        agent = session["agent"]
         approval_token = None
         session_tokens = []
         home_token = None  # per-turn HERMES_HOME override for a resumed remote profile
@@ -10521,6 +10599,11 @@ def _run_prompt_submit(
                 # config sync so an explicit pick wins over a config.yaml change.
                 _apply_pending_model_switch(sid, session)
                 _sync_agent_model_with_config(sid, session)
+            # Bot Chat capability sync — adopt Settings→Capabilities edits
+            # (skills/toolsets/MCP/SOUL) into the eternal bot session before
+            # the turn runs. No-op for every other session shape.
+            _sync_bot_capabilities(sid, session)
+            agent = session["agent"]
             # Snapshot after turn-start model sync. A deferred switch mutates
             # history and its version; that mutation belongs to this turn.
             with session["history_lock"]:

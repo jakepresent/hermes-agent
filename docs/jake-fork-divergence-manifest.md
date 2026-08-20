@@ -1,6 +1,6 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-08-17 (v2026.8.16 / Hermes 0.20.2 integration complete; live cutover pending)
+Last audited: 2026-08-19 (v2026.8.16 / Hermes 0.20.2 live cutover complete)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
@@ -27,7 +27,7 @@ It is intentionally a feature manifest, not a perfect design doc. Use it to answ
 - Preservation result: the main 82-target fork gate passed **2,382 tests with 7 skips** in the isolated Python 3.11 environment. The 160-test fork-preservation residue also passed independently. Focused reruns passed for gateway/ACP reconciliation (**685 passed, 2 skipped**), MCP (**114 passed across the core and stdio-init timeout suites**), Discord liveness/delegation (**64 passed**), and the order-sensitive command-guard seam. The known `DEFAULT_ROOTS` assertion remains an environment-only exclusion under pytest's temporary `HERMES_HOME`, matching the prior integration behavior.
 - Non-Python verification also passed: reconciled Python files compile, import smoke passed, `uv lock --check` passed, the isolated CLI reports `Hermes Agent v0.20.2 (2026.8.16)`, and `web` TypeScript typechecking passed after installing its workspace dependencies with the repository-required npm version. Optional `anthropic` and semantic-search dependencies were installed only in the isolated test environment.
 - Merge commit: `05aa01a058b38c1c89a8b9a77b22fbcc564fca7d` (`merge: integrate Hermes v2026.8.16`).
-- Live cutover: not performed as part of isolated reconciliation. The live checkout and gateway remain on the v2026.7.20 / Hermes 0.19.0 integration until an explicit cutover step.
+- Live cutover completed 2026-08-19: `/home/jakepresent/.hermes/hermes-agent` switched to this branch at `5c78069b77cd6091edf2cbead1befdbf7139c2d0`; the existing live venv was refreshed from `.[all]`; and the dashboard bundle was rebuilt before `hermes-gateway.service` restarted. Runtime verification reports `Hermes Agent v0.20.2 (2026.8.16)`, `/health` returns `status: ok`, the checkout is clean and matches its remote, the installed systemd unit now matches the generated v0.20.2 unit, Discord delivery is working, and an IcM delegated-user context call succeeded. The noisy `Task was destroyed` / closed-event-loop traceback belongs to the outgoing v0.19.0 process during that one restart and has not recurred in the v0.20.2 process. Cutover follow-ups are recorded honestly rather than treated as blockers: one Azure DevOps `core_list_projects` smoke timed out while its MCP process remained alive; EngHub's known connection failure and the offline Xcode bridge remain external; semantic-memory coverage is below the 95% broad-search threshold and currently falls back to keyword until an explicit preindex; and the uv Python runtime's linked SQLite 3.50.4 triggers Hermes's WAL-reset vulnerability warning and needs a separate runtime repair. Rollback remains `jake/rollback-before-v2026.8.16-20260817-135953` at `896a5ea3b219d173bee68a778fb9ae3a0bdba05f`.
 
 ### v2026.7.20 integration (2026-07-26)
 

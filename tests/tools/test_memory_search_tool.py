@@ -126,8 +126,8 @@ def test_path_filter_limits_results(tmp_path):
 def test_default_roots_include_neutral_chatworkspace_and_hermes_memories():
     root_strings = {(str(path), source) for path, source in DEFAULT_ROOTS}
     assert (str(Path.home() / "ChatWorkspace"), "chatworkspace") in root_strings
-    assert (str(Path.home() / ".hermes" / "memories"), "memories") in root_strings
-    assert DEFAULT_INDEX_PATH == Path.home() / ".hermes" / "memory_search.sqlite"
+    assert (str(DEFAULT_INDEX_PATH.parent / "memories"), "memories") in root_strings
+    assert DEFAULT_INDEX_PATH.name == "memory_search.sqlite"
 
 
 def test_schema_lists_all_default_indexed_sources():

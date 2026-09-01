@@ -37,7 +37,7 @@ async def test_exec_approval_prompt_uses_visible_content_with_command_and_reason
 
     assert result.success is True
     assert sent["view"] is not None
-    assert sent["embed"] is not None
+    assert "embed" not in sent
 
     prompt_text = sent["content"]
     assert "Command Approval Required" in prompt_text

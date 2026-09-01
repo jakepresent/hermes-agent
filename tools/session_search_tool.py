@@ -670,6 +670,12 @@ def _scroll(
         "messages": [_shape_message(m, anchor_id=around_message_id) for m in messages],
         "messages_before": view.get("messages_before", 0),
         "messages_after": view.get("messages_after", 0),
+        "hint": (
+            "Scroll forward: re-call with around_message_id = the LAST message's "
+            "id; backward: the FIRST message's id (the boundary message repeats "
+            "as an orientation marker). messages_before/messages_after < window "
+            "means you've hit that end of the session."
+        ),
     }
     if rebind_warning:
         response["warning"] = rebind_warning
@@ -797,7 +803,11 @@ def _discover(
             "detail": detail,
             "results": [],
             "count": 0,
-            "message": "No matching sessions found.",
+            "message": (
+                "No matching sessions found. FTS5 ANDs all terms by default — "
+                "broaden with OR (`alpha OR beta`), exact-match with quoted "
+                "phrases, exclude with NOT, or prefix-match with `deploy*`."
+            ),
         }
         _annotate_rebuild_status(db, _empty_payload)
         return json.dumps(_empty_payload, ensure_ascii=False)
@@ -928,6 +938,13 @@ def _discover(
         "results": results,
         "count": len(results),
         "sessions_searched": len(seen_sessions),
+        "link_hint": (
+            "When referring the user to a session, write its `link` value "
+            "verbatim inline mid-sentence (it renders as a titled link) — never "
+            "as markdown, in backticks, on its own line, or next to the "
+            "title/id/date. To read more around a compact result, scroll: "
+            "session_search(session_id=..., around_message_id=match_message_id)."
+        ),
     }
     _annotate_rebuild_status(db, _final_payload)
     return json.dumps(_final_payload, ensure_ascii=False)
@@ -1235,12 +1252,9 @@ SESSION_SEARCH_SCHEMA = {
                 "type": "string",
                 "enum": ["newest", "oldest"],
                 "description": (
-                    "Discovery shape only. Temporal bias on top of FTS5 ranking. Omit "
-                    "to keep relevance-only ordering (suitable for exploratory recall — "
-                    "\"what do we know about X\"). Set 'newest' for recency-shaped "
-                    "questions (\"where did we leave X\"). Set 'oldest' for "
-                    "origin-shaped questions (\"how did X start\"). Ignored in scroll "
-                    "and browse shapes."
+                    "Discovery shape only. Temporal bias on top of FTS5 ranking: omit "
+                    "for relevance-only (exploratory recall), 'newest' for "
+                    "\"where did we leave X\", 'oldest' for \"how did X start\"."
                 ),
             },
             "detail": {
@@ -1265,10 +1279,9 @@ SESSION_SEARCH_SCHEMA = {
             "around_message_id": {
                 "type": "integer",
                 "description": (
-                    "Scroll shape. Message id to center the window on. From a discovery "
-                    "result use match_message_id, or any id seen in a prior window. To "
-                    "scroll forward pass the last window message's id; to scroll "
-                    "backward pass the first."
+                    "Scroll shape. Message id to center the window on — use "
+                    "match_message_id from a discovery result, or any id from a "
+                    "prior window."
                 ),
             },
             "window": {

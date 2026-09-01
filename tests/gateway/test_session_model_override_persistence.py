@@ -118,6 +118,9 @@ def test_runner_rehydrates_override_after_restart(store_factory):
             "api_mode": "responses",
             "base_url": "https://api.openai.example/v1",
             "provider": "openai",
+            "requested_provider": "custom:chatgpt-tier",
+            "capabilities": {"openai_native_compaction": True},
+            "max_tokens": 32_768,
         },
     ) as resolve_provider:
         runner._rehydrate_session_model_override(session_key)
@@ -133,6 +136,21 @@ def test_runner_rehydrates_override_after_restart(store_factory):
         "openai",
         target_model="gpt-5o",
     )
+
+    assert override["requested_provider"] == "custom:chatgpt-tier"
+    assert override["capabilities"] == {"openai_native_compaction": True}
+    assert override["max_tokens"] == 32_768
+
+    model, runtime = runner._resolve_session_agent_runtime(
+        session_key=session_key,
+        user_config={"model": {"default": "global-model"}},
+    )
+    assert model == "gpt-5o"
+    assert runtime["requested_provider"] == "custom:chatgpt-tier"
+    assert runtime["capabilities"] == {"openai_native_compaction": True}
+    assert runtime["max_tokens"] == 32_768
+    route = runner._resolve_turn_agent_config("", model, runtime)
+    assert route["runtime"]["capabilities"] == {"openai_native_compaction": True}
 
 
 def test_runner_rehydrates_copilot_transport_from_persisted_target_model(

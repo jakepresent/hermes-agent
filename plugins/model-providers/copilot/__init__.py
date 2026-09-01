@@ -37,25 +37,20 @@ class CopilotProfile(ProviderProfile):
                     if reasoning_config.get("enabled") is False:
                         return extra_body, {}
                     effort = str(reasoning_config.get("effort", "medium") or "medium").strip().lower()
-                    # Normalize unsupported effort levels to the nearest supported value.
-                    # Current Copilot GPT-5.x catalogs expose xhigh directly; older
-                    # catalogs only had high, so keep that fallback without clamping
-                    # xhigh away when it is explicitly supported.
-                    if effort == "minimal" and "low" in supported_efforts:
-                        effort = "low"
-                    elif effort == "max" and "max" not in supported_efforts:
-                        if "xhigh" in supported_efforts:
-                            effort = "xhigh"
-                        elif "high" in supported_efforts:
-                            effort = "high"
-                    elif effort == "xhigh" and "xhigh" not in supported_efforts and "high" in supported_efforts:
-                        effort = "high"
+                    # Honor a live-catalog level directly; otherwise clamp to the
+                    # nearest weaker supported level with the shared ladder.
                     if effort not in supported_efforts:
-                        if "medium" in supported_efforts:
-                            effort = "medium"
-                        else:
-                            effort = supported_efforts[0]
-                    if effort != "none":
+                        from hermes_cli.models import clamp_reasoning_effort_to_supported
+
+                        effort = clamp_reasoning_effort_to_supported(
+                            effort, list(supported_efforts)
+                        )
+                        if effort not in supported_efforts:
+                            effort = (
+                                "medium" if "medium" in supported_efforts
+                                else supported_efforts[0]
+                            )
+                    if effort in supported_efforts:
                         extra_body["reasoning"] = {"effort": effort}
                 elif supported_efforts:
                     extra_body["reasoning"] = {"effort": "medium"}

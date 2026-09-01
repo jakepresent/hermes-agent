@@ -1,12 +1,27 @@
 # Jake Hermes fork divergence manifest
 
-Last audited: 2026-08-19 (v2026.8.18 / Hermes 0.20.4 live; post-cutover runtime and MCP repair verified)
+Last audited: 2026-09-01 (v2026.8.31 / Hermes 0.21.0 integration candidate; not live)
 
 This document is the durable orientation map for Jake's Hermes fork. Its job is to save future upgrade sessions from rediscovering the fork's local feature set from raw `git log` every time.
 
 It is intentionally a feature manifest, not a perfect design doc. Use it to answer: "what does this fork intentionally carry that upstream Hermes may not?" and "what tests/symbols should an upgrade preserve?"
 
 ## Scope and anchors
+
+### v2026.8.31 integration (2026-09-01)
+
+- Integration branch: `jake/integrate-v2026.8.31-20260901-131719`
+- Pre-merge/live fork HEAD: `0792dfbeb1d62c7eaaf7559a5b5ca98996c25887`
+- Upstream release integrated: `v2026.8.31` (peeled commit `29112bef099274229cadff79cdff7bf7b99c4b77`; Hermes Agent v0.21.0)
+- Rollback marker: `jake/rollback-before-v2026.8.31-20260901-131719` at the pre-merge HEAD, pushed before reconciliation.
+- The merge was performed in isolated worktree `/tmp/hermes-v2026.8.31-integration-20260901-131719`; the live checkout, config, runtime, and gateway remained untouched.
+- Scope: 3,091 upstream commits changed 3,654 paths after v0.20.4. The fork differed on 136 paths, 74 overlapped upstream, and 20 files conflicted across gateway routing, Discord, Copilot, MCP, delegation, file/terminal/vision tools, tests, toolsets, and `uv.lock`.
+- Conflict decisions kept upstream's v0.21 architecture while preserving every manifest bucket: durable hybrid memory/session search, bounded MCP reconnect, content-first Discord UX and liveness, per-session provider/model/reasoning routing, native image/OCR/413 recovery, bounded delegation completion, recent-session ordering, terminal safety/progress labels, and fork tool exposure.
+- Adversarial follow-up found and fixed three auto-merge regressions missed by source review: GitHub Responses replay had stopped preserving safe assistant message shape after dropping connection-scoped IDs; durable delegation terminal/retry branches still referenced removed scalar claim variables after upstream moved to multi-claim delivery; and constructor-light gateway paths could start the event-loop watchdog before its thread/event fields existed. The configurable-`HERMES_HOME` memory-search assertion was also corrected rather than retaining its old real-home assumption.
+- `uv.lock` started from upstream and was regenerated with `uv lock`; fork-required `google-genai 2.12.1` and `sqlite-vec 0.1.9` remain locked.
+- Verification: zero unmerged paths or conflict markers; reconciled Python compilation and focused diff checks passed; the manifest preservation gate passed **1,509 tests with 2 skips**; the post-fix Codex/delegation/watchdog rerun passed **334 tests**; the web TypeScript typecheck and `uv lock --check` passed; and the isolated CLI reports Hermes Agent v0.21.0. The complete repository suite was attempted with the canonical per-file runner but did not complete inside the 420-second foreground tool window, so upstream CI remains required before live cutover.
+- Merge commit: `2b761b9fa2` (`merge: integrate Hermes v2026.8.31`).
+- Candidate only: no live checkout switch, runtime rebuild, config migration, or gateway restart has occurred.
 
 ### v2026.8.18 integration (2026-08-19)
 

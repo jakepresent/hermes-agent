@@ -1067,9 +1067,9 @@ def _long_turn_mention_policy(user_config: dict, platform_key: str) -> dict:
 
     Final-response mentions are time-only: configure one elapsed threshold via
     ``elapsed_seconds`` / ``ping_after_seconds`` / ``min_elapsed_seconds`` or via
-    the first rule with one of those keys. Approval prompts ignore elapsed time:
-    when enabled and ``on_approval`` is true, every approval request mentions the
-    requesting user immediately.
+    the first rule with one of those keys. Approval and clarification prompts
+    ignore elapsed time: when their surface flag is enabled, every blocking
+    request mentions the requesting user immediately.
     """
     if not isinstance(user_config, dict):
         return {"enabled": False, "elapsed_seconds": None}
@@ -1117,6 +1117,7 @@ def _long_turn_mention_policy(user_config: dict, platform_key: str) -> dict:
         "enabled": _truthy_config_value(policy.get("enabled"), default=False),
         "on_final": _truthy_config_value(policy.get("on_final"), default=True),
         "on_approval": _truthy_config_value(policy.get("on_approval"), default=True),
+        "on_clarify": _truthy_config_value(policy.get("on_clarify"), default=True),
         "elapsed_seconds": elapsed,
     }
 
@@ -1143,7 +1144,7 @@ def _long_turn_mention_text_for_source(
     tool_calls: int = 0,  # accepted for compatibility; no longer part of policy
     surface: str,
 ) -> str:
-    """Return explicit Discord mention text for long final replies or approvals."""
+    """Return a Discord mention for long finals or blocking input prompts."""
     platform_value = _gateway_platform_value(getattr(source, "platform", platform_key)) or platform_key
     if platform_value != "discord":
         return ""
@@ -1152,6 +1153,8 @@ def _long_turn_mention_text_for_source(
         return ""
     if surface == "approval":
         return _discord_user_mention_from_policy(source, policy) if policy.get("on_approval", True) else ""
+    if surface == "clarify":
+        return _discord_user_mention_from_policy(source, policy) if policy.get("on_clarify", True) else ""
     if surface == "final":
         if not policy.get("on_final", True):
             return ""
@@ -6906,6 +6909,22 @@ class TurnRunner:
                     exc_info=True,
                 )
 
+            _clarify_metadata = ctx._status_thread_metadata
+            try:
+                _clarify_mention = _long_turn_mention_text_for_source(
+                    ctx.source,
+                    ctx.user_config,
+                    platform_key,
+                    surface="clarify",
+                )
+                _clarify_metadata = _metadata_with_long_turn_mention(
+                    _clarify_metadata, _clarify_mention,
+                )
+            except Exception as _mention_err:
+                logger.debug(
+                    "clarify mention resolution failed: %s", _mention_err,
+                )
+
             fut = safe_schedule_threadsafe(
                 ctx._status_adapter.send_clarify(
                     chat_id=ctx._status_chat_id,
@@ -6913,7 +6932,7 @@ class TurnRunner:
                     choices=list(choices) if choices else None,
                     clarify_id=clarify_id,
                     session_key=ctx.session_key or "",
-                    metadata=ctx._status_thread_metadata,
+                    metadata=_clarify_metadata,
                 ),
                 ctx._loop_for_step,
                 logger=logger,

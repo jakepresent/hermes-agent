@@ -1545,12 +1545,13 @@ DEFAULT_CONFIG = {
         },
         "interim_assistant_messages": True,  # Gateway: send natural mid-turn assistant status messages. Desktop: keep mid-turn narration between tool calls instead of collapsing to the final message.
         # Final replies may mention the requesting user after a configured
-        # elapsed threshold. Approval prompts are blocking attention requests,
-        # so they may mention immediately when enabled.
+        # elapsed threshold. Approval and clarification prompts are blocking
+        # attention requests, so they may mention immediately when enabled.
         "long_turn_mention": {
             "enabled": False,
             "on_final": True,
             "on_approval": True,
+            "on_clarify": True,
             "elapsed_seconds": None,
             "rules": [],  # Back-compat: first elapsed_seconds-like rule is used
         },

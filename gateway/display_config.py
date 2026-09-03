@@ -55,6 +55,7 @@ _GLOBAL_DEFAULTS: dict[str, Any] = {
         "enabled": False,
         "on_final": True,
         "on_approval": True,
+        "on_clarify": True,
         "elapsed_seconds": None,
         "rules": [],
     },

@@ -7926,11 +7926,21 @@ class DiscordAdapter(BasePlatformAdapter):
             # We reserve one slot for the "Other" button, so cap at 24 choices.
             clean_choices = clean_choices[:24]
 
+            mention_content = ""
+            if isinstance(metadata, dict):
+                mention_content = str(metadata.get("mention_text") or "").strip()
+            if not re.fullmatch(r"<@!?\d+>", mention_content):
+                mention_content = ""
+            content_limit = self.MAX_MESSAGE_LENGTH
+            if mention_content:
+                content_limit -= utf16_len(mention_content) + 1
             content = _build_discord_clarify_content(
                 question=question,
                 choices=clean_choices,
-                max_length=self.MAX_MESSAGE_LENGTH,
+                max_length=content_limit,
             )
+            if mention_content:
+                content = f"{mention_content}\n{content}"
             view = None
             if clean_choices:
                 embed.add_field(
@@ -7954,6 +7964,15 @@ class DiscordAdapter(BasePlatformAdapter):
             send_kwargs: Dict[str, Any] = {"content": content}
             if view:
                 send_kwargs["view"] = view
+            if mention_content:
+                allowed_mentions_cls = getattr(discord, "AllowedMentions", None)
+                if allowed_mentions_cls is not None:
+                    send_kwargs["allowed_mentions"] = allowed_mentions_cls(
+                        users=True,
+                        roles=False,
+                        everyone=False,
+                        replied_user=False,
+                    )
 
             msg = await channel.send(**send_kwargs)
             if view:

@@ -445,6 +445,7 @@ Core behavior:
 - Fork-unique clarify behavior: full question and full numbered choices appear in message content, while buttons are compact selectors (`1`, `2`, `3`, etc.) plus `Other`.
 - Clarify open-ended prompts use plain message content with a reply instruction, not embed-only text.
 - Clarify question/choice text renders invisible/format Unicode visibly (for example `[U+FE0F]`).
+- Clarify prompts honor `metadata.mention_text` with Discord's allowed-mentions guard, so attention pings preserve the full content-first prompt and buttons.
 - Approval pings still work when configured and should prepend/augment the rich prompt rather than replacing it.
 
 Key files:
@@ -487,6 +488,7 @@ Live smoke:
 - Confirm Discord content asks whether to run it, shows the command in a code block, shows the reason, and keeps buttons under that content.
 - Trigger a security-scan approval and confirm suspicious evidence is visible.
 - Trigger a Discord `clarify` call with a long question and long choices. Confirm the full question and numbered choices are visible in message content, buttons are compact numeric selectors, and `Other` switches to typed-response mode.
+- With Discord long-turn mentions enabled, confirm a `clarify` prompt immediately mentions the requesting user while preserving the question, choices, and buttons.
 
 ### 9. Long-turn mentions and attention behavior
 
@@ -495,6 +497,7 @@ Purpose: ping Jake in Discord when attention is needed without spamming normal r
 Core behavior:
 
 - Approval requests ping immediately when configured.
+- Clarification/input requests ping immediately when configured; `on_clarify` can disable them independently.
 - Final response mentions are time-threshold based only.
 - Tool-call-count based mention behavior is intentionally ignored/removed.
 - Config path: `display.platforms.discord.long_turn_mention`.
@@ -503,17 +506,21 @@ Key files:
 
 - `gateway/run.py`
 - `gateway/display_config.py`
+- `hermes_cli/config_defaults.py`
+- `plugins/platforms/discord/adapter.py`
 - `tests/gateway/test_long_turn_mentions.py`
+- `tests/gateway/test_discord_clarify_buttons.py`
 
 Commits:
 
 - `b4957b99d` - configurable long-turn Discord mentions.
 - `d19f60938` - simplify attention mention behavior after merge.
+- _(pending)_ - mention the requesting Discord user on clarification/input prompts.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/gateway/test_long_turn_mentions.py -o 'addopts=' -q
+python -m pytest tests/gateway/test_long_turn_mentions.py tests/gateway/test_discord_clarify_buttons.py -o 'addopts=' -q
 ```
 
 ### 10. Discord `/model` status and picker UX

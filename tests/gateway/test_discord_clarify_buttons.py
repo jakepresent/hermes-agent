@@ -296,6 +296,50 @@ class TestDiscordSendClarify:
         adapter._client.get_channel.assert_called_once_with(7777)
 
     @pytest.mark.asyncio
+    async def test_metadata_mention_pings_requesting_user(self):
+        adapter = _make_adapter()
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 3334
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        await adapter.send_clarify(
+            chat_id="9001",
+            question="Pick one",
+            choices=["a"],
+            clarify_id="cidPing",
+            session_key="sk-Ping",
+            metadata={"mention_text": "<@123456789>"},
+        )
+
+        kwargs = channel.send.call_args.kwargs
+        assert kwargs["content"].startswith("<@123456789>\n")
+        assert "allowed_mentions" in kwargs
+
+    @pytest.mark.asyncio
+    async def test_metadata_mention_stays_within_discord_content_limit(self):
+        adapter = _make_adapter()
+        channel = MagicMock()
+        sent_msg = MagicMock()
+        sent_msg.id = 3335
+        channel.send = AsyncMock(return_value=sent_msg)
+        adapter._client.get_channel = MagicMock(return_value=channel)
+
+        await adapter.send_clarify(
+            chat_id="9001",
+            question="x" * 3_000,
+            choices=["a"],
+            clarify_id="cidPingLimit",
+            session_key="sk-PingLimit",
+            metadata={"mention_text": "<@123456789>"},
+        )
+
+        content = channel.send.call_args.kwargs["content"]
+        assert content.startswith("<@123456789>\n")
+        assert utf16_len(content) <= adapter.MAX_MESSAGE_LENGTH
+
+    @pytest.mark.asyncio
     async def test_not_connected_returns_failure(self):
         adapter = _make_adapter()
         adapter._client = None

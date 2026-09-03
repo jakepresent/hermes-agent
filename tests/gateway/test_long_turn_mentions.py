@@ -87,6 +87,30 @@ def test_long_turn_mention_surface_gates_final_vs_approval():
     ) == "<@123456789>"
 
 
+def test_long_turn_mention_clarify_mentions_immediately_by_default():
+    cfg = _config([{"elapsed_seconds": 90}])
+
+    assert _long_turn_mention_text_for_source(
+        _discord_source(),
+        cfg,
+        "discord",
+        elapsed_seconds=0,
+        surface="clarify",
+    ) == "<@123456789>"
+
+
+def test_long_turn_mention_clarify_can_be_disabled_independently():
+    cfg = _config([{"elapsed_seconds": 90}], on_clarify=False)
+
+    assert not _long_turn_mention_text_for_source(
+        _discord_source(),
+        cfg,
+        "discord",
+        elapsed_seconds=999,
+        surface="clarify",
+    )
+
+
 def test_apply_long_turn_mention_is_idempotent():
     assert _apply_long_turn_mention_to_response("<@123> already done", "<@123>") == "<@123> already done"
     assert _apply_long_turn_mention_to_response("", "<@123>") == ""

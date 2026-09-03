@@ -7,17 +7,18 @@ falling back, and repeated attempts stacked into a 20+ minute
 
 New contract for ``_CodexCompletionsAdapter.create``:
 
-1. No first token within the 60s no-progress window -> fail fast
-   (``no-progress timeout`` in the message) so the fallback chain runs
-   after ~60s, not 300s.
+1. No first token within the size-aware no-progress window -> fail fast
+   (``no-progress timeout`` in the message). Ordinary requests retain the
+   60s fence; 100k+ token prefills scale to 120/180/300s.
 2. A live stream re-arms the window on every substantive event: a slow
    summary that keeps producing tokens is never killed by the old
    absolute ``total_timeout``.
 3. A mid-stream stall (tokens seen, then silence) dies one no-progress
    window after the last token (``stalled`` in the message).
-4. The compression critical-path retry gate distinguishes the two: a
-   cheap first-token failure still gets the same-provider retry; a
-   full-budget stall skips straight to fallback (#54465 semantics).
+4. The compression critical-path retry gate distinguishes the two: a cheap
+   first-token failure still gets the same-provider retry, while a large-
+   prefill first-token failure or full-budget stall skips to fallback
+   (#54465 semantics).
 """
 
 import threading
@@ -27,7 +28,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agent.auxiliary_client import _CodexCompletionsAdapter, call_llm
+from agent.auxiliary_client import (
+    _CodexCompletionsAdapter,
+    _aux_stream_no_progress_timeout,
+    call_llm,
+)
 
 
 def _content_event(text="tok"):
@@ -61,6 +66,37 @@ def _consume(stream, *, model, on_event):
 
 
 class TestNoProgressFailFast:
+    @pytest.mark.parametrize(
+        ("estimated_tokens", "expected_timeout"),
+        [
+            (100_000, 60.0),
+            (100_001, 120.0),
+            (250_001, 180.0),
+            (400_001, 300.0),
+        ],
+    )
+    def test_no_progress_window_scales_with_large_prefill(
+        self, estimated_tokens, expected_timeout,
+    ):
+        with patch(
+            "agent.auxiliary_client.estimate_messages_tokens_rough",
+            return_value=estimated_tokens,
+        ):
+            assert _aux_stream_no_progress_timeout(
+                [{"role": "user", "content": "x"}],
+                total_timeout=300,
+            ) == expected_timeout
+
+    def test_no_progress_window_never_exceeds_configured_timeout(self):
+        with patch(
+            "agent.auxiliary_client.estimate_messages_tokens_rough",
+            return_value=500_000,
+        ):
+            assert _aux_stream_no_progress_timeout(
+                [{"role": "user", "content": "x"}],
+                total_timeout=150,
+            ) == 150.0
+
     def test_dead_stream_fails_at_no_progress_window_not_total_timeout(self):
         """Keepalive-only stream dies at the (patched) no-progress window,
         long before the 300s-style total timeout."""
@@ -127,6 +163,31 @@ class TestNoProgressFailFast:
                 timeout=300,
             )
         assert time.monotonic() - start < 5.0
+
+    def test_large_prefill_returns_to_base_window_after_first_token(self):
+        def _stalls_after_first_token():
+            yield _content_event()
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                time.sleep(0.02)
+                yield _keepalive_event()
+
+        adapter = _make_adapter(_stalls_after_first_token())
+        start = time.monotonic()
+        with (
+            patch(
+                "agent.auxiliary_client._aux_stream_no_progress_timeout",
+                return_value=0.8,
+            ),
+            patch("agent.auxiliary_client._AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS", 0.2),
+            patch("agent.codex_runtime._consume_codex_event_stream", _consume),
+            pytest.raises(TimeoutError, match=r"stalled: no new output for 0\.2s"),
+        ):
+            adapter.create(
+                messages=[{"role": "user", "content": "large prefill"}],
+                timeout=300,
+            )
+        assert time.monotonic() - start < 0.6
 
     def test_hard_ceiling_bounds_a_token_drip(self):
         """A degenerate one-token-per-window drip still terminates at the
@@ -200,7 +261,7 @@ class TestNoProgressFailFast:
 class TestCompressionRetryGate:
     """First-token failures retry same-provider; stalls skip to fallback."""
 
-    def _run_call_llm(self, primary_error, second_response=None):
+    def _run_call_llm(self, primary_error, second_response=None, messages=None):
         primary_client = MagicMock()
         primary_client.base_url = "https://chatgpt.com/backend-api/codex"
         if second_response is not None:
@@ -235,7 +296,7 @@ class TestCompressionRetryGate:
         ):
             result = call_llm(
                 task="compression",
-                messages=[{"role": "user", "content": "summarize"}],
+                messages=messages or [{"role": "user", "content": "summarize"}],
             )
         return result, primary_client, mock_fb
 
@@ -256,6 +317,18 @@ class TestCompressionRetryGate:
         assert result.choices[0].message.content == "retried"
         assert primary.chat.completions.create.call_count == 2
         assert not mock_fb.called
+
+    def test_large_prefill_no_progress_timeout_skips_same_provider_retry(self):
+        err = TimeoutError(
+            "Codex auxiliary Responses stream produced no output within "
+            "300.0s (no-progress timeout, 300.2s elapsed)"
+        )
+        # estimate_messages_tokens_rough uses an approximately chars/4 estimate.
+        oversized = [{"role": "user", "content": "x" * 400_004}]
+        result, primary, mock_fb = self._run_call_llm(err, messages=oversized)
+        assert result.choices[0].message.content == "fallback"
+        assert primary.chat.completions.create.call_count == 1
+        assert mock_fb.called
 
     def test_stalled_timeout_skips_same_provider_retry(self):
         err = TimeoutError(

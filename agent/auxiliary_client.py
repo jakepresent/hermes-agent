@@ -170,6 +170,7 @@ def aux_probe_mode():
 from agent.credential_pool import load_pool
 from agent.model_metadata import (
     MINIMUM_CONTEXT_LENGTH,
+    estimate_messages_tokens_rough,
     get_model_context_length,
     strip_codex_context_variant_suffix as _strip_codex_ctx_variant,
 )
@@ -537,12 +538,39 @@ _CODEX_PROGRESS_DELTA_TYPES = frozenset(
 )
 
 
-# Progress-aware auxiliary stream deadlines (Aug 2026, masoria report):
-# a dead stream fails fast at the no-progress window (first token AND
-# between tokens), a live stream re-arms per substantive event and is
-# bounded only by _aux_stream_total_ceiling() (shared with the streamed
-# chat.completions path).
+# Progress-aware auxiliary stream deadlines (Aug 2026, masoria report): a dead
+# small stream fails fast at the no-progress window (first token AND between
+# tokens), while large prefills get proportionally longer to emit their first
+# substantive event. A live stream re-arms per substantive event and remains
+# bounded by _aux_stream_total_ceiling() (shared with streamed chat.completions).
 _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS = 60.0
+
+
+def _aux_stream_no_progress_timeout(
+    messages: List[Dict[str, Any]],
+    total_timeout: Optional[float],
+) -> float:
+    """Return a prefill-aware no-progress window for an auxiliary request.
+
+    A fixed 60-second first-token fence is useful for ordinary dead streams but
+    is too aggressive when compression sends hundreds of thousands of input
+    tokens. Scale only the no-progress window; the existing hard ceiling still
+    bounds live token drips, and the configured task timeout remains an upper
+    bound for users who intentionally chose a shorter wait.
+    """
+    estimated_tokens = estimate_messages_tokens_rough(messages)
+    if estimated_tokens > 400_000:
+        no_progress_timeout = 300.0
+    elif estimated_tokens > 250_000:
+        no_progress_timeout = 180.0
+    elif estimated_tokens > 100_000:
+        no_progress_timeout = 120.0
+    else:
+        no_progress_timeout = _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
+
+    if total_timeout is not None:
+        no_progress_timeout = min(no_progress_timeout, float(total_timeout))
+    return no_progress_timeout
 
 
 def _codex_event_has_content(event: Any) -> bool:
@@ -1794,8 +1822,8 @@ class _CodexCompletionsAdapter:
         #      longer holds the full 300s compression budget before falling
         #      back (masoria report, Aug 2026: 3 stacked 300s waits ->
         #      20+ min stuck on "Summarizing").
-        #   2. Streaming: every substantive event re-arms the deadline by
-        #      ``no_progress_timeout`` — a live stream is never killed by an
+        #   2. Streaming: after the first substantive event, the deadline
+        #      returns to the base no-progress window. A live stream is never killed by an
         #      absolute total, so a long reasoning summary that is actually
         #      producing tokens completes instead of timing out at 300s and
         #      falling back (#54915's original complaint, fixed properly).
@@ -1807,12 +1835,13 @@ class _CodexCompletionsAdapter:
         #      uses) so a pathological one-token-per-59s drip still
         #      terminates.
         _start_monotonic = time.monotonic()
+        first_progress_timeout = _aux_stream_no_progress_timeout(messages, total_timeout)
         no_progress_timeout = _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
         if total_timeout is not None:
             no_progress_timeout = min(no_progress_timeout, float(total_timeout))
         hard_deadline = _start_monotonic + _aux_stream_total_ceiling(total_timeout)
         deadline_lock = threading.Lock()
-        progress_deadline = [_start_monotonic + no_progress_timeout]
+        progress_deadline = [_start_monotonic + first_progress_timeout]
         saw_content = threading.Event()
         timed_out = threading.Event()
         stream_finished = threading.Event()
@@ -1848,7 +1877,7 @@ class _CodexCompletionsAdapter:
             if not saw_content.is_set():
                 return (
                     "Codex auxiliary Responses stream produced no output "
-                    f"within {float(no_progress_timeout):.1f}s "
+                    f"within {float(first_progress_timeout):.1f}s "
                     f"(no-progress timeout, {elapsed:.1f}s elapsed)"
                 )
             return (
@@ -1987,7 +2016,7 @@ class _CodexCompletionsAdapter:
                 # the compression idle clock.
                 # The transport no-progress window likewise re-arms only on
                 # substantive payloads: a zombie stream that drips SSE
-                # keepalives but never produces output dies at the same 60s
+                # keepalives but never produces output dies at the same size-aware
                 # window as a fully dead connection.
                 if _codex_event_has_content(_event):
                     _record_stream_progress()
@@ -10123,18 +10152,29 @@ def _call_llm_impl(
             # fall straight through to provider/model fallback; fast blips (a
             # streaming-close or a 5xx) still retry, since those are cheap.
             if task == "compression" and _is_timeout_error(transient_err):
-                # A fast first-token fail (dead stream detected within the
-                # 60s no-progress window, zero output seen) is cheap — take
-                # the normal same-provider retry chain first; the provider
-                # is often fine and only that one stream was stillborn. A
-                # mid-stream stall or hard-ceiling timeout skips straight to
-                # fallback, because re-running a multi-minute summary on the
-                # same provider doubles the user-visible stall (#54465).
-                if "no-progress timeout" not in str(transient_err):
+                # A first-token failure is cheap enough to retry only for an
+                # ordinary request that used the base 60s window. Large
+                # compression prefills receive a 120-300s size-aware window;
+                # repeating one on the same provider would recreate the
+                # multi-minute critical-path stall this gate prevents. A
+                # mid-stream stall or hard-ceiling timeout likewise skips
+                # straight to fallback (#54465).
+                _request_tokens = estimate_messages_tokens_rough(
+                    kwargs.get("messages") or []
+                )
+                _large_prefill_no_progress = (
+                    "no-progress timeout" in str(transient_err)
+                    and _request_tokens > 100_000
+                )
+                if (
+                    "no-progress timeout" not in str(transient_err)
+                    or _large_prefill_no_progress
+                ):
                     logger.info(
                         "Auxiliary compression: timeout on the critical path; "
-                        "skipping same-provider retry and falling back: %s",
-                        transient_err,
+                        "skipping same-provider retry and falling back "
+                        "(estimated request: %d tokens): %s",
+                        _request_tokens, transient_err,
                     )
                     raise
             _max_transient_retries = _transient_retry_count()

@@ -567,6 +567,7 @@ Core behavior:
 - Preservation gate: hardcoded effort-level sets are a recurring merge-revert hazard — upstream `1780ad24b` reset `VALID_REASONING_EFFORTS` and re-dropped `max` during the v2026.6.19 integration. Gates must reference the canonical `VALID_REASONING_EFFORTS` tuple rather than re-listing `{"minimal", "low", "medium", "high", "xhigh"}` inline, so a future merge cannot silently revert the code path without also touching the tuple (which is test-guarded).
 - Auxiliary auto routing uses the correct transport and respects the main provider/model path.
 - Provider-health cache isolation prevents one test/provider failure from poisoning main-first auxiliary behavior.
+- Codex auxiliary no-progress detection scales its first-output window with estimated request size: 60 seconds through 100k tokens, then 120/180/300 seconds above 100k/250k/400k. The configured task timeout remains the upper bound. Oversized compression requests skip a same-provider retry after exhausting that extended window, avoiding a second multi-minute stall before fallback.
 
 Key files:
 
@@ -588,6 +589,7 @@ Key files:
 - `tests/hermes_cli/test_runtime_provider_resolution.py`
 - `tests/providers/test_provider_profiles.py`
 - `tests/agent/test_auxiliary_main_first.py`
+- `tests/agent/test_codex_aux_no_progress_timeout.py`
 
 Commits:
 
@@ -598,12 +600,13 @@ Commits:
 - `789611291` - support Copilot Opus 4.8 max reasoning.
 - `73fe8e1a0` - restore Copilot xhigh behavior and isolate auxiliary main-first tests after merge.
 - `a26e52cdd` - derive gateway persisted-session and channel-override transport from the target model, preserving long-lived Opus sessions across gateway restarts.
+- _(pending)_ - scale Codex auxiliary no-progress timeouts for large compression prefills and skip their costly same-provider retry.
 - _(pending)_ - re-restore `max` reasoning gate after v2026.6.19 merge reverted `VALID_REASONING_EFFORTS`; route gateway/slash_commands `/reasoning` gate through the canonical tuple to harden against future reverts.
 
 Preservation checks:
 
 ```bash
-python -m pytest tests/test_hermes_constants.py tests/gateway/test_api_server.py tests/gateway/test_session_model_override_persistence.py tests/gateway/test_reasoning_command.py tests/cli/test_reasoning_command.py tests/hermes_cli/test_model_validation.py tests/hermes_cli/test_model_switch_copilot_api_mode.py tests/hermes_cli/test_runtime_provider_resolution.py tests/hermes_cli/test_reasoning_effort_menu.py tests/providers/test_provider_profiles.py tests/agent/test_auxiliary_main_first.py tests/run_agent/test_run_agent.py -o 'addopts=' -q
+python -m pytest tests/test_hermes_constants.py tests/gateway/test_api_server.py tests/gateway/test_session_model_override_persistence.py tests/gateway/test_reasoning_command.py tests/cli/test_reasoning_command.py tests/hermes_cli/test_model_validation.py tests/hermes_cli/test_model_switch_copilot_api_mode.py tests/hermes_cli/test_runtime_provider_resolution.py tests/hermes_cli/test_reasoning_effort_menu.py tests/providers/test_provider_profiles.py tests/agent/test_auxiliary_main_first.py tests/agent/test_codex_aux_no_progress_timeout.py tests/run_agent/test_run_agent.py -o 'addopts=' -q
 ```
 
 Quick gate-integrity check (catches a merge silently dropping `max` from the canonical tuple):

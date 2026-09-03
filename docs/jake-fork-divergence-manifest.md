@@ -1031,6 +1031,50 @@ python -m pytest tests/gateway/test_background_process_notifications.py tests/ga
 cd website && npm run build
 ```
 
+### 25. Deterministic first-message model routing
+
+Purpose: route a new gateway conversation to a task-appropriate model without
+adding a classifier-model call or changing models inside an active conversation.
+
+Core behavior:
+
+- `message_router.enabled` is opt-in and defaults to absent/disabled.
+- The first human message in a genuinely new session is classified by explicit,
+  inspectable rules into `routine`, `vision_research`, `coding`, or `judgment`.
+- The configured lane's model/provider becomes a session-scoped override and is
+  written through to `SessionStore` (with SessionDB display metadata updated),
+  so follow-ups and gateway restarts retain the same route and prompt-cache
+  identity without persisting provider credentials.
+- Genuinely new and reset `SessionEntry` objects start with durable
+  `message_router_state=pending`; commands and internal events leave it pending,
+  and the first human prompt consumes it. Recovered legacy or resumed sessions
+  do not gain the marker, preventing a mid-conversation switch after rollout.
+- Explicit session overrides and channel model/provider overrides win. Commands
+  and internal/synthetic events never trigger routing.
+- Routing errors fail open to the configured default instead of dropping the
+  message.
+- Jake's post-Microsoft switch maps routine work to GLM-5.3 Flash, images/current
+  external research to DeepSeek V4 Flash Vision Exp, and coding/judgment to
+  Claude Sonnet 5. Long code implementation still delegates to native Claude
+  Code; V4 Pro stays manual because its tested route is not ZDR-compatible.
+
+Key files:
+
+- `gateway/message_router.py`
+- `gateway/run.py` (`_apply_first_message_model_route`)
+- `tests/gateway/test_message_router.py`
+- `tests/gateway/test_session_model_override_routing.py`
+- `~/LocalOps/hermes/post_microsoft_switch.py`
+- `~/ChatWorkspace/hermes-model-router/report.md`
+
+Commits: pending.
+
+Preservation checks:
+
+```bash
+python -m pytest tests/gateway/test_message_router.py tests/gateway/test_session_model_override_routing.py tests/gateway/test_image_input_routing_runtime.py tests/gateway/test_profile_routing.py tests/gateway/test_session_store_runtime_stale_guard.py -o 'addopts=' -q
+```
+
 ## Complete commit ledger by feature bucket
 
 This is the raw commit map from the audited branch, grouped as the recommended history-cleanup overlay. It intentionally avoids rewriting history on a published branch.
@@ -1097,6 +1141,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 
 ### Provider/model/routing behavior
 
+- pending - `feat(gateway): route new sessions by deterministic policy` (section 25)
 - `37b16bb73` `2026-05-24` - `fix: honor API reasoning overrides`
 - `6a8ce27a1` `2026-05-28` - `fix: honor API server model overrides`
 - `b327035c7` `2026-05-28` - `fix: canonicalize Copilot model switches`

@@ -2919,6 +2919,7 @@ class SessionStore:
                 display_name=source.chat_name,
                 platform=source.platform,
                 chat_type=source.chat_type,
+                metadata={"message_router_state": "pending"},
                 was_auto_reset=was_auto_reset,
                 auto_reset_reason=auto_reset_reason,
                 reset_had_activity=reset_had_activity,
@@ -3443,6 +3444,7 @@ class SessionStore:
                 display_name=display_name if display_name is not None else old_entry.display_name,
                 platform=old_entry.platform,
                 chat_type=old_entry.chat_type,
+                metadata={"message_router_state": "pending"},
                 is_fresh_reset=True,
             )
 

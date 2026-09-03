@@ -9055,6 +9055,136 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return source
         return dataclasses.replace(source, thread_id=recovered)
 
+    async def _apply_first_message_model_route(
+        self,
+        *,
+        event: Any,
+        source: SessionSource,
+        session_entry: Any,
+    ) -> None:
+        """Pin a deterministic route on the first human turn of a session."""
+        session_key = session_entry.session_key
+        is_human_message = not getattr(event, "internal", False) and not event.is_command()
+        try:
+            cfg = _load_gateway_config()
+            router_cfg = cfg.get("message_router") or {}
+            enabled = isinstance(router_cfg, dict) and router_cfg.get("enabled", False)
+            if not enabled:
+                if is_human_message:
+                    await self.async_session_store.set_session_metadata(
+                        session_key, "message_router_state", "disabled"
+                    )
+                return
+            if not is_human_message:
+                return
+            state = self._session_state(session_key).conversation
+            if state.model_override:
+                await self.async_session_store.set_session_metadata(
+                    session_key, "message_router_state", "routed"
+                )
+                return
+
+            runner_cfg = getattr(self, "config", None)
+            if runner_cfg and source is not None:
+                chat_id = str(source.chat_id) if source.chat_id else ""
+                thread_id = str(source.thread_id) if getattr(source, "thread_id", None) else None
+                parent_id = str(source.parent_chat_id) if getattr(source, "parent_chat_id", None) else None
+                channel = _get_channel_override(
+                    runner_cfg,
+                    source.platform,
+                    chat_id,
+                    thread_id=thread_id,
+                    parent_id=parent_id,
+                )
+                if channel and (channel.model or channel.provider):
+                    await self.async_session_store.set_session_metadata(
+                        session_key, "message_router_state", "channel_override"
+                    )
+                    return
+
+            from gateway.message_router import classify_first_message
+
+            media_types = [str(item or "").lower() for item in (getattr(event, "media_types", None) or [])]
+            media_urls = list(getattr(event, "media_urls", None) or [])
+            has_image = any(
+                _event_media_is_image(event, index)
+                for index in range(max(len(media_urls), len(media_types)))
+            ) or str(getattr(getattr(event, "message_type", None), "value", "")).lower() == "photo"
+            has_document = str(
+                getattr(getattr(event, "message_type", None), "value", "")
+            ).lower() == "document" or bool(media_types) and any(
+                not item.startswith(("image/", "audio/", "video/")) for item in media_types
+            )
+            decision = classify_first_message(
+                event.text or "",
+                has_image=has_image,
+                has_document=has_document,
+            )
+            routes = router_cfg.get("routes") or {}
+            selected = routes.get(decision.lane) if isinstance(routes, dict) else None
+            if not isinstance(selected, dict):
+                logger.warning("message router lane has no configured route: lane=%s", decision.lane)
+                await self.async_session_store.set_session_metadata(
+                    session_key, "message_router_state", "default"
+                )
+                return
+            model = str(selected.get("model") or "").strip()
+            provider = str(selected.get("provider") or "").strip()
+            if not model or not provider:
+                logger.warning("message router lane is incomplete: lane=%s", decision.lane)
+                await self.async_session_store.set_session_metadata(
+                    session_key, "message_router_state", "default"
+                )
+                return
+
+            runtime = _resolve_runtime_agent_kwargs_for_provider(provider, target_model=model)
+            runtime_model = str(runtime.pop("model", "") or "").strip()
+            if runtime_model and not model:
+                model = runtime_model
+            override = {
+                "model": model,
+                "provider": runtime.get("provider") or provider,
+                "requested_provider": runtime.get("requested_provider") or provider,
+                "api_key": runtime.get("api_key"),
+                "base_url": runtime.get("base_url"),
+                "api_mode": runtime.get("api_mode"),
+                "max_tokens": runtime.get("max_tokens"),
+                "credential_pool": runtime.get("credential_pool"),
+                "request_overrides": runtime.get("request_overrides"),
+                "capabilities": dict(runtime.get("capabilities") or {}),
+            }
+            await self.async_session_store.set_model_override(session_key, override)
+            state.model_override = override
+            await self.async_session_store.set_session_metadata(
+                session_key, "message_router_state", "routed"
+            )
+            if self._session_db is not None:
+                try:
+                    await self._session_db.update_session_model(
+                        session_entry.session_id,
+                        model,
+                        provider=override["provider"],
+                    )
+                except Exception:
+                    logger.debug("Failed to update routed session display metadata", exc_info=True)
+            logger.info(
+                "message router selected lane=%s model=%s provider=%s session=%s reason=%s",
+                decision.lane,
+                model,
+                override["provider"],
+                session_key,
+                decision.reason,
+            )
+        except Exception:
+            logger.exception("message router failed open; using configured session/default route")
+            if is_human_message:
+                try:
+                    await self.async_session_store.set_session_metadata(
+                        session_key, "message_router_state", "failed"
+                    )
+                except Exception:
+                    logger.debug("Failed to persist message-router failure state", exc_info=True)
+
     def _resolve_session_agent_runtime(
         self,
         *,
@@ -21256,6 +21386,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # onto subsequent messages in the same session (issue #6508).
         if getattr(session_entry, "is_fresh_reset", False):
             session_entry.is_fresh_reset = False
+        _message_router_pending = (
+            isinstance(getattr(session_entry, "metadata", None), dict)
+            and session_entry.metadata.get("message_router_state") == "pending"
+        )
+        if _is_new_session or _message_router_pending:
+            await self._apply_first_message_model_route(
+                event=event,
+                source=source,
+                session_entry=session_entry,
+            )
         if _is_new_session:
             await self.hooks.emit("session:start", {
                 "platform": source.platform.value if source.platform else "",

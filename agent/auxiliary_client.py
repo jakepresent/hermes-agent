@@ -4498,23 +4498,6 @@ def _is_timeout_error(exc: Exception) -> bool:
     return "timed out" in str(exc).lower()
 
 
-def _skip_same_provider_retry(task: str, exc: Exception) -> bool:
-    """Keep compression timeouts from doubling the critical-path stall.
-
-    Every timeout has already consumed its progress or total deadline.  Cheap
-    transient failures such as connection resets and 5xx responses remain on
-    the ordinary retry path; only compression timeouts fall straight through
-    to the configured provider/model fallback.
-    """
-    if task != "compression":
-        return False
-    text = str(exc).lower()
-    return _is_timeout_error(exc) or any(
-        marker in text
-        for marker in ("no-progress timeout", "hard ceiling", "stream stalled")
-    )
-
-
 def _is_connection_error(exc: Exception) -> bool:
     """Detect connection/network errors that warrant provider fallback.
 
@@ -10161,17 +10144,39 @@ def _call_llm_impl(
             if not _is_transient_transport_error(transient_err):
                 raise
             # Compression is on the critical preflight path: a user cannot
-            # continue or resume an oversized session until it compacts. Any
-            # timeout has already consumed its progress/total deadline, so a
-            # same-provider retry doubles that stall. Fall through to fallback;
-            # fast connection closes and 5xx responses still retry normally.
-            if _skip_same_provider_retry(task, transient_err):
-                logger.info(
-                    "Auxiliary compression: timeout on the critical path; "
-                    "skipping same-provider retry and falling back: %s",
-                    transient_err,
+            # continue or resume an oversized session until it compacts. A
+            # same-provider retry on a timeout means another full ``timeout``-
+            # long wall-clock block before the except-chain below can fall
+            # back — doubling the user-visible stall (issue #54465). Skip the
+            # same-provider retry for compression on a full-budget timeout and
+            # fall straight through to provider/model fallback; fast blips (a
+            # streaming-close or a 5xx) still retry, since those are cheap.
+            if task == "compression" and _is_timeout_error(transient_err):
+                # A first-token failure is cheap enough to retry only for an
+                # ordinary request that used the base 60s window. Large
+                # compression prefills receive a 120-300s size-aware window;
+                # repeating one on the same provider would recreate the
+                # multi-minute critical-path stall this gate prevents. A
+                # mid-stream stall or hard-ceiling timeout likewise skips
+                # straight to fallback (#54465).
+                _request_tokens = estimate_messages_tokens_rough(
+                    kwargs.get("messages") or []
                 )
-                raise
+                _large_prefill_no_progress = (
+                    "no-progress timeout" in str(transient_err)
+                    and _request_tokens > 100_000
+                )
+                if (
+                    "no-progress timeout" not in str(transient_err)
+                    or _large_prefill_no_progress
+                ):
+                    logger.info(
+                        "Auxiliary compression: timeout on the critical path; "
+                        "skipping same-provider retry and falling back "
+                        "(estimated request: %d tokens): %s",
+                        _request_tokens, transient_err,
+                    )
+                    raise
             _max_transient_retries = _transient_retry_count()
             _last_transient = transient_err
             for _attempt in range(1, _max_transient_retries + 1):

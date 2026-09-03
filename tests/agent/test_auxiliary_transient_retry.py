@@ -34,6 +34,36 @@ def test_transient_retry_count_default(monkeypatch):
         assert ac._transient_retry_count() == ac._DEFAULT_TRANSIENT_RETRIES
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        Exception("Request timed out."),
+        Exception(
+            "Codex auxiliary Responses stream produced no output within "
+            "60.0s (no-progress timeout, 63.1s elapsed)"
+        ),
+    ],
+)
+def test_compression_timeout_skips_same_provider_retry(error):
+    from agent.auxiliary_client import _skip_same_provider_retry
+
+    assert _skip_same_provider_retry("compression", error) is True
+
+
+def test_compression_fast_transport_failure_keeps_retry():
+    from agent.auxiliary_client import _skip_same_provider_retry
+
+    assert _skip_same_provider_retry(
+        "compression", Exception("connection reset by peer")
+    ) is False
+
+
+def test_other_auxiliary_timeout_keeps_retry():
+    from agent.auxiliary_client import _skip_same_provider_retry
+
+    assert _skip_same_provider_retry("vision", Exception("Request timed out.")) is False
+
+
 
 
 def test_model_participates_in_client_cache_key():

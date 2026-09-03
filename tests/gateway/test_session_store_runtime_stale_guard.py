@@ -314,21 +314,3 @@ class TestAdvanceCompressionSession:
         assert store.suspend_recently_active(max_age_seconds=120) == 0
 
 
-class TestMessageRouterLifecycleState:
-    def test_new_and_reset_sessions_start_pending(self, tmp_path):
-        db = _db_returning({})
-        store = _make_store_with_db(tmp_path, db)
-        source = _source()
-
-        entry = store.get_or_create_session(source)
-        assert entry.metadata["message_router_state"] == "pending"
-
-        store.set_session_metadata(
-            entry.session_key, "message_router_state", "routed"
-        )
-        reset = store.reset_session(entry.session_key)
-
-        assert reset is not None
-        assert reset.metadata["message_router_state"] == "pending"
-
-

@@ -10,7 +10,6 @@ import asyncio
 import sys
 import threading
 import types
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -40,8 +39,7 @@ class _CapturingAgent:
 def _make_runner():
     runner = object.__new__(gateway_run.GatewayRunner)
     runner.adapters = {}
-    runner.session_store = MagicMock()
-    runner.session_store.get_model_override.return_value = None
+    runner.session_store = None
     runner.config = None
     runner._voice_mode = {}
     runner._ephemeral_system_prompt = ""
@@ -55,7 +53,6 @@ def _make_runner():
     runner._running_agents_ts = {}
     runner._background_tasks = set()
     runner._session_db = None
-
     runner._session_model_overrides = {}
     runner._session_reasoning_overrides = {}
     runner._pending_model_notes = {}
@@ -138,233 +135,5 @@ fallback_providers:
     assert model == "minimax/minimax-m2.7"
     assert runtime_kwargs["provider"] == "openrouter"
     assert runtime_kwargs["api_key"] == "sk-openrouter"
-
-
-def test_first_message_router_pins_and_persists_selected_route(monkeypatch):
-    runner = _make_runner()
-    runner._session_db = AsyncMock()
-    monkeypatch.setattr(
-        gateway_run,
-        "_load_gateway_config",
-        lambda: {
-            "message_router": {
-                "enabled": True,
-                "routes": {
-                    "routine": {"provider": "openrouter", "model": "z-ai/glm-5.3-flash"},
-                    "vision_research": {"provider": "openrouter", "model": "deepseek/vision"},
-                    "coding": {"provider": "openrouter", "model": "anthropic/sonnet"},
-                    "judgment": {"provider": "openrouter", "model": "anthropic/sonnet"},
-                },
-            }
-        },
-    )
-    monkeypatch.setattr(
-        gateway_run,
-        "_resolve_runtime_agent_kwargs_for_provider",
-        lambda provider, target_model=None: {
-            "model": target_model,
-            "provider": provider,
-            "requested_provider": provider,
-            "api_key": "secret",
-            "base_url": "https://example.test/v1",
-            "api_mode": "chat_completions",
-        },
-    )
-    source = SessionSource(platform=Platform.DISCORD, user_id="u", chat_id="c")
-    entry = SimpleNamespace(session_key="agent:main:discord:c", session_id="session-1")
-    event = SimpleNamespace(
-        text="Should I sell some MSFT now?",
-        internal=False,
-        media_types=[],
-        is_command=lambda: False,
-    )
-
-    asyncio.run(
-        runner._apply_first_message_model_route(event=event, source=source, session_entry=entry)
-    )
-
-    override = runner._session_model_overrides[entry.session_key]
-    assert override["model"] == "anthropic/sonnet"
-    assert override["provider"] == "openrouter"
-    runner._session_db.update_session_model.assert_awaited_once_with(
-        "session-1", "anthropic/sonnet", provider="openrouter"
-    )
-    runner.session_store.set_model_override.assert_called_once()
-    persisted = runner.session_store.set_model_override.call_args.args[1]
-    assert persisted["model"] == "anthropic/sonnet"
-    runner.session_store.set_session_metadata.assert_called_with(
-        entry.session_key, "message_router_state", "routed"
-    )
-
-
-def test_first_message_router_is_disabled_by_default(monkeypatch):
-    runner = _make_runner()
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
-    source = SessionSource(platform=Platform.DISCORD, user_id="u", chat_id="c")
-    entry = SimpleNamespace(session_key="agent:main:discord:c", session_id="session-1")
-    event = SimpleNamespace(
-        text="Should I sell MSFT?",
-        internal=False,
-        media_types=[],
-        is_command=lambda: False,
-    )
-
-    asyncio.run(
-        runner._apply_first_message_model_route(event=event, source=source, session_entry=entry)
-    )
-
-    assert entry.session_key not in runner._session_model_overrides
-    runner.session_store.set_session_metadata.assert_called_once_with(
-        entry.session_key, "message_router_state", "disabled"
-    )
-
-
-def test_first_message_router_detects_mime_less_photo(monkeypatch):
-    runner = _make_runner()
-    monkeypatch.setattr(
-        gateway_run,
-        "_load_gateway_config",
-        lambda: {
-            "message_router": {
-                "enabled": True,
-                "routes": {
-                    "routine": {"provider": "openrouter", "model": "glm"},
-                    "vision_research": {"provider": "openrouter", "model": "deepseek-vision"},
-                },
-            }
-        },
-    )
-    monkeypatch.setattr(
-        gateway_run,
-        "_resolve_runtime_agent_kwargs_for_provider",
-        lambda provider, target_model=None: {"provider": provider},
-    )
-    source = SessionSource(platform=Platform.DISCORD, user_id="u", chat_id="c")
-    entry = SimpleNamespace(session_key="agent:main:discord:c", session_id="session-photo")
-    event = SimpleNamespace(
-        text="What is this?",
-        internal=False,
-        media_types=[],
-        media_urls=["/tmp/photo.bin"],
-        message_type=SimpleNamespace(value="photo"),
-        is_command=lambda: False,
-    )
-
-    asyncio.run(
-        runner._apply_first_message_model_route(event=event, source=source, session_entry=entry)
-    )
-
-    assert runner._session_model_overrides[entry.session_key]["model"] == "deepseek-vision"
-
-
-def test_routed_override_rehydrates_in_a_new_runner(monkeypatch):
-    class Store:
-        def __init__(self):
-            self.override = None
-            self.metadata = {}
-
-        def set_model_override(self, session_key, override):
-            self.override = {
-                key: value
-                for key, value in override.items()
-                if key in {"model", "provider", "base_url"}
-            }
-
-        def set_session_metadata(self, session_key, key, value):
-            self.metadata[(session_key, key)] = value
-
-        def get_model_override(self, session_key):
-            return dict(self.override) if self.override else None
-
-    store = Store()
-    monkeypatch.setattr(
-        gateway_run,
-        "_load_gateway_config",
-        lambda: {
-            "message_router": {
-                "enabled": True,
-                "routes": {
-                    "judgment": {"provider": "openrouter", "model": "anthropic/sonnet"}
-                },
-            }
-        },
-    )
-    monkeypatch.setattr(
-        gateway_run,
-        "_resolve_runtime_agent_kwargs_for_provider",
-        lambda provider, target_model=None: {
-            "provider": provider,
-            "api_key": "fresh-secret",
-            "base_url": "https://example.test/v1",
-        },
-    )
-    source = SessionSource(platform=Platform.DISCORD, user_id="u", chat_id="c")
-    entry = SimpleNamespace(session_key="agent:main:discord:c", session_id="session-restart")
-    event = SimpleNamespace(
-        text="Should I sell some MSFT now?",
-        internal=False,
-        media_types=[],
-        is_command=lambda: False,
-    )
-    before = _make_runner()
-    before.session_store = store
-    asyncio.run(
-        before._apply_first_message_model_route(event=event, source=source, session_entry=entry)
-    )
-
-    after = _make_runner()
-    after.session_store = store
-    after._rehydrate_session_model_override(entry.session_key)
-
-    restored = after._session_model_overrides[entry.session_key]
-    assert restored["model"] == "anthropic/sonnet"
-    assert restored["provider"] == "openrouter"
-    assert restored["api_key"] == "fresh-secret"
-
-
-def test_internal_event_does_not_consume_pending_router_state(monkeypatch):
-    runner = _make_runner()
-    monkeypatch.setattr(
-        gateway_run,
-        "_load_gateway_config",
-        lambda: {"message_router": {"enabled": True, "routes": {}}},
-    )
-    source = SessionSource(platform=Platform.DISCORD, user_id="u", chat_id="c")
-    entry = SimpleNamespace(
-        session_key="agent:main:discord:c",
-        session_id="session-internal",
-        metadata={"message_router_state": "pending"},
-    )
-    event = SimpleNamespace(text="wake", internal=True, is_command=lambda: False)
-
-    asyncio.run(
-        runner._apply_first_message_model_route(event=event, source=source, session_entry=entry)
-    )
-
-    runner.session_store.set_session_metadata.assert_not_called()
-    assert entry.metadata["message_router_state"] == "pending"
-
-
-def test_command_does_not_consume_pending_router_state(monkeypatch):
-    runner = _make_runner()
-    monkeypatch.setattr(
-        gateway_run,
-        "_load_gateway_config",
-        lambda: {"message_router": {"enabled": True, "routes": {}}},
-    )
-    source = SessionSource(platform=Platform.DISCORD, user_id="u", chat_id="c")
-    entry = SimpleNamespace(
-        session_key="agent:main:discord:c",
-        session_id="session-command",
-        metadata={"message_router_state": "pending"},
-    )
-    event = SimpleNamespace(text="/status", internal=False, is_command=lambda: True)
-
-    asyncio.run(
-        runner._apply_first_message_model_route(event=event, source=source, session_entry=entry)
-    )
-
-    runner.session_store.set_session_metadata.assert_not_called()
-    assert entry.metadata["message_router_state"] == "pending"
 
 

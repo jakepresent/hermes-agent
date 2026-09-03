@@ -1067,7 +1067,9 @@ Key files:
 - `~/LocalOps/hermes/post_microsoft_switch.py`
 - `~/ChatWorkspace/hermes-model-router/report.md`
 
-Commits: pending.
+Commits:
+
+- `57b51cb37d` - deterministic first-message routing with durable session state.
 
 Preservation checks:
 
@@ -1141,7 +1143,7 @@ This is the raw commit map from the audited branch, grouped as the recommended h
 
 ### Provider/model/routing behavior
 
-- pending - `feat(gateway): route new sessions by deterministic policy` (section 25)
+- `57b51cb37d` `2026-09-03` - `feat(gateway): route new sessions by deterministic policy` (section 25)
 - `37b16bb73` `2026-05-24` - `fix: honor API reasoning overrides`
 - `6a8ce27a1` `2026-05-28` - `fix: honor API server model overrides`
 - `b327035c7` `2026-05-28` - `fix: canonicalize Copilot model switches`

@@ -238,6 +238,8 @@ Purpose: keep Hermes's durable memory writes compact, atomic, and safe when the 
 Core behavior:
 
 - Background review notes route through durable storage with proper provenance.
+- Background memory review treats no-op as normal, saves only genuinely new durable user facts, and rejects project status, review metadata, and duplicate paraphrases.
+- Background skill review treats no-op as normal, requires verified reusable learning, checks for near-duplicates, and caps new skill descriptions at 160 characters.
 - Full-store memory add errors return compact structured context instead of appending the entire memory store into the model loop.
 - Memory writes support batch remove/replace/add patterns so cleanup and additions can happen atomically.
 
@@ -247,17 +249,20 @@ Key files:
 - `agent/background_review.py`
 - `tests/tools/test_memory_tool.py`
 - `tests/run_agent/test_background_review_summary.py`
+- `tests/agent/test_background_review_prompt_hygiene.py`
 
 Commits:
 
 - `e125df23f` - route background review notes to durable storage.
 - `affcc80b6` - compact full-store add errors.
 - `61b186361` - stable-refresh conflict finish that touched `tools/memory_tool.py`; no separate product feature, but keep it in the audit trail.
+- `b92204284e` - make background memory and skill review conservative and regression-test the curation policy.
 
 Preservation checks:
 
 ```bash
 python -m pytest tests/tools/test_memory_tool.py tests/run_agent/test_background_review_summary.py -o 'addopts=' -q
+python -m pytest tests/agent/test_background_review_prompt_hygiene.py tests/agent/test_refine_focus.py tests/run_agent/test_background_review_toolset_restriction.py -q
 ```
 
 ### 4. Discord guild message search

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Local file-backed memory search for durable project context.
 
-This tool indexes auditable markdown files (ChatWorkspace + Hermes memories)
-into a rebuildable SQLite FTS5 cache. Files remain the source of truth; the
-SQLite DB is just a fast search index.
+This tool indexes auditable markdown files from curated ChatWorkspace, Hermes
+memory, and LocalOps roots into a rebuildable SQLite FTS5 cache. Root-local
+``.memoryignore`` files can exclude generated or archival material without
+deleting it. Files remain the source of truth; SQLite is only a fast index.
 """
 
 from __future__ import annotations
 
 import array
+import fnmatch
 import hashlib
 import json
 import os
@@ -31,8 +33,9 @@ DEFAULT_SEMANTIC_INDEX_PATH = get_hermes_home() / "memory_search_semantic.pkl"
 DEFAULT_ROOTS: list[tuple[Path, str]] = [
     (Path.home() / "ChatWorkspace", "chatworkspace"),
     (get_hermes_home() / "memories", "memories"),
-    (Path.home() / "LocalOps", "localops"),
+    (Path.home() / "LocalOps" / "hermes", "localops"),
 ]
+_MEMORY_IGNORE_FILE = ".memoryignore"
 _IGNORE_DIRS = {
     ".git",
     ".hg",
@@ -244,6 +247,45 @@ def _migrate_schema(con: sqlite3.Connection) -> None:
     con.commit()
 
 
+def _load_memoryignore_patterns(root: Path) -> tuple[str, ...]:
+    """Load simple root-relative glob exclusions from ``.memoryignore``.
+
+    Blank lines and comments are ignored. A trailing slash restricts a pattern
+    to directories. ``**/name/`` matches that directory at any depth. Negation
+    is intentionally unsupported so an exclusion file cannot silently widen
+    the indexed corpus.
+    """
+    if not root.is_dir():
+        return ()
+    ignore_file = root / _MEMORY_IGNORE_FILE
+    try:
+        lines = ignore_file.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return ()
+    return tuple(line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#"))
+
+
+def _matches_memoryignore(relative: Path, patterns: Sequence[str], *, is_dir: bool) -> bool:
+    rel = relative.as_posix().lstrip("./")
+    parts = relative.parts
+    for raw_pattern in patterns:
+        directory_only = raw_pattern.endswith("/")
+        if directory_only and not is_dir:
+            continue
+        pattern = raw_pattern.rstrip("/").lstrip("/")
+        candidates = [pattern]
+        if pattern.startswith("**/"):
+            candidates.append(pattern[3:])
+        for candidate in candidates:
+            if "/" not in candidate:
+                matched = any(fnmatch.fnmatchcase(part, candidate) for part in parts)
+            else:
+                matched = fnmatch.fnmatchcase(rel, candidate)
+            if matched:
+                return True
+    return False
+
+
 def _iter_indexable_files(root: Path) -> Iterable[Path]:
     if not root.exists():
         return
@@ -251,11 +293,21 @@ def _iter_indexable_files(root: Path) -> Iterable[Path]:
         if root.suffix.lower() in _MARKDOWN_EXTS:
             yield root
         return
+    patterns = _load_memoryignore_patterns(root)
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _IGNORE_DIRS and not d.startswith(".")]
+        relative_dir = Path(dirpath).relative_to(root)
+        dirnames[:] = [
+            dirname
+            for dirname in dirnames
+            if dirname not in _IGNORE_DIRS
+            and not dirname.startswith(".")
+            and not _matches_memoryignore(relative_dir / dirname, patterns, is_dir=True)
+        ]
         for filename in filenames:
             path = Path(dirpath) / filename
-            if path.suffix.lower() in _MARKDOWN_EXTS:
+            if path.suffix.lower() in _MARKDOWN_EXTS and not _matches_memoryignore(
+                path.relative_to(root), patterns, is_dir=False
+            ):
                 yield path
 
 
@@ -537,6 +589,11 @@ def _index_is_stale(index_path: Path, roots: Sequence[tuple[Path, str]], freshne
     try:
         idx_mtime = index_path.stat().st_mtime
         for root, _source in roots:
+            if root.is_dir() and root.stat().st_mtime > idx_mtime:
+                return True
+            ignore_file = root / _MEMORY_IGNORE_FILE
+            if ignore_file.is_file() and ignore_file.stat().st_mtime > idx_mtime:
+                return True
             for path in _iter_indexable_files(root) or []:
                 try:
                     if path.stat().st_mtime > idx_mtime:
@@ -3108,7 +3165,8 @@ MEMORY_SEARCH_SCHEMA = {
     "name": "memory_search",
     "description": (
         "Search Jake's durable, auditable memory files without using the browser. "
-        "Indexes ~/ChatWorkspace and ~/.hermes/memories into a rebuildable SQLite FTS cache. "
+        "Indexes ~/ChatWorkspace, ~/.hermes/memories, and ~/LocalOps/hermes into a rebuildable "
+        "SQLite FTS cache; root-local .memoryignore files exclude generated or archival paths. "
         "Use action='search' (default) for retrieval, action='status' to inspect Gemini semantic-cache "
         "coverage/missing path prefixes, and action='preindex' to regenerate missing semantic embeddings "
         "when coverage drops after large file moves or new context imports. Use this as the cache tier "
@@ -3133,7 +3191,7 @@ MEMORY_SEARCH_SCHEMA = {
             "source": {
                 "type": "string",
                 "enum": ["all", "chatworkspace", "memories", "localops", "openclaw_legacy", "legacy_sessions", "discord"],
-                "description": "Optional source filter. v1 indexes chatworkspace, Hermes memories, and LocalOps; other sources are reserved for migration follow-ups.",
+                "description": "Optional source filter. v1 indexes ChatWorkspace, Hermes memories, and curated LocalOps/hermes notes; other sources are reserved for migration follow-ups.",
             },
             "path_filter": {"type": "string", "description": "Optional substring filter for result paths, e.g. 'ngng' or 'microsoft/work_context'."},
             "limit": {"type": "integer", "description": "Maximum results, 1-25. Default 8."},

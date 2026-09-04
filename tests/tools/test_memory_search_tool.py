@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
@@ -148,7 +149,76 @@ def test_schema_description_positions_memory_as_durable_context_cache():
 def test_default_roots_include_localops_operator_notes():
     root_strings = {(str(path), source) for path, source in DEFAULT_ROOTS}
 
-    assert (str(Path.home() / "LocalOps"), "localops") in root_strings
+    assert (str(Path.home() / "LocalOps" / "hermes"), "localops") in root_strings
+
+
+def test_memoryignore_excludes_files_and_prunes_existing_rows(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    artifacts = root / "artifacts"
+    results = root / "nested" / "results"
+    artifacts.mkdir(parents=True)
+    results.mkdir(parents=True)
+    keep = root / "context.md"
+    generated = artifacts / "generated.md"
+    benchmark = results / "candidate.txt"
+    keep.write_text("Current canonical camera context.\n", encoding="utf-8")
+    generated.write_text("Generated espresso artifact.\n", encoding="utf-8")
+    benchmark.write_text("Benchmark espresso output.\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+
+    initial = build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    assert initial["scanned_files"] == 3
+
+    ignore_file = root / ".memoryignore"
+    ignore_file.write_text("# Generated output\nartifacts/\n**/results/\n", encoding="utf-8")
+    future = index_path.stat().st_mtime + 2
+    os.utime(ignore_file, (future, future))
+
+    payload = json.loads(
+        memory_search_tool(
+            "espresso",
+            mode="keyword",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert payload["index_updated"]["scanned_files"] == 1
+    assert payload["index_updated"]["deleted_files"] == 2
+    assert payload["results"] == []
+    with sqlite3.connect(index_path) as con:
+        paths = {row[0] for row in con.execute("SELECT path FROM files")}
+    assert paths == {str(keep)}
+
+
+def test_removing_memoryignore_refreshes_and_restores_files(tmp_path):
+    root = tmp_path / "ChatWorkspace"
+    artifacts = root / "artifacts"
+    artifacts.mkdir(parents=True)
+    generated = artifacts / "generated.md"
+    generated.write_text("Restored espresso artifact.\n", encoding="utf-8")
+    ignore_file = root / ".memoryignore"
+    ignore_file.write_text("artifacts/\n", encoding="utf-8")
+    index_path = tmp_path / "memory_search.sqlite"
+    initial = build_index(index_path=index_path, roots=[(root, "chatworkspace")], force=True)
+    assert initial["scanned_files"] == 0
+
+    ignore_file.unlink()
+    future = index_path.stat().st_mtime + 2
+    os.utime(root, (future, future))
+    payload = json.loads(
+        memory_search_tool(
+            "restored espresso",
+            mode="keyword",
+            index_path=index_path,
+            roots=[(root, "chatworkspace")],
+            freshness_seconds=9999,
+        )
+    )
+
+    assert payload["index_updated"]["scanned_files"] == 1
+    assert payload["results"][0]["path"] == str(generated)
 
 
 def test_search_returns_clear_error_for_empty_query(tmp_path):

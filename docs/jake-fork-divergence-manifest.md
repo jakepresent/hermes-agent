@@ -127,7 +127,7 @@ At audit time, every commit in the cherry list was still fork-local relative to 
 
 ### 1. File-backed durable memory search
 
-Purpose: Jake's Markdown/Git memory cabinet is the source of truth; SQLite and vector data are rebuildable indexes. This fork gives Hermes a `memory_search` tool over ChatWorkspace, Hermes memories, LocalOps, and imported OpenClaw history.
+Purpose: Jake's Markdown/Git memory cabinet is the source of truth; SQLite and vector data are rebuildable indexes. This fork gives Hermes a `memory_search` tool over ChatWorkspace, Hermes memories, curated LocalOps operator notes, and imported OpenClaw history.
 
 Core behavior:
 
@@ -136,6 +136,7 @@ Core behavior:
 - Prefer `memory_search` as the first recall layer for durable project/user context, preferences, setup facts, and prior decisions; use `session_search` for raw past-chat transcripts and `search_files`/`read_file` for live disk/source-code state.
 - Keep the coding/ACP toolsets exposing `memory_search` alongside file/search tools so project-context grounding remains available in code workspaces.
 - Keep Markdown files canonical; indexes are caches.
+- Preserve root-local `.memoryignore` exclusions and the narrow default `LocalOps/hermes` root so generated artifacts, vendored source trees, benchmark outputs, and archives do not crowd durable-context retrieval.
 - Preserve source/file/line provenance so results can be audited.
 - Preserve OpenClaw legacy session import paths.
 

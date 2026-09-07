@@ -1585,6 +1585,14 @@ def translate_cwd_for_wsl_backend(cwd: str) -> str:
     can hand the WSL backend a path it can't ``chdir`` into. Map it to the POSIX
     equivalent so the picker, sidebar, and sessions all agree on the workspace.
     No-op off WSL and for paths that are already POSIX.
+
+    Remote ACP clients (e.g. Aside over SSH from macOS) can also send POSIX
+    paths from their own host, such as ``/Users/jpresent``. Those never exist
+    inside WSL, and anchoring the tool environment to them breaks every
+    cwd-dependent tool: terminal ``cd`` fails with exit 126 before the command
+    runs, file reads resolve against the wrong host and return empty, and
+    search-availability probes misfire. Fall back to the WSL home directory
+    for any path that does not exist on this host.
     """
     if not is_wsl():
         return cwd
@@ -1592,7 +1600,10 @@ def translate_cwd_for_wsl_backend(cwd: str) -> str:
         translated = translator(cwd)
         if translated is not None:
             return translated
-    return cwd
+    candidate = str(cwd or "").strip()
+    if candidate and not os.path.isdir(candidate):
+        return os.path.expanduser("~")
+    return candidate
 
 
 _container_detected: bool | None = None

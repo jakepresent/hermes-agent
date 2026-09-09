@@ -12,6 +12,7 @@ import dataclasses
 import importlib
 import sys
 import types
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -21,6 +22,7 @@ from agent.display import get_tool_verb, tool_verb_connector, verb_drops_preview
 from gateway.config import Platform
 from gateway.display_config import resolve_display_setting
 from gateway.session import SessionSource
+from gateway.run_turn_runner import TurnRunner
 from hermes_cli.config_defaults import DEFAULT_CONFIG
 from tests.gateway.test_run_progress_topics import (
     CodeBlockProgressAdapter,
@@ -136,6 +138,16 @@ class TestProgressLabels:
 
     def test_todo_alias_matches_the_renamed_tool(self):
         assert get_tool_verb("todo") == get_tool_verb("todo_list") == "Updating tasks"
+
+    def test_todo_without_argument_preview_still_uses_friendly_label(self):
+        ctx = SimpleNamespace(
+            source=None,
+            last_was_terminal_block=[False],
+            progress_mode="all",
+            expand_terminal_commands=False,
+        )
+        runner = SimpleNamespace(_adapter_for_source=lambda source: None)
+        assert TurnRunner(runner, ctx)._progress_build_message("todo", "", {}) == "⚙️ Updating tasks"
 
     def test_upstream_verbs_are_untouched(self):
         assert get_tool_verb("web_search") == "Searching the web"

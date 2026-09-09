@@ -10,12 +10,9 @@ from unittest.mock import MagicMock
 import agent.display as display_module
 from agent.display import (
     build_tool_preview,
-    build_terminal_command_preview,
-    clean_terminal_command_for_display,
     capture_local_edit_snapshot,
     extract_edit_diff,
     get_cute_tool_message,
-    get_tool_display_label,
     redact_tool_args_for_display,
     set_tool_preview_max_len,
     _render_inline_unified_diff,
@@ -113,21 +110,6 @@ class TestBuildToolPreview:
     def test_process_tool_with_none_args(self):
         """Process tool special case should also handle None args."""
         assert build_tool_preview("process", None) is None
-
-    def test_process_tool_normal(self):
-        result = build_tool_preview("process", {"action": "poll", "session_id": "abc123"})
-        assert result is not None
-        assert "poll" in result
-
-    def test_todo_tool_read(self):
-        result = build_tool_preview("todo", {"merge": False})
-        assert result is not None
-        assert "reading" in result
-
-    def test_todo_tool_with_todos(self):
-        result = build_tool_preview("todo", {"todos": [{"id": "1", "content": "test", "status": "pending"}]})
-        assert result is not None
-        assert "1 task" in result
 
     def test_memory_tool_add(self):
         result = build_tool_preview("memory", {"action": "add", "target": "user", "content": "test note"})

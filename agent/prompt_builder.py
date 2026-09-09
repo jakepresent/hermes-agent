@@ -203,8 +203,10 @@ MEMORY_GUIDANCE = build_memory_guidance(True, True)
 USER_PROFILE_GUIDANCE = build_memory_guidance(False, True)
 
 SESSION_SEARCH_GUIDANCE = (
-    "When the user references something from a past conversation or you suspect relevant cross-session "
-    "context exists, use session_search to recall it before asking them to repeat themselves."
+    "Use the right recall layer before asking the user to repeat context. "
+    "For durable project/user context, preferences, setup facts, and prior decisions, use memory_search first as the fast cache tier. "
+    "Use session_search as the chat archive, search_files/read_file as live disk, and web tools for current external facts. "
+    "When durable context is recovered from a deeper source, treat it as a cache miss and write back a tight canonical summary."
 )
 
 # The opening sentence is worded deliberately: Anthropic's server-side filter rejected the previous phrasing
@@ -1309,8 +1311,11 @@ def _render_skills_index(
     return (
         "## Skills\n"
         "Before replying, scan the skills below. If a skill matches or is even partially relevant to your "
-        "task, you MUST load it with skill_view(name) and follow its instructions. Err on the side of "
-        "loading — it is always better to have context you don't need than to miss critical steps, pitfalls, "
+        "task, you MUST load it with skill_view(name) before first using it in this session and follow its "
+        "instructions. Once a skill is loaded, reuse it for later turns in the same ongoing task; do not call "
+        "skill_view again merely because the user sent a follow-up. Reload only when the task materially changes, "
+        "you need a linked reference, the skill may have changed, or the user asks. Err on the side of loading — "
+        "it is always better to have context you don't need than to miss critical steps, pitfalls, "
         "or established workflows. Skills contain specialized knowledge — API endpoints, tool-specific "
         "commands, and proven workflows that outperform general-purpose approaches. Load the skill "
         f"even if you think you could handle the task with basic tools like {_basic_tools}. "

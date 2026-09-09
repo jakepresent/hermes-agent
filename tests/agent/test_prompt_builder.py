@@ -81,9 +81,13 @@ class TestGuidanceConstants:
         assert "PR numbers" not in MEMORY_GUIDANCE
         assert "tool quirks" not in MEMORY_GUIDANCE
 
-    def test_session_search_guidance_is_simple_cross_session_recall(self):
-        assert "relevant cross-session context exists" in SESSION_SEARCH_GUIDANCE
+    def test_session_search_guidance_routes_recall_layers(self):
+        assert "memory_search first as the fast cache tier" in SESSION_SEARCH_GUIDANCE
+        assert "session_search as the chat archive" in SESSION_SEARCH_GUIDANCE
+        assert "search_files/read_file as live disk" in SESSION_SEARCH_GUIDANCE
+        assert "web tools for current external facts" in SESSION_SEARCH_GUIDANCE
         assert "recent turns of the current session" not in SESSION_SEARCH_GUIDANCE
+        assert "cache miss" in SESSION_SEARCH_GUIDANCE
 
 
 # =========================================================================
@@ -312,6 +316,21 @@ class TestBuildSkillsSystemPrompt:
         clear_skills_system_prompt_cache(clear_snapshot=True)
 
 
+
+    def test_reuses_loaded_skill_within_same_task(self, monkeypatch, tmp_path):
+        """A loaded skill remains usable for a continuing task without a redundant reload."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        skills_dir = tmp_path / "skills" / "learning" / "korean"
+        skills_dir.mkdir(parents=True)
+        (skills_dir / "SKILL.md").write_text(
+            "---\nname: korean\ndescription: Teach Korean\n---\n"
+        )
+
+        result = build_skills_system_prompt()
+
+        assert "before first using it in this session" in result
+        assert "same ongoing task" in result
+        assert "do not call skill_view again merely because the user sent a follow-up" in result
 
     def test_deduplicates_skills(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))

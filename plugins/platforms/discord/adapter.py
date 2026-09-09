@@ -986,6 +986,32 @@ def _read_discord_prompt_timeout() -> int:
 from plugins.platforms.discord.adapter_media import DiscordMediaMixin
 
 
+def _make_invisible_unicode_visible(text: str) -> str:
+    """Fork: render zero-width / bidi / invisible codepoints as \\uXXXX escapes.
+
+    A prompt is a security surface: an approval question or clarify choice
+    containing zero-width joiners, RTL overrides, or invisible separators can
+    read as something different from what it executes. Discord renders those as
+    nothing at all, so the user approves text they cannot actually see.
+    """
+    if not text:
+        return ""
+    out = []
+    for ch in str(text):
+        code = ord(ch)
+        invisible = (
+            code in (0x00AD, 0x061C, 0x180E, 0xFEFF)
+            or 0x200B <= code <= 0x200F
+            or 0x202A <= code <= 0x202E
+            or 0x2060 <= code <= 0x2064
+            or 0x2066 <= code <= 0x2069
+            or 0xFFF9 <= code <= 0xFFFB
+            or 0xE0000 <= code <= 0xE007F
+        )
+        out.append(f"\\u{code:04x}" if invisible else ch)
+    return "".join(out)
+
+
 class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
 
@@ -5174,6 +5200,40 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             body = body[: max(0, budget - len(truncated_suffix))] + truncated_suffix
         return f"{prefix}{body}{suffix}"
 
+    def _clarify_prompt_content(self, question: str, choices: list, hint: str) -> str:
+        """Fork: plain-content clarify payload carrying the NUMBERED choices.
+
+        Buttons and embeds can both fail to render (mobile web, accessibility
+        clients, notification previews), so content must stand alone. Upstream
+        puts only the question and hint there.
+
+        Choices are dropped from the TAIL when the message would exceed
+        ``MAX_MESSAGE_LENGTH`` — the tail is not budgeted by
+        ``_self_contained_prompt_content`` (which only truncates the body), so an
+        unbounded choice list would push the whole send over Discord's limit and
+        fail outright. Losing later choices from the text copy is recoverable:
+        the buttons still carry them.
+        """
+        header = "❓ **Hermes needs your input**"
+        safe_question = _make_invisible_unicode_visible(question)
+        rendered = [_make_invisible_unicode_visible(c) for c in (choices or [])]
+
+        def _tail(items: list) -> str:
+            lines = [""]
+            if items:
+                lines.append("**Choices:**")
+                lines.extend(f"{i}. {c}" for i, c in enumerate(items, start=1))
+                lines.append("")
+            lines.append(hint)
+            return "\n" + "\n".join(lines)
+
+        kept = list(rendered)
+        while True:
+            content = self._self_contained_prompt_content(header, safe_question, tail=_tail(kept))
+            if len(content) <= self.MAX_MESSAGE_LENGTH or not kept:
+                return content
+            kept.pop()
+
     def _approval_mention_content(self) -> Optional[str]:
         """User mentions for approval prompts, gated on ``discord.approval_mentions``
         (``DISCORD_APPROVAL_MENTIONS``). Only numeric allowlist entries; default off."""
@@ -5320,8 +5380,13 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 hint = "Reply in this channel with your answer."
                 embed.add_field(name="Reply", value=hint, inline=False)
                 view = None
-            content = self._self_contained_prompt_content(
-                "❓ **Hermes needs your input**", str(question or "").strip(), tail=f"\n\n{hint}",
+            # Fork: the plain-content copy carries the NUMBERED CHOICES, not just
+            # the hint. Buttons and embeds can both fail to render (mobile web,
+            # accessibility clients, notification previews); without the choices in
+            # content the user sees a question with no options. Invisible codepoints
+            # are escaped so a prompt can't hide part of itself.
+            content = self._clarify_prompt_content(
+                str(question or "").strip(), clean_choices, hint,
             )
             send_kwargs = {"content": content, "embed": embed}
             if view:

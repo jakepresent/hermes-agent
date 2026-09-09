@@ -532,9 +532,58 @@ def check_command_security(command: str) -> dict:
         summary = _NO_DETAILS_SUMMARY.get(action, "")
     # .app is a legitimate gTLD: a warn consisting solely of lookalike_tld findings for .app is a
     # known false positive and is downgraded to allow. Any other finding keeps the warn.
-    if action == "warn" and findings and all(_is_app_tld_finding(f) for f in findings):
+    # Fork: the same downgrade also covers package-similarity findings whose
+    # candidate and "popular package" normalize to the SAME name (aiohttp ≈
+    # aiohttp), which is pure noise rather than a typosquat signal.
+    if action == "warn" and findings and all(_is_suppressible_warn_finding(f) for f in findings):
         return _verdict("allow")
     return _verdict(action, summary, findings)
+
+
+def _is_suppressible_warn_finding(finding: dict) -> bool:
+    """Fork: warn-only Tirith findings known to be false positives."""
+    return _is_app_tld_finding(finding) or _is_package_self_similarity_finding(finding)
+
+
+def _is_package_self_similarity_finding(finding: dict) -> bool:
+    """Fork: True for package-similarity warnings where candidate == popular.
+
+    Tirith's package typo heuristic is useful when a package name is near a
+    DIFFERENT popular package. It is noise when the reported candidate and the
+    popular package normalize to the same name (``aiohttp`` vs ``aiohttp``),
+    which happens routinely on ordinary installs of popular packages.
+    """
+    import re as _re
+
+    if not isinstance(finding, dict) or finding.get("rule_id") != "threat_package_similar_name":
+        return False
+
+    haystack = "\n".join(
+        str(finding.get(field))
+        for field in ("title", "description", "message", "detail", "value", "raw")
+        if finding.get(field) is not None
+    )
+
+    pairs: list[tuple[str, str]] = []
+    for pattern in (
+        r"['\"]?([A-Za-z0-9_.-]+)['\"]?\s*[≈~]\s*['\"]?([A-Za-z0-9_.-]+)['\"]?",
+        r"Package\s+['\"]+([^'\"]+)['\"]\s+in\s+\w+\s+is\s+within\s+edit\s+distance\s+\d+\s+of\s+popular\s+package\s+['\"]([^'\"]+)['\"]",
+    ):
+        pairs.extend(_re.findall(pattern, haystack, flags=_re.IGNORECASE))
+
+    for evidence in finding.get("evidence") or []:
+        if not isinstance(evidence, dict):
+            continue
+        candidate = evidence.get("package") or evidence.get("name") or evidence.get("raw")
+        popular = evidence.get("popular_package") or evidence.get("similar_to") or evidence.get("target")
+        if candidate is not None and popular is not None:
+            pairs.append((str(candidate), str(popular)))
+
+    def _normalize_pkg(name: str) -> str:
+        # PEP 503-style normalization: lowercase and collapse separators.
+        return _re.sub(r"[-_.]+", "-", name.strip().strip("'\"").lower())
+
+    return any(_normalize_pkg(left) == _normalize_pkg(right) for left, right in pairs)
 
 
 def _is_app_tld_finding(finding: dict) -> bool:

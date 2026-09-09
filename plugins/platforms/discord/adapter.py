@@ -61,6 +61,13 @@ def _image_ext_from_content_type(content_type: str) -> str:
     return "png"
 
 
+def _is_svg_attachment(att: Any) -> bool:
+    """Treat SVG uploads as readable documents, not native image payloads."""
+    content_type = str(getattr(att, "content_type", "") or "").split(";", 1)[0].strip().lower()
+    filename = str(getattr(att, "filename", "") or "")
+    return content_type == "image/svg+xml" or os.path.splitext(filename)[1].lower() == ".svg"
+
+
 def _format_discord_markdown_link(label: str, url: str) -> str:
     """Return a Discord Markdown link whose label is not itself a URL (URL-shaped labels can
     win as a broken link; the ``<url>`` angle brackets stop Discord unfurling an embed)."""
@@ -6200,7 +6207,7 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         pending_text_injection: Optional[str] = None
         for att in all_attachments:
             content_type = att.content_type or "unknown"
-            if content_type.startswith("image/"):
+            if content_type.startswith("image/") and not _is_svg_attachment(att):
                 media_urls.append(await self._cache_simple_media(
                     att, content_type, "image", {".jpg", ".jpeg", ".png", ".gif", ".webp"}, ".jpg"))
                 media_types.append(content_type)
@@ -6269,7 +6276,7 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         """MessageType from the first attachment's MIME. Any non-media (or untyped) attachment
         is a DOCUMENT regardless of extension — authorization is the gate, not the file type."""
         content_type = att.content_type or ""
-        if content_type.startswith("image/"):
+        if content_type.startswith("image/") and not _is_svg_attachment(att):
             return MessageType.PHOTO
         if content_type.startswith("video/"):
             return MessageType.VIDEO

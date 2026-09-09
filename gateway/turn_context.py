@@ -21,6 +21,10 @@ class TurnContext:
     _thinking_enabled: bool = False
     progress_mode: str = "off"
     progress_grouping: str = "grouped"
+    # Fork: render the FULL terminal command in progress bubbles without turning
+    # on full verbose mode (which dumps every tool's args). Useful when one
+    # terminal call wraps several shell actions.
+    expand_terminal_commands: bool = False
     tool_progress_enabled: bool = False
     progress_queue: Any = None
     log_queue: Any = None

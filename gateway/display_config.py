@@ -15,6 +15,7 @@ from typing import Any
 _GLOBAL_DEFAULTS: dict[str, Any] = {
     "tool_progress": "all",
     "tool_progress_grouping": "accumulate",  # "accumulate" = edit one bubble; "separate" = one msg per tool
+    "expand_terminal_commands": False,
     "show_reasoning": False,
     "reasoning_style": "code",  # "code" (💭 **Reasoning:** + fence), "blockquote" ("> "), "subtext" ("-# " Discord)
     "tool_preview_length": 0,
@@ -149,6 +150,10 @@ def _norm_int(value: Any) -> int:
 
 _NORMALISERS: dict[str, Any] = {
     "tool_progress": _norm_tristate("all", "off", {"off", "new", "all", "verbose", "log"}),
+    # Fork: render the FULL terminal command in tool-progress bubbles while every
+    # other tool stays at the configured summary level. Useful when one terminal
+    # call wraps several shell actions; verbose mode would dump every tool's args.
+    "expand_terminal_commands": _norm_bool,
     "show_reasoning": _norm_bool,
     "streaming": _norm_bool,
     "interim_assistant_messages": _norm_bool,

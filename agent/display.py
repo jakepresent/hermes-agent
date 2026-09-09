@@ -496,11 +496,15 @@ _TOOL_VERBS: dict[str, str] = {
     "skill_view": "Reading skill", "skills_list": "Listing skills", "skill_manage": "Updating skill",
     "delegate_task": "Delegating", "cronjob_manage": "Scheduling", "clarify": "Asking",
     "memory": "Updating memory", "todo_list": "Updating tasks",
+    # Fork: two tools the user sees often that upstream leaves as raw registry
+    # names in progress lines. "todo" is the pre-rename alias, kept so a
+    # progress line never regresses to the bare identifier.
+    "memory_search": "Searching memory", "todo": "Updating tasks",
 }
 # Verbs that read better without the argument preview appended.
 _TOOL_VERBS_NO_PREVIEW: frozenset[str] = frozenset({"skills_list", "session_search"})
 # Verbs joined to the preview with " for " (search-style phrasing).
-_TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({"web_search", "search_files"})
+_TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({"web_search", "search_files", "memory_search"})
 
 def get_tool_verb(tool_name: str) -> str | None:
     """Friendly verb for a built-in tool, or None (labels disabled / no curated verb);

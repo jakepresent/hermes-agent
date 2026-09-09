@@ -748,6 +748,11 @@ DEFAULT_CONFIG = {
     },
 
     "display": {
+        # Fork: render the FULL terminal command in tool-progress bubbles while
+        # every other tool stays at its summary level. Verbose mode would dump
+        # every tool's args; this narrows that to the shell command only.
+        # Per-platform override: display.platforms.<platform>.expand_terminal_commands
+        "expand_terminal_commands": False,
         # Fork: opt-in Discord mention for long finals and blocking clarify
         # prompts. Final responses mention only after `elapsed_seconds`;
         # clarify prompts mention immediately (they block the run). Approval

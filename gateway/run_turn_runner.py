@@ -33,6 +33,26 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+_SHELL_STRICT_MODE_LINE_RE = re.compile(
+    r"^set\s+(?:(?:-[A-Za-z]+)(?:\s+pipefail)?|-o\s+pipefail)\s*;?$"
+)
+_SHELL_STRICT_MODE_PREFIX_RE = re.compile(
+    r"^\s*set\s+(?:(?:-[A-Za-z]+)(?:\s+pipefail)?|-o\s+pipefail)\s*(?:;|&&)\s*"
+)
+
+
+def _strip_shell_strict_mode(command: str) -> str:
+    """Remove leading shell-safety boilerplate from a displayed command."""
+    text = command.strip()
+    while match := _SHELL_STRICT_MODE_PREFIX_RE.match(text):
+        text = text[match.end():].lstrip()
+    lines = text.splitlines()
+    while lines and _SHELL_STRICT_MODE_LINE_RE.match(lines[0].strip()):
+        lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+    return "\n".join(lines).strip()
+
 
 class TurnRunner:
     """Per-turn collaborator carrying ``GatewayRunner._run_agent_inner``'s tool-progress callbacks."""
@@ -194,7 +214,7 @@ class TurnRunner:
         pl = get_tool_preview_max_len()
         return pl if pl > 0 else 40
 
-    def _progress_terminal_blocks(self, adapter, tool_name, args, emoji):
+    def _progress_terminal_blocks(self, adapter, tool_name, args, emoji, *, hide_strict_preamble=False):
         """(full, short) fenced blocks for a terminal command on markdown platforms, else (None, None).
 
         No language tag: Slack mrkdwn renders it as a literal first code line. Verbose shows the FULL
@@ -206,7 +226,10 @@ class TurnRunner:
             and isinstance(args.get("command"), str) and args["command"].strip()
         ):
             return None, None
-        cmd_full = args["command"].rstrip()
+        raw_command = args["command"].rstrip()
+        cmd_full = _strip_shell_strict_mode(raw_command) if hide_strict_preamble else raw_command
+        if not cmd_full:
+            cmd_full = raw_command
         header = "" if self._ctx.last_was_terminal_block[0] else f"{emoji} {tool_name}\n"
         cap = self._preview_cap()
         lines = cmd_full.splitlines()
@@ -226,9 +249,14 @@ class TurnRunner:
             adapter = self._runner._adapter_for_source(ctx.source)
         except Exception:
             adapter = None
-        code_full, code_short = self._progress_terminal_blocks(adapter, tool_name, args, emoji)
         verbose = ctx.progress_mode == "verbose"
-        code = code_full if verbose else code_short
+        expand_terminal = bool(getattr(ctx, "expand_terminal_commands", False)) and not verbose
+        code_full, code_short = self._progress_terminal_blocks(
+            adapter, tool_name, args, emoji, hide_strict_preamble=expand_terminal
+        )
+        # Fork: expand_terminal_commands picks the full command block without
+        # enabling verbose mode's args dump for every other tool.
+        code = code_full if (verbose or expand_terminal) else code_short
         ctx.last_was_terminal_block[0] = code is not None
         if verbose:
             if code is None and args:

@@ -373,10 +373,17 @@ _MEMORY_ROUTING_BLOCK = (
 )
 
 _MEMORY_REVIEW_PROMPT = (
-    "Review the conversation above and consider saving to memory if appropriate.\n\n"
+    "Review the conversation above conservatively. Save only a genuinely new, durable fact: a "
+    "stable preference, personal detail, correction, expectation, or environment fact that will "
+    "matter in future sessions.\n\n"
     "Memory has " + _MEMORY_ROUTING_BLOCK +
-    "If something stands out, save it once, in the right store, using the memory tool with the "
-    "matching target. If nothing is worth saving, just say 'Nothing to save.' and stop."
+    "Before writing, compare the candidate with memory already present in the conversation. Do not "
+    "duplicate or paraphrase a fact that is already present; replace a stale entry when the new "
+    "fact supersedes it. Do not save project status, task progress, temporary todos, completed-work "
+    "logs, raw evidence, review metadata, memory-usage bookkeeping, or failed-write details. Those "
+    "belong in canonical project/domain files or session history, not injected memory.\n\n"
+    "Doing nothing is the normal outcome. If there is no genuinely new durable fact, say "
+    "'Nothing to save.' and stop."
 )
 
 # Shared shape contract for anything written into a skill. The failure mode this prevents is the
@@ -438,14 +445,15 @@ _DO_NOT_CAPTURE_BLOCK = (
 )
 
 _SKILL_REVIEW_PROMPT = (
-    "Review the conversation above and update the skill library. Be ACTIVE — most sessions produce "
-    "at least one skill update, even if small. A pass that does nothing is a missed learning "
-    "opportunity, not a neutral outcome.\n\n"
+    "Review the conversation above conservatively for reusable procedural learning. Doing nothing "
+    "is the normal outcome. Update the skill library only when the session produced a verified "
+    "reusable workflow, a user correction that changes how this class of task should be handled, or "
+    "proof that an existing skill is wrong or missing a required step.\n\n"
     "Target shape of the library: CLASS-LEVEL skills, each with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth. Not a flat list of narrow one-session skills, and "
     "not an umbrella hoarding a references/ file per session. This shapes HOW you update, not "
     "WHETHER you update.\n\n" + _LESSON_LAYER_BLOCK +
-    "Signals to look for (any one of these warrants action):\n"
+    "Signals worth evaluating (none automatically warrants a write):\n"
     "  • User corrected your style, tone, format, legibility, or verbosity. Frustration signals "
     "like 'stop doing X', 'this is too verbose', 'don't format like this', 'why are you "
     "explaining', 'just give me the answer', 'you always do Y and I hate it', or an explicit "
@@ -482,8 +490,10 @@ _SKILL_REVIEW_PROMPT = (
     "     Add support files via skill_manage action=write_file with file_path starting "
     "'references/', 'templates/', or 'scripts/'. The umbrella's SKILL.md should gain a one-line "
     "pointer to any new support file so future agents know it exists.\n"
-    "  4. CREATE A NEW CLASS-LEVEL UMBRELLA SKILL when no existing skill covers the class. The "
-    "name MUST be at the class level. The name MUST NOT be a specific PR number, error string, "
+    "  4. CREATE A NEW CLASS-LEVEL UMBRELLA SKILL when no existing skill covers the class. Use "
+    "skills_list first and reject a near-duplicate name or trigger. Keep the description "
+    "self-contained and at most 160 characters. The name MUST be at the class level. The name MUST "
+    "NOT be a specific PR number, error string, "
     "feature codename, library-alone name, or 'fix-X / debug-Y / audit-Z-today' session artifact. "
     "If the proposed name only makes sense for today's task, it's wrong — fall back to (1), (2), "
     "or (3).\n\n"
@@ -503,21 +513,24 @@ _SKILL_REVIEW_PROMPT = (
     "If you notice two existing skills that overlap, note it in your reply — the background "
     "curator handles consolidation at scale. Never delete a skill here.\n\n"
     "Do NOT capture" + _DO_NOT_CAPTURE_BLOCK +
-    "'Nothing to save.' is a real option but should NOT be the default. If the session ran "
-    "smoothly with no corrections and produced no new technique, just say 'Nothing to save.' and "
-    "stop. Otherwise, act."
+    "Doing nothing is the normal outcome. If the session ran smoothly with no correction, verified "
+    "reusable technique, or broken skill, say 'Nothing to save.' and stop."
 )
 
 _COMBINED_REVIEW_PROMPT = (
     "Review the conversation above and update two things:\n\n"
     "**Memory**: " + _MEMORY_ROUTING_BLOCK +
-    "**Skills**: how to do this class of task. Be ACTIVE — most sessions produce at least one "
-    "skill update. A pass that does nothing is a missed learning opportunity, not a neutral "
-    "outcome.\n\n"
+    "Save only a genuinely new durable fact. Compare it with memory already present; do not "
+    "duplicate or paraphrase an existing fact. Do not save project status, temporary todos, "
+    "completed-work logs, raw evidence, review metadata, memory-usage bookkeeping, or failed-write "
+    "details. Replace a stale entry when the new fact supersedes it.\n\n"
+    "**Skills**: update only for a verified reusable workflow, a user correction that changes this "
+    "class of task, or proof that an existing skill is wrong or missing a required step. Doing "
+    "nothing is the normal outcome.\n\n"
     "Target shape of the skill library: CLASS-LEVEL skills with a SKILL.md of always-on rules and a "
     "small `references/` set of topical depth — not narrow one-session skills, and not an umbrella "
     "hoarding a references/ file per session.\n\n" + _LESSON_LAYER_BLOCK +
-    "Signals that warrant a skill update (any one is enough):\n"
+    "Signals worth evaluating for a skill update (none automatically warrants a write):\n"
     "  • User corrected your style, tone, format, legibility, verbosity, or approach. Frustration "
     "is a FIRST-CLASS skill signal, not just a memory signal. 'stop doing X', 'don't format like "
     "this', 'I hate when you Y' — embed the lesson in the skill that governs that task so the next "
@@ -537,8 +550,10 @@ _COMBINED_REVIEW_PROMPT = (
     "`templates/<name>.<ext>` for starter files meant to be copied and modified; "
     "`scripts/<name>.<ext>` for statically re-runnable actions (verification, fixture generators, "
     "probes). Add a one-line pointer in SKILL.md so future agents find them.\n"
-    "  4. CREATE A NEW CLASS-LEVEL UMBRELLA when nothing exists. Name at the class level — NOT a "
-    "PR number, error string, codename, library-alone name, or 'fix-X / debug-Y' session artifact. "
+    "  4. CREATE A NEW CLASS-LEVEL UMBRELLA when nothing exists. Use skills_list first and reject a "
+    "near-duplicate name or trigger. Keep the description self-contained and at most 160 characters. "
+    "Name at the class level — NOT a PR number, error string, codename, library-alone name, or "
+    "'fix-X / debug-Y' session artifact. "
     "If the name only fits today's task, fall back to (1), (2), or (3).\n\n"
     "Read-before-write (ENFORCED — skill_manage refuses otherwise): before patching or editing an "
     "existing skill's SKILL.md, call skill_view(name) during this review; before overwriting or "
@@ -556,8 +571,8 @@ _COMBINED_REVIEW_PROMPT = (
     "If you notice overlapping existing skills, mention it — the background curator handles "
     "consolidation. Never delete a skill here.\n\n"
     "Do NOT capture as skills" + _DO_NOT_CAPTURE_BLOCK +
-    "Act on whichever of the two dimensions has real signal. If genuinely nothing stands out on "
-    "either, say 'Nothing to save.' and stop — but don't reach for that conclusion as a default."
+    "Act only on a dimension with verified durable signal. If neither qualifies, say 'Nothing to "
+    "save.' and stop."
 )
 
 

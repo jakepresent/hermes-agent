@@ -185,6 +185,7 @@ def _str_keyed(value: Any) -> Any:
 
 
 _TELEGRAM = frozenset({Platform.TELEGRAM})
+_DISCORD = frozenset({Platform.DISCORD})
 _DISCORD_SLACK = frozenset({Platform.DISCORD, Platform.SLACK})
 
 def _plain(*keys: str) -> tuple:
@@ -209,6 +210,8 @@ _SHARED_KEYS: tuple = (
     ),
     ("channel_skill_bindings", _DISCORD_SLACK, None),
     ("channel_prompts", None, _str_keyed),
+    ("max_split_messages", _DISCORD, None),
+    ("chunk_indicators", _DISCORD, None),
     *_plain("gateway_restart_notification", "typing_indicator", "typing_status_text"),
 )
 

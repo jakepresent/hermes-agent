@@ -15,7 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import PlatformConfig
+from gateway.config import Platform, PlatformConfig
+from gateway.config_loader import _bridged_keys
 
 
 def _ensure_discord_mock():
@@ -46,8 +47,8 @@ MAX = DiscordAdapter.MAX_MESSAGE_LENGTH
 CAP = DiscordAdapter.MAX_SPLIT_MESSAGES
 
 
-def _make_adapter():
-    return DiscordAdapter(PlatformConfig(enabled=True, token="***"))
+def _make_adapter(extra=None):
+    return DiscordAdapter(PlatformConfig(enabled=True, token="***", extra=extra or {}))
 
 
 def _huge_content(chars: int = 60_000) -> str:
@@ -71,6 +72,41 @@ class TestCapSplitChunks:
         assert "delivery limit" in capped[-1]
         # The notice itself must stay under Discord's per-message cap.
         assert len(capped[-1]) <= MAX
+
+    def test_configurable_cap_preserves_the_flood_guard(self):
+        adapter = _make_adapter({"max_split_messages": 16})
+        chunks = [f"chunk-{i}-" + "z" * 100 for i in range(40)]
+
+        capped = adapter._cap_split_chunks(chunks)
+
+        assert len(capped) == 16
+        assert "delivery limit (16 messages)" in capped[-1]
+
+
+class TestChunkIndicators:
+    def test_stock_default_keeps_chunk_indicators(self):
+        chunks = _make_adapter()._split_discord_message("word " * 1000)
+
+        assert len(chunks) > 1
+        assert chunks[0].endswith(f" (1/{len(chunks)})")
+
+    def test_config_can_disable_chunk_indicators(self):
+        chunks = _make_adapter({"chunk_indicators": False})._split_discord_message("word " * 1000)
+
+        assert len(chunks) > 1
+        assert not chunks[0].endswith(f" (1/{len(chunks)})")
+        assert not chunks[-1].endswith(f" ({len(chunks)}/{len(chunks)})")
+
+
+def test_top_level_discord_delivery_settings_bridge_into_platform_extra():
+    bridged = _bridged_keys(
+        Platform.DISCORD,
+        {"max_split_messages": 16, "chunk_indicators": False},
+        {},
+    )
+
+    assert bridged["max_split_messages"] == 16
+    assert bridged["chunk_indicators"] is False
 
 
 class TestSendCap:

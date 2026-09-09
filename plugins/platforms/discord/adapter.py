@@ -966,6 +966,20 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in {"true", "1", "yes", "on"}
 
 
+def _config_bool(value: Any, default: bool) -> bool:
+    """Parse a bool-like platform-extra value without truthifying ``"false"``."""
+    if isinstance(value, bool):
+        return value
+    if value is None or value == "":
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return default
+
+
 def _read_discord_prompt_timeout() -> int:
     """Timeout (seconds) for Discord button views from ``approvals.discord_prompt_timeout``
     (default 300), clamped to [MIN, MAX] so a typo can't make prompts vanish or outlive tokens."""
@@ -1126,6 +1140,14 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         self._dedup = MessageDeduplicator()
         # Reply threading mode: "off", "first" (default; first chunk only), "all" (every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        raw_split_cap = self.config.extra.get("max_split_messages", self.MAX_SPLIT_MESSAGES)
+        try:
+            split_cap = int(raw_split_cap)
+        except (TypeError, ValueError):
+            split_cap = self.MAX_SPLIT_MESSAGES
+        # Keep a real flood guard under malformed config; 100 still bounds pathological output.
+        self._max_split_messages = min(100, max(2, split_cap))
+        self._chunk_indicators = _config_bool(self.config.extra.get("chunk_indicators"), True)
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
         # Bot's last message ID per channel: lets history backfill skip the full channel.history() scan.
         self._last_self_message_id: Dict[str, str] = {}
@@ -2920,18 +2942,31 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         chars as 31 back-to-back Discord messages. The full response remains available in the gateway
         session history / logs. See #86581.
         """
-        if len(chunks) <= self.MAX_SPLIT_MESSAGES:
+        cap = getattr(self, "_max_split_messages", self.MAX_SPLIT_MESSAGES)
+        if len(chunks) <= cap:
             return chunks
-        kept = chunks[: self.MAX_SPLIT_MESSAGES - 1]
-        dropped_chars = sum(len(c) for c in chunks[self.MAX_SPLIT_MESSAGES - 1 :])
+        kept = chunks[: cap - 1]
+        dropped_chars = sum(len(c) for c in chunks[cap - 1 :])
         notice = (
             f"\n\n⚠️ **Response truncated** — this reply exceeded the "
-            f"delivery limit ({self.MAX_SPLIT_MESSAGES} messages). "
+            f"delivery limit ({cap} messages). "
             f"{dropped_chars} characters were not delivered; the full "
             f"response is in the session logs."
         )
         kept.append(notice)
         return kept
+
+    def _split_discord_message(self, formatted: str) -> List[str]:
+        """Split one Discord payload, optionally removing the shared ``(x/y)`` indicators."""
+        chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+        if self._chunk_indicators or len(chunks) <= 1:
+            return chunks
+        total = len(chunks)
+        stripped: List[str] = []
+        for index, chunk in enumerate(chunks, start=1):
+            suffix = f" ({index}/{total})"
+            stripped.append(chunk[:-len(suffix)] if chunk.endswith(suffix) else chunk)
+        return stripped
 
     async def send(
         self,
@@ -2973,9 +3008,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 result = await self._send_to_forum(channel, content)
                 return await self._record_response_async(reply_to, result, content, final_delivery)
             formatted = self.format_message(content)
-            chunks = self._cap_split_chunks(
-                self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-            )
+            chunks = self._cap_split_chunks(self._split_discord_message(formatted))
             message_ids = []
             reference = self._reply_reference_for_send(reply_to, channel)
             for i, chunk in enumerate(chunks):
@@ -3035,7 +3068,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         """Create a forum thread post with the message as starter (forum channels reject direct
         sends; name from the first line). Chunk failures land in ``raw_response['warnings']``."""
         formatted = self.format_message(content)
-        chunks = self._cap_split_chunks(self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH))
+        chunks = self._cap_split_chunks(self._split_discord_message(formatted))
         thread_name = _derive_forum_thread_name(content)
         starter_content = chunks[0] if chunks else thread_name
         try:
@@ -3140,7 +3173,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             if len(formatted) > self.MAX_MESSAGE_LENGTH:
                 if finalize:
                     return await self._edit_overflow_split(channel, msg, message_id, content)
-                formatted = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)[0]
+                formatted = self._split_discord_message(formatted)[0]
                 _saturated_preview = True
                 # Saturated-preview dedup: past the cap every edit is the same text; skip until finalize.
                 # Re-sending it is a visual no-op that still counts against Discord's edit rate limit — skip
@@ -3159,7 +3192,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 if self._is_length_overflow_error(edit_err):
                     if finalize:
                         return await self._edit_overflow_split(channel, msg, message_id, content)
-                    truncated = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)[0]
+                    truncated = self._split_discord_message(formatted)[0]
                     if self._last_overflow_preview.get(_preview_key) == truncated:
                         # Saturated-preview dedup (see pre-flight path above).
                         return SendResult(success=True, message_id=message_id)
@@ -3200,7 +3233,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         A continuation failure still reports success plus ``partial_overflow`` so the consumer
         delivers the tail; only a first-chunk edit failure returns ``success=False``."""
         formatted = self.format_message(content)
-        chunks = self._cap_split_chunks(self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH))
+        chunks = self._cap_split_chunks(self._split_discord_message(formatted))
         if len(chunks) <= 1:
             # Defensive: pre-flight should guarantee >1 chunk; otherwise edit normally.
             await msg.edit(content=chunks[0] if chunks else formatted)

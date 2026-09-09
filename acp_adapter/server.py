@@ -227,6 +227,11 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
     """ACP Agent implementation wrapping Hermes AIAgent."""
 
     _EDIT_APPROVAL_POLICY_CONFIG_ID = "edit_approval_policy"
+    # Fork: reasoning-effort selector surfaced to ACP clients (Aside/Zed) as a
+    # native dropdown. Upstream accepts config-option writes but advertises no
+    # options, so without this the editor shows no thought-level control.
+    _THOUGHT_LEVEL_CONFIG_ID = "thought_level"
+    _THOUGHT_LEVEL_VALUES = ("none", "minimal", "low", "medium", "high", "xhigh")
     _EDIT_APPROVAL_POLICY_DEFAULT = "ask"
     _MODE_DEFAULT = "default"
     # mode id -> (edit approval policy, display name, description)
@@ -282,6 +287,38 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             current_mode_id=current,
             available_modes=[SessionMode(id=m, name=n, description=d) for m, (_p, n, d) in self._MODES.items()],
         )
+
+    def _thought_level_current_value(self, state: SessionState) -> str:
+        """Fork: current reasoning effort as an ACP select value."""
+        reasoning_config = getattr(state.agent, "reasoning_config", None)
+        if isinstance(reasoning_config, dict):
+            if reasoning_config.get("enabled") is False:
+                return "none"
+            effort = str(reasoning_config.get("effort") or "").strip().lower()
+            if effort in self._THOUGHT_LEVEL_VALUES:
+                return effort
+        return "medium"
+
+    def _session_config_options(self, state: SessionState) -> list[Any]:
+        """Fork: advertise the thought-level selector to ACP clients."""
+        from acp.schema import SessionConfigOptionSelect, SessionConfigSelectOption
+        return [
+            SessionConfigOptionSelect(
+                type="select",
+                id=self._THOUGHT_LEVEL_CONFIG_ID,
+                name="Thought level",
+                category="thought_level",
+                description="Controls the reasoning effort Hermes requests from reasoning-capable models.",
+                current_value=self._thought_level_current_value(state),
+                options=[
+                    SessionConfigSelectOption(
+                        value=value,
+                        name=("Off" if value == "none" else value.capitalize()),
+                    )
+                    for value in self._THOUGHT_LEVEL_VALUES
+                ],
+            )
+        ]
 
     def _edit_approval_policy_for_state(self, state: SessionState) -> tuple[str, str | None]:
         mode = str(getattr(state, "mode", "") or self._MODE_DEFAULT)
@@ -572,6 +609,8 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
         return {
             "models": self._build_model_state(state),
             "modes": self._session_modes(state),
+            # Fork: advertise the thought-level selector on new/load/resume.
+            "config_options": self._session_config_options(state),
             "field_meta": self._provenance_meta(state.session_id, getattr(state.agent, "session_id", state.session_id)),
         }
 
@@ -963,6 +1002,12 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
 
         if str(config_id) == self._EDIT_APPROVAL_POLICY_CONFIG_ID:
             state.mode = self._EDIT_APPROVAL_POLICY_TO_MODE.get(str(value), self._MODE_DEFAULT)
+        elif str(config_id) == self._THOUGHT_LEVEL_CONFIG_ID:
+            # Fork: map the ACP select value onto the agent's reasoning config.
+            from hermes_constants import parse_reasoning_effort
+            parsed = parse_reasoning_effort(str(value))
+            if parsed is not None:
+                state.agent.reasoning_config = parsed
         else:
             options = getattr(state, "config_options", None)
             if not isinstance(options, dict):
@@ -971,7 +1016,7 @@ class HermesACPAgent(SlashCommandsMixin, acp.Agent):
             state.config_options = options
         self.session_manager.save_session(session_id)
         logger.info("Session %s: config option %s updated", session_id, config_id)
-        return SetSessionConfigOptionResponse(config_options=[])
+        return SetSessionConfigOptionResponse(config_options=self._session_config_options(state))
 
 
 # ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----

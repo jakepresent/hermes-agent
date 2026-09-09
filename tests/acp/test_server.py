@@ -61,7 +61,12 @@ def agent(mock_manager):
 async def test_new_session_exposes_edit_approvals_as_modes_not_config_options(agent):
     resp = await agent.new_session(cwd="/tmp")
 
-    assert resp.config_options is None
+    # Fork: the thought-level selector IS advertised as a config option, so
+    # this is no longer None. The behavior this test guards — edit approvals
+    # are exposed as MODES, never as a config option — is asserted directly.
+    advertised = {opt.id for opt in (resp.config_options or [])}
+    assert "edit_approval_policy" not in advertised
+    assert advertised == {"thought_level"}
     assert isinstance(resp.modes, SessionModeState)
     assert resp.modes.current_mode_id == "default"
     assert [(mode.id, mode.name) for mode in resp.modes.available_modes] == [
@@ -82,7 +87,12 @@ async def test_set_config_option_persists_edit_approval_policy_without_advertisi
     state = agent.session_manager.get_session(resp.session_id)
 
     assert isinstance(update, SetSessionConfigOptionResponse)
-    assert update.config_options == []
+    # Fork: the response echoes the live option set (thought level) rather than
+    # an empty list. What matters here is unchanged: setting the edit-approval
+    # policy moves the session MODE and does not add a config option for it.
+    echoed = {opt.id for opt in (update.config_options or [])}
+    assert "edit_approval_policy" not in echoed
+    assert echoed == {"thought_level"}
     assert getattr(state, "mode", None) == "accept_edits"
 
 
@@ -390,7 +400,9 @@ class TestSessionConfiguration:
         )
 
         assert mode_result == {}
-        assert config_result["configOptions"] == []
+        # Fork: the router echoes the advertised option set; the point of this
+        # test is that both stable session/config methods route and respond.
+        assert [o["id"] for o in config_result["configOptions"]] == ["thought_level"]
 
 
 

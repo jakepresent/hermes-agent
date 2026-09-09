@@ -95,9 +95,41 @@ def _register_task_cwd(task_id: str, cwd: str) -> None:
         return
     try:
         from tools.terminal_tool import register_task_env_overrides
-        register_task_env_overrides(task_id, {"cwd": _translate_acp_cwd(cwd)})
+        register_task_env_overrides(task_id, {"cwd": _tool_cwd_for_this_host(cwd)})
     except Exception:
         logger.debug("Failed to register ACP task cwd override", exc_info=True)
+
+
+def _tool_cwd_for_this_host(cwd: str) -> str:
+    """Fork: keep the TOOL working directory on a path that exists here.
+
+    Remote ACP clients (Aside over SSH from macOS) send POSIX paths from their
+    OWN host, e.g. ``/Users/jpresent``. Those never exist inside WSL, and
+    anchoring the tool environment there breaks every cwd-dependent tool:
+    terminal ``cd`` fails with exit 126 before the command runs, file reads
+    resolve against the wrong host and come back empty, and search-availability
+    probes misfire.
+
+    Two deliberate narrowings, both load-bearing:
+
+    * A path that ``_translate_acp_cwd`` rewrote (Windows drive / ``wsl.localhost``
+      UNC) is trusted as-is and never existence-checked — an unmounted drive
+      must still map to ``/mnt/<x>/...`` rather than collapsing to ``~``.
+    * Applied ONLY at the tool-environment binding, never inside
+      ``_translate_acp_cwd``. Session metadata, history filtering and
+      ``list_sessions`` cwd comparisons must keep the client's original path,
+      and those legitimately reference directories absent from this host.
+    """
+    raw = str(cwd or "").strip()
+    translated = _translate_acp_cwd(raw)
+    if translated != raw:
+        # A cross-boundary rewrite happened; trust it.
+        return translated
+    if raw and not os.path.isdir(raw):
+        fallback = os.path.expanduser("~")
+        logger.info("ACP cwd %s not present on this host; using %s for tools", raw, fallback)
+        return fallback
+    return translated
 
 
 def _expand_acp_enabled_toolsets(toolsets: List[str] | None = None,
@@ -296,8 +328,15 @@ class SessionManager:
                 if not state.history:
                     # Empty editor probes stay ephemeral; copied fork history persists.
                     return
+                # Persist the FULL runtime snapshot (cwd + provider/base_url/
+                # api_mode), not just cwd. _restore() reads meta["provider"] and
+                # meta["base_url"] to rebuild the agent on its original provider;
+                # writing only {"cwd": ...} here made a restored session silently
+                # adopt whatever provider the CONFIG happens to name now, which
+                # is a different model/billing destination than the one the
+                # conversation started on.
                 db.create_session(session_id=state.session_id, source="acp", model=model_str,
-                                  model_config={"cwd": state.cwd})
+                                  model_config=session_meta)
             else:
                 try:
                     db.update_session_meta(state.session_id, json.dumps(session_meta), model_str)

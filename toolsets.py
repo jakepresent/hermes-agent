@@ -22,6 +22,7 @@ _HERMES_CORE_TOOLS = [
     "browser_exec",  # replaces the other browser tools when browser.backend is "browser-use"
     "text_to_speech",
     "todo_list", "memory",
+    "memory_search",
     "session_search",
     "clarify",
     "execute_code", "delegate_task",
@@ -128,6 +129,7 @@ TOOLSETS = {
     "todo": _ts("Task planning and tracking for multi-step work", ["todo_list"]),
     "memory": _ts("Persistent memory across sessions (personal notes + user profile)", ["memory"]),
     "context_engine": _ts("Runtime tools exposed by the active context engine"),
+    "memory_search": _ts("Search durable memory files (ChatWorkspace, Hermes memories) with semantic + keyword ranking", ["memory_search"]),
     "session_search": _ts("Search and recall past conversations with summarization", ["session_search"]),
     "connections": _ts("Remote connector discovery, execution, and account authorization", ["manage_connections"]),
     "project": _ts("Desktop Projects — create/switch named workspaces (GUI sessions only)", ["desktop_project"]),

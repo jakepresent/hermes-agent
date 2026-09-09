@@ -134,6 +134,21 @@ dependencies = [
   "browser-harness==0.1.13; python_version >= '3.14'",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1; python_version >= '3.14'",
+  # --- Jake fork dependencies (memory_search + SVG vision). Fork-only. ---
+  # Local vector search for Gemini-backed durable memory retrieval
+  # (tools/memory_search_tool.py).
+  "sqlite-vec==0.1.9; python_version >= '3.14'",
+  # Local vector scoring for the Gemini semantic path
+  # (_normalize_dense_matrix). Upstream only declares numpy under voice/wake
+  # extras; memory_search is a core fork tool, so it is declared here.
+  "numpy==2.4.3; python_version >= '3.14'",
+  # Required by the fork's Gemini-backed memory_search query path. Omitting it
+  # makes a fully populated semantic cache fall back to keyword after a venv
+  # rebuild.
+  "google-genai==2.12.1; python_version >= '3.14'",
+  # SVG rasterization for vision_tools_image_prep (first rasterizer it tries).
+  "cairosvg==2.9.1; python_version >= '3.14'",
+  # --- end Jake fork dependencies ---
   "fastapi>=0.104.0,<1; python_version >= '3.14'",
   # CIDR-aware forwarded_allow_ips requires uvicorn >=0.31.0.
   # uvicorn's [standard] extra bundles uvloop, httptools, and watchfiles.

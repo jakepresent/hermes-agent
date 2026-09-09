@@ -1430,6 +1430,26 @@ class TurnRunner:
                 flush(timeout=3.0)
         except Exception:
             logger.debug("Stream-consumer flush before clarify prompt failed", exc_info=True)
+        # Fork: a clarify prompt BLOCKS the run, so mention the requester
+        # immediately (no elapsed gate) when display.long_turn_mention is on.
+        # Best-effort: a mention failure must never stop the question going out.
+        _clarify_metadata = ctx._status_thread_metadata
+        try:
+            from gateway.run import (
+                _long_turn_mention_text_for_source, _metadata_with_long_turn_mention,
+                _platform_config_key,
+            )
+            _clarify_metadata = _metadata_with_long_turn_mention(
+                _clarify_metadata,
+                _long_turn_mention_text_for_source(
+                    ctx.source, ctx.user_config,
+                    _platform_config_key(ctx.source.platform), surface="clarify",
+                ),
+            )
+        except Exception as _mention_err:
+            logger.debug("clarify mention resolution failed: %s", _mention_err)
+        # The native card and the plain-text fallback share send_kwargs, so both carry the mention.
+        send_kwargs["metadata"] = _clarify_metadata
         fut = self._schedule(
             ctx._status_adapter.send_clarify(**send_kwargs),
             "Clarify send failed to schedule",

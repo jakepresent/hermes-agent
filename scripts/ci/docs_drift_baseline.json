@@ -44,6 +44,8 @@
   "desktop.renderer_accessibility",
   "discord.approval_mentions",
   "discord.dm_role_auth_guild",
+  "discord.rest_liveness_failure_threshold",
+  "discord.rest_liveness_interval_seconds",
   "discord.server_actions",
   "display.battery",
   "display.busy_steer_ack_enabled",

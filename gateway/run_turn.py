@@ -2017,6 +2017,25 @@ class GatewayTurnMixin:
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
+            # Fork: after a long turn the user has usually looked away — prefix an
+            # opt-in mention so the answer surfaces in a busy channel. Time-gated by
+            # display.long_turn_mention.elapsed_seconds; silent turns are left alone.
+            if response and not _intentional_silence:
+                try:
+                    from gateway.run import (
+                        _apply_long_turn_mention_to_response, _load_gateway_config,
+                        _long_turn_mention_text_for_source, _platform_config_key,
+                    )
+                    response = _apply_long_turn_mention_to_response(
+                        response,
+                        _long_turn_mention_text_for_source(
+                            source, _load_gateway_config(),
+                            _platform_config_key(source.platform),
+                            elapsed_seconds=_turn_seconds, surface="final",
+                        ),
+                    )
+                except Exception as _mention_err:
+                    logger.debug("long-turn mention resolution failed: %s", _mention_err)
             await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
 
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (

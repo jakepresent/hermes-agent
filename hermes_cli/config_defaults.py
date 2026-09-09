@@ -748,6 +748,18 @@ DEFAULT_CONFIG = {
     },
 
     "display": {
+        # Fork: opt-in Discord mention for long finals and blocking clarify
+        # prompts. Final responses mention only after `elapsed_seconds`;
+        # clarify prompts mention immediately (they block the run). Approval
+        # prompts are NOT handled here — upstream's `discord.approval_mentions`
+        # already owns that path.
+        "long_turn_mention": {
+            "enabled": False,
+            "on_final": True,
+            "on_clarify": True,
+            "elapsed_seconds": None,
+            "rules": [],  # back-compat: first rule carrying an elapsed key wins
+        },
         "compact": False,
         "personality": "",
         "resume_display": "full",

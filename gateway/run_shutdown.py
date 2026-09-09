@@ -1552,6 +1552,11 @@ class GatewayShutdownMixin:
         self._running = False
         self._clear_plugin_message_injector()
         self._draining = True
+        # Fork: stop the out-of-loop watchdog before teardown blocks the loop,
+        # otherwise a slow-but-legitimate shutdown looks like a wedge.
+        stop_watchdog = getattr(self, "_stop_event_loop_watchdog", None)
+        if callable(stop_watchdog):
+            stop_watchdog()
         # getattr-guards: shutdown-path test doubles may lack the room worker / systemd watchdog.
         stop_room_worker = getattr(self, "_stop_hosted_room_worker", None)
         if callable(stop_room_worker):

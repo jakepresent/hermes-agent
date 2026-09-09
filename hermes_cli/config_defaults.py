@@ -1447,6 +1447,12 @@ DEFAULT_CONFIG = {
         # REST) as proof events still arrive. Any value 0 disables it.
         "websocket_liveness_interval_seconds": 15,
         "websocket_liveness_failure_threshold": 2,
+        # Fork: complementary REST probe. The websocket can stay healthy while the
+        # REST API is degraded or the token is revoked — connected but unable to
+        # act. Slower interval and higher threshold than the WS probe, since a REST
+        # blip is common and only a sustained failure means anything.
+        "rest_liveness_interval_seconds": 60,
+        "rest_liveness_failure_threshold": 3,
         "websocket_heartbeat_ack_max_age_seconds": 60,
         "websocket_max_latency_seconds": 30,
         # per-channel ephemeral system prompts (forum parents apply to child threads)
@@ -1902,6 +1908,18 @@ DEFAULT_CONFIG = {
     "gateway": {  # Gateway settings (messaging platforms: Telegram, Discord, Slack, ...).
         # Named-profile allowlist for multiplex mode. None = serve all; [] = default only.
         "multiplex_profile_allowlist": None,
+        # Fork: out-of-loop event-loop watchdog. An async watchdog cannot observe a
+        # WEDGED loop (it stops being scheduled too), so this one runs on a real OS
+        # thread, samples a heartbeat the loop publishes, writes forensics and exits
+        # with the service-restart code so the supervisor restarts the gateway.
+        # threshold_seconds is deliberately generous: a long legitimate turn must
+        # never look like a wedge.
+        "event_loop_watchdog": {
+            "enabled": True,
+            "heartbeat_seconds": 5.0,
+            "threshold_seconds": 600.0,
+            "check_seconds": 5.0,
+        },
         # Seconds to let a SIGTERM-interrupted gateway agent unwind before adapter/database
         # teardown. Keep short so service-manager shutdowns don't exhaust their stop budget.
         "signal_interrupt_grace_timeout": 1,

@@ -1204,6 +1204,8 @@ class GatewayStartupMixin:
                 "will fail closed until supervision recovers it", exc_info=True,
             )
         self._spawn_supervised(self._hosted_room_worker_watcher, "hosted_room_worker")
+        # Fork: heartbeat task — the watchdog thread reads the tick it publishes.
+        self._start_loop_heartbeat_task()
         self._start_loop_heartbeat_task()
         from gateway.run_heartbeat_restore import restore_heartbeat_watches
         self._start_heartbeat_poller()  # Keep retrying even when the first scan is empty.
@@ -1358,6 +1360,8 @@ class GatewayStartupMixin:
         self._running = True
         self._install_plugin_message_injector()
         self._update_runtime_status("running")
+        # Fork: start the out-of-loop watchdog once the gateway is live.
+        self._start_event_loop_watchdog()
         await self._start_finish_wiring(connected_count)
         self._start_spawn_background_watchers()
         logger.info("Press Ctrl+C to stop")

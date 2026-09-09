@@ -1097,6 +1097,18 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         )
         self._liveness_task: Optional[asyncio.Task] = None
         self._liveness_notification_task: Optional[asyncio.Task] = None
+        # Fork: complementary REST liveness probe. Upstream's WS probe samples the
+        # websocket, which stays "healthy" when Discord's REST API is degraded or
+        # the token is revoked — the gateway then sits connected but unable to act.
+        # Independent interval/threshold/task so neither probe can mask the other.
+        self._rest_liveness_interval_seconds = self._finite_positive_config_float(
+            "rest_liveness_interval_seconds", 60.0,
+        )
+        self._rest_liveness_failure_threshold = self._config_int(
+            "rest_liveness_failure_threshold", 3,
+        )
+        self._rest_liveness_task: Optional[asyncio.Task] = None
+        self._rest_liveness_notification_task: Optional[asyncio.Task] = None
         # True while disconnect() intentionally closes discord.py (done callback: shutdown vs crash).
         self._disconnecting = False
         self._missed_message_backfill_task: Optional[asyncio.Task] = None
@@ -1323,6 +1335,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             )
             self._running = True
             self._start_liveness_probe()
+            self._start_rest_liveness_probe()
             # Plugin-registered native handlers (discord.py Bot — add_listener()/event hooks).
             self._wire_plugin_handlers(self._client)
             return True
@@ -1744,6 +1757,82 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         except Exception:
             logger.debug("[%s] Fatal-error handler raised", self.name, exc_info=True)
 
+    def _start_rest_liveness_probe(self) -> None:
+        """Fork: start the complementary periodic Discord REST health probe.
+
+        The websocket probe cannot detect REST-side failure (revoked token,
+        API outage, permission loss): the socket keeps receiving events while
+        every outbound action fails.
+        """
+        if (
+            self._rest_liveness_interval_seconds <= 0
+            or self._rest_liveness_failure_threshold <= 0
+        ):
+            return
+        if self._rest_liveness_task and not self._rest_liveness_task.done():
+            return
+        self._rest_liveness_task = asyncio.create_task(self._rest_liveness_loop())
+
+    async def _rest_liveness_loop(self) -> None:
+        """Fork: force a reconnect after repeated Discord REST failures."""
+        fails = 0
+        while self._running:
+            try:
+                await asyncio.sleep(self._rest_liveness_interval_seconds)
+            except asyncio.CancelledError:
+                return
+            client = self._client
+            if not self._running or client is None or self._disconnecting:
+                return
+            if hasattr(client, "is_closed") and client.is_closed():
+                return
+            user = getattr(client, "user", None)
+            if user is None:
+                continue
+            try:
+                await client.fetch_user(user.id)
+                fails = 0
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                fails += 1
+                logger.warning(
+                    "[%s] Discord REST liveness probe failed (%d/%d): %s",
+                    self.name, fails, self._rest_liveness_failure_threshold, exc,
+                )
+                if fails < self._rest_liveness_failure_threshold:
+                    continue
+                self._disconnecting = True
+                self._set_fatal_error(
+                    "discord_rest_health_stale",
+                    f"Discord REST liveness probe failed {fails} times in a row",
+                    retryable=True,
+                )
+                self._rest_liveness_notification_task = asyncio.create_task(
+                    self._notify_liveness_fatal_error(client)
+                )
+                return
+
+    async def _cancel_rest_liveness_task(self) -> None:
+        """Fork: cancel and await the complementary REST liveness tasks."""
+        current = asyncio.current_task()
+        for task_name in ("_rest_liveness_task", "_rest_liveness_notification_task"):
+            task = getattr(self, task_name, None)
+            if task is None:
+                continue
+            if task is current:
+                setattr(self, task_name, None)
+                continue
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("[%s] REST liveness task shutdown failed", self.name, exc_info=True)
+            setattr(self, task_name, None)
+
     async def _cancel_liveness_task(self) -> None:
         """Cancel and await liveness tasks without awaiting the current task."""
         current = asyncio.current_task()
@@ -1811,6 +1900,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         self._disconnecting = True
         # Cancel the liveness probe first so it can't fire a spurious fatal/reconnect mid-teardown.
         await self._cancel_liveness_task()
+        await self._cancel_rest_liveness_task()
         # Leave voice *before* cancelling the bot task: VoiceClient.disconnect() needs the main
         # gateway WS (run by the bot task) or it blocks until the timeout.
         for guild_id in list(self._voice_clients.keys()):

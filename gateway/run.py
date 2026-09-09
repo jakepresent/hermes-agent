@@ -1145,6 +1145,20 @@ def _message_timestamps_enabled(user_config: Optional[dict]) -> bool:
     return bool(mt)
 
 
+from gateway.restart import GATEWAY_SERVICE_RESTART_EXIT_CODE as _GATEWAY_RESTART_EXIT_CODE
+
+# --- Fork: out-of-loop gateway event-loop watchdog ----------------------------
+# An async watchdog cannot detect a WEDGED event loop: if the loop stops
+# scheduling, the watchdog coroutine stops running too. This one lives on a real
+# OS thread, so a blocked loop (sync call in async context, C-extension deadlock)
+# is still observed. It writes forensics, then hard-exits with the service
+# restart code so the supervisor brings the gateway back.
+_GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_ENABLED = True
+_GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_HEARTBEAT_SECONDS = 5.0
+_GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_THRESHOLD_SECONDS = 600.0
+_GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_CHECK_SECONDS = 5.0
+
+
 # --- Fork: long-turn / blocking-prompt Discord mentions -----------------------
 # Upstream has no equivalent. A long agent turn or a blocking clarify question
 # can sit unnoticed in a busy channel; an opt-in mention pulls the requester
@@ -3624,6 +3638,13 @@ class GatewayRunner(
     def _init_lifecycle_state(self) -> None:
         """Initialise run/exit/restart flags, per-session state, and completion-delivery bookkeeping."""
         self._running = self._exit_cleanly = self._exit_with_failure = self._draining = False
+        # Fork: out-of-loop event-loop watchdog state.
+        self._event_loop_watchdog_config = self._load_event_loop_watchdog_config()
+        self._event_loop_watchdog_last_tick = time.monotonic()
+        self._event_loop_watchdog_stop_event = threading.Event()
+        self._event_loop_watchdog_task: Optional[asyncio.Task] = None
+        self._event_loop_watchdog_thread: Optional[threading.Thread] = None
+        self._loop_heartbeat_task: Optional[asyncio.Task] = None
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
         self._exit_reason: Optional[str] = None
@@ -4003,6 +4024,235 @@ class GatewayRunner(
     should_exit_with_failure = property(lambda self: self._exit_with_failure)
     exit_reason = property(lambda self: self._exit_reason)
     exit_code = property(lambda self: self._exit_code)
+
+    # --- Fork: out-of-loop event-loop watchdog (see module constants above) ---
+    # _GATEWAY_RESTART_EXIT_CODE is imported from gateway.restart directly;
+    # run.py's re-export is a compat shim upstream removes on 2026-09-14.
+
+    @staticmethod
+    def _load_event_loop_watchdog_config() -> dict:
+        """Load the out-of-loop gateway event-loop watchdog configuration."""
+        cfg = _load_gateway_runtime_config()
+        watchdog_cfg = cfg_get(cfg, "gateway", "event_loop_watchdog", default={})
+        if not isinstance(watchdog_cfg, dict):
+            watchdog_cfg = {}
+
+        def _float_setting(key: str, default: float, *, min_value: float) -> float:
+            raw = str(watchdog_cfg.get(key, "") or "").strip()
+            if not raw:
+                return default
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid gateway.event_loop_watchdog.%s=%r, using %.1fs",
+                    key,
+                    raw,
+                    default,
+                )
+                return default
+            return max(min_value, value)
+
+        if "enabled" in watchdog_cfg:
+            enabled = is_truthy_value(watchdog_cfg.get("enabled"), default=True)
+        else:
+            enabled = _GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_ENABLED
+
+        heartbeat_seconds = _float_setting(
+            "heartbeat_seconds",
+            _GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_HEARTBEAT_SECONDS,
+            min_value=0.5,
+        )
+        threshold_seconds = _float_setting(
+            "threshold_seconds",
+            _GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_THRESHOLD_SECONDS,
+            min_value=max(heartbeat_seconds * 2.0, 30.0),
+        )
+        check_seconds = _float_setting(
+            "check_seconds",
+            _GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_CHECK_SECONDS,
+            min_value=0.5,
+        )
+
+        return {
+            "enabled": enabled,
+            "heartbeat_seconds": heartbeat_seconds,
+            "threshold_seconds": threshold_seconds,
+            "check_seconds": min(check_seconds, threshold_seconds / 2.0),
+        }
+
+    def _event_loop_watchdog_forensics_path(self) -> Path:
+        return _hermes_home / "logs" / "gateway-event-loop-watchdog.log"
+
+    def _write_event_loop_watchdog_forensics(
+        self,
+        *,
+        stale_for: float,
+        threshold_seconds: float,
+    ) -> None:
+        """Write a best-effort stack dump before the watchdog restarts us."""
+        path = self._event_loop_watchdog_forensics_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+
+        try:
+            running_agents = list(getattr(self, "_running_agents", {}).keys())
+            adapters = [
+                getattr(platform, "value", str(platform))
+                for platform in getattr(self, "adapters", {}).keys()
+            ]
+            failed_platforms = [
+                getattr(platform, "value", str(platform))
+                for platform in getattr(self, "_failed_platforms", {}).keys()
+            ]
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write("\n=== gateway event-loop watchdog fired ===\n")
+                fh.write(f"time={datetime.now().isoformat()} pid={os.getpid()}\n")
+                fh.write(
+                    f"stale_for={stale_for:.1f}s threshold={threshold_seconds:.1f}s "
+                    f"running={getattr(self, '_running', None)} "
+                    f"draining={getattr(self, '_draining', None)}\n"
+                )
+                fh.write(f"adapters={adapters!r} failed_platforms={failed_platforms!r}\n")
+                fh.write(f"running_agents={running_agents!r}\n")
+                try:
+                    fh.write(f"loadavg={os.getloadavg()!r}\n")
+                except Exception:
+                    pass
+                fh.write("--- all thread stacks ---\n")
+                fh.flush()
+                faulthandler.dump_traceback(file=fh, all_threads=True)
+                fh.write("=== end gateway event-loop watchdog ===\n")
+        except Exception:
+            # The watchdog is the last-resort safety net. If forensics fail,
+            # still let the caller restart the process.
+            pass
+
+    async def _event_loop_watchdog_heartbeat(self, heartbeat_seconds: float) -> None:
+        """Tiny in-loop ticker observed by an out-of-loop watchdog thread."""
+        try:
+            while self._running and not self._event_loop_watchdog_stop_event.is_set():
+                self._event_loop_watchdog_last_tick = time.monotonic()
+                await asyncio.sleep(heartbeat_seconds)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.warning("Gateway event-loop watchdog heartbeat failed", exc_info=True)
+
+    def _event_loop_watchdog_thread_main(
+        self,
+        *,
+        threshold_seconds: float,
+        check_seconds: float,
+    ) -> None:
+        """Out-of-loop monitor that exits the process if the loop is wedged."""
+        while not self._event_loop_watchdog_stop_event.wait(check_seconds):
+            if not getattr(self, "_running", False) or getattr(self, "_draining", False):
+                continue
+            stale_for = time.monotonic() - getattr(
+                self,
+                "_event_loop_watchdog_last_tick",
+                time.monotonic(),
+            )
+            if stale_for < threshold_seconds:
+                continue
+            self._write_event_loop_watchdog_forensics(
+                stale_for=stale_for,
+                threshold_seconds=threshold_seconds,
+            )
+            try:
+                logger.critical(
+                    "Gateway event loop wedged for %.1fs (threshold %.1fs); "
+                    "exiting with service-restart code %d",
+                    stale_for,
+                    threshold_seconds,
+                    _GATEWAY_RESTART_EXIT_CODE,
+                )
+            except Exception:
+                pass
+            os._exit(_GATEWAY_RESTART_EXIT_CODE)
+
+    def _start_event_loop_watchdog(self) -> None:
+        """Start the process-level event-loop watchdog if enabled."""
+        cfg = getattr(self, "_event_loop_watchdog_config", {}) or {}
+        if not cfg.get("enabled", True):
+            logger.info("Gateway event-loop watchdog disabled")
+            return
+        current_thread = getattr(self, "_event_loop_watchdog_thread", None)
+        if current_thread and current_thread.is_alive():
+            return
+
+        heartbeat_seconds = float(cfg.get("heartbeat_seconds") or _GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_HEARTBEAT_SECONDS)
+        threshold_seconds = float(cfg.get("threshold_seconds") or _GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_THRESHOLD_SECONDS)
+        check_seconds = float(cfg.get("check_seconds") or _GATEWAY_EVENT_LOOP_WATCHDOG_DEFAULT_CHECK_SECONDS)
+
+        stop_event = getattr(self, "_event_loop_watchdog_stop_event", None)
+        if stop_event is None:
+            stop_event = threading.Event()
+            self._event_loop_watchdog_stop_event = stop_event
+        stop_event.clear()
+        self._event_loop_watchdog_last_tick = time.monotonic()
+        self._event_loop_watchdog_task = asyncio.create_task(
+            self._event_loop_watchdog_heartbeat(heartbeat_seconds)
+        )
+        self._event_loop_watchdog_thread = threading.Thread(
+            target=self._event_loop_watchdog_thread_main,
+            kwargs={
+                "threshold_seconds": threshold_seconds,
+                "check_seconds": check_seconds,
+            },
+            daemon=True,
+            name="gateway-event-loop-watchdog",
+        )
+        self._event_loop_watchdog_thread.start()
+        logger.info(
+            "Gateway event-loop watchdog started (heartbeat=%.1fs threshold=%.1fs check=%.1fs)",
+            heartbeat_seconds,
+            threshold_seconds,
+            check_seconds,
+        )
+
+    def _stop_event_loop_watchdog(self) -> None:
+        """Stop the process-level event-loop watchdog during graceful teardown."""
+        event = getattr(self, "_event_loop_watchdog_stop_event", None)
+        if event is not None:
+            event.set()
+        task = getattr(self, "_event_loop_watchdog_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._event_loop_watchdog_task = None
+
+    def _start_loop_heartbeat_task(self) -> None:
+        """Start the loop-liveness heartbeat task (#66892), idempotent.
+
+        An asyncio task so a frozen loop stops refreshing
+        ``state/gateway.heartbeat``. Cancelled with the other background
+        tasks during stop(). Best-effort — a liveness probe must never be
+        able to abort startup.
+        """
+        try:
+            _existing_hb = getattr(self, "_loop_heartbeat_task", None)
+            if _existing_hb is not None and not _existing_hb.done():
+                return
+            self._loop_heartbeat_task = asyncio.create_task(
+                loop_heartbeat_forever(
+                    interval_s=DEFAULT_HEARTBEAT_INTERVAL_S,
+                    start_time=getattr(self, "_gateway_started_at", 0.0),
+                )
+            )
+            # PERMANENT for the process lifetime, same as a
+            # _spawn_supervised watcher — tag it so
+            # _scale_to_zero_has_live_background_work() doesn't treat an
+            # armed, otherwise-idle gateway as busy forever.
+            self._loop_heartbeat_task._hermes_supervised_watcher = True  # type: ignore[attr-defined]
+            _bg = getattr(self, "_background_tasks", None)
+            if _bg is not None:
+                _bg.add(self._loop_heartbeat_task)
+                self._loop_heartbeat_task.add_done_callback(_bg.discard)
+        except Exception:
+            logger.debug("Failed to start gateway loop heartbeat", exc_info=True)
 
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""

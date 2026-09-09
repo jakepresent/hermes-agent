@@ -133,6 +133,11 @@ dependencies = [
   # [wake]; memory_search is a core fork tool, so it is declared here rather
   # than relying on an optional extra being installed.
   "numpy==2.4.3",
+  # Offline/local semantic fallback for memory_search (TF-IDF + truncated SVD
+  # LSA) when the Gemini backend is unavailable. In the old fork this arrived
+  # only transitively via openwakeword under [wake], so a venv without [wake]
+  # silently degraded hybrid search to keyword-only. Declared explicitly.
+  "scikit-learn==1.9.0",
   # Required by the fork's Gemini-backed memory_search query path. The batch
   # preindex path uses direct HTTP, but live semantic queries use google-genai;
   # omitting it makes a fully populated cache fall back to keyword after a venv

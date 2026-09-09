@@ -1156,6 +1156,7 @@ def _existing_regular_file(raw: str) -> bool:
 SUPPORTED_DOCUMENT_TYPES = {
     ".pdf": "application/pdf", ".md": "text/markdown", ".txt": "text/plain", ".csv": "text/csv",
     ".log": "text/plain", ".json": "application/json", ".xml": "application/xml",
+    ".svg": "image/svg+xml",
     ".yaml": "application/yaml", ".yml": "application/yaml", ".toml": "application/toml",
     ".ini": "text/plain", ".cfg": "text/plain", ".zip": "application/zip",
     ".doc": "application/msword", ".xls": "application/vnd.ms-excel",
@@ -1175,7 +1176,7 @@ _TEXT_INJECT_EXTENSIONS = {
     ".java", ".kt", ".go", ".rs", ".rb", ".php", ".pl", ".lua", ".r", ".jl", ".swift", ".m",
     ".scala", ".clj", ".ex", ".exs", ".erl", ".sql", ".graphql", ".proto", ".tf", ".hcl",
     ".dockerfile", ".makefile", ".cmake", ".gradle", ".rst", ".tex", ".srt", ".vtt", ".diff",
-    ".patch"}
+    ".patch", ".svg"}
 
 # Image exts platforms may deliver as "documents" (file-picker uploads); routed to the image cache.
 SUPPORTED_IMAGE_DOCUMENT_TYPES = {

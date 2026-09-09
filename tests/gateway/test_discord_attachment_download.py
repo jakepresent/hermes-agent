@@ -144,6 +144,39 @@ class TestCacheDiscordImage:
         assert result == "/tmp/fallback.png"
         mock_url.assert_awaited_once()
 
+    @pytest.mark.asyncio
+    async def test_svg_is_cached_and_injected_as_a_text_document(self):
+        adapter = _make_adapter()
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>'
+        att = SimpleNamespace(
+            url="https://cdn.discordapp.com/attachments/fake/art.svg",
+            filename="art.svg",
+            content_type="image/svg+xml",
+            size=len(svg),
+            read=AsyncMock(return_value=svg),
+        )
+
+        with patch.object(
+            adapter,
+            "_cache_discord_document",
+            new=AsyncMock(return_value=svg),
+        ) as mock_document, patch(
+            "plugins.platforms.discord.adapter.cache_document_from_bytes_async",
+            new=AsyncMock(return_value="/tmp/art.svg"),
+        ) as mock_cache_document, patch(
+            "plugins.platforms.discord.adapter.cache_image_from_bytes_async",
+            new=AsyncMock(),
+        ) as mock_image:
+            media_urls, media_types, pending_text = await adapter._collect_attachment_media([att])
+
+        mock_document.assert_awaited_once_with(att, ".svg")
+        mock_cache_document.assert_awaited_once_with(svg, "art.svg")
+        mock_image.assert_not_awaited()
+        assert media_urls == ["/tmp/art.svg"]
+        assert media_types == ["image/svg+xml"]
+        assert pending_text == f"[Content of art.svg]:\n{svg.decode()}"
+        assert adapter._attachment_message_type(att) is MessageType.DOCUMENT
+
 
 # ---------------------------------------------------------------------------
 # _cache_discord_audio

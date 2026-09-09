@@ -34,6 +34,11 @@ _FAST_SELECTIONS = {
 # /reasoning display-toggle arguments -> show_reasoning value.
 _REASONING_DISPLAY_TOGGLES = {"show": True, "on": True, "hide": False, "off": False}
 
+# Fork: read-only aliases for ``/model``. Upstream's parser treats any bare word
+# as a model NAME, so ``/model status`` attempts a switch to a model literally
+# called "status" — and ``/model status --global`` PERSISTS that to config.yaml.
+_MODEL_STATUS_ALIASES = frozenset({"status", "current", "show", "info"})
+
 
 def _model_switch_skew_guard() -> Optional[str]:
     """Refuse a model switch when the gateway is running stale code: a first-time lazy import on
@@ -384,6 +389,34 @@ class GatewayModelCommandsMixin:
         )
         return bool(result.success)
 
+    def _model_status_reply(self, ctx: "_ModelSwitchContext", session_key: str) -> str:
+        """Fork: ``/model status|current|show|info`` — report, never switch.
+
+        Upstream has no read-only form: every bare argument is parsed as a model
+        name, so asking what model is active tries to SWITCH to a model of that
+        name, and with ``--global`` writes it to config.yaml. Flags are ignored
+        here by construction — this path returns text and touches nothing.
+        """
+        from hermes_cli.providers import get_label
+
+        lines = [
+            t(
+                "gateway.model.current_label",
+                model=ctx.current_model or "unknown",
+                provider=get_label(ctx.current_provider),
+            )
+        ]
+        if self._session_model_overrides.get(session_key):
+            lines.append(t("gateway.model.session_only_hint"))
+        lines.extend([
+            "",
+            t("gateway.model.usage_open_picker"),
+            t("gateway.model.usage_switch_model"),
+            t("gateway.model.usage_switch_provider"),
+            t("gateway.model.usage_persist"),
+        ])
+        return "\n".join(lines)
+
     async def _model_listing_reply(
         self, event: MessageEvent, ctx: _ModelSwitchContext, profile_home
     ) -> Optional[str]:
@@ -507,6 +540,12 @@ class GatewayModelCommandsMixin:
         )
         ctx.read_config()
         ctx.apply_override(self._session_model_overrides.get(session_key, {}))
+        # Fork: read-only status BEFORE any switch/persist path can run.
+        if (
+            str(request.target or "").strip().lower() in _MODEL_STATUS_ALIASES
+            and not request.explicit_provider
+        ):
+            return self._model_status_reply(ctx, session_key)
         if not request.target and not request.explicit_provider:
             return await self._model_listing_reply(event, ctx, profile_home)
         result, error = await self._perform_model_switch(ctx, request.target, request.explicit_provider, source)

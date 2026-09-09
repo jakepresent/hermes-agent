@@ -1586,6 +1586,12 @@ DEFAULT_CONFIG = {
         # REST) as proof events still arrive. Any value 0 disables it.
         "websocket_liveness_interval_seconds": 15,
         "websocket_liveness_failure_threshold": 2,
+        # Fork: complementary REST probe. The websocket can stay healthy while the
+        # REST API is degraded or the token is revoked — connected but unable to
+        # act. Slower interval and higher threshold than the WS probe, since a REST
+        # blip is common and only a sustained failure means anything.
+        "rest_liveness_interval_seconds": 60,
+        "rest_liveness_failure_threshold": 3,
         "websocket_heartbeat_ack_max_age_seconds": 60,
         "websocket_max_latency_seconds": 30,
         # Dispatch-side dimension: a socket that ACKs heartbeats but delivers no events for this

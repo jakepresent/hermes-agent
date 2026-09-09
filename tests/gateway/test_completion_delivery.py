@@ -990,3 +990,78 @@ def test_watch_drain_retries_transport_failure(monkeypatch, isolated_registry):
     asyncio.run(runner._async_delegation_watcher(interval=0))
     assert adapter.handle_message.await_count == 2
     assert isolated_registry.completion_queue.empty()
+
+
+# --- Fork: bounded async-delegation continuation -----------------------------
+
+
+def test_bounded_completion_event_carries_turn_policy(monkeypatch):
+    """A late delegation completion is stamped with its bounded turn policy.
+
+    Fork behavior: when delegation.completion_max_turns > 0 the synthetic event
+    carries the cap, the raw payload, and the no-re-delegation flag, and its text
+    is wrapped in the bounded-continuation prompt.
+    """
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    event = _async_event("deleg_bounded")
+    monkeypatch.setattr("gateway.run._delegation_completion_max_turns", lambda *a, **k: 5)
+
+    asyncio.run(runner._inject_watch_notification("review result", event))
+
+    delivered = adapter.handle_message.await_args.args[0]
+    assert delivered.internal is True
+    assert "BOUNDED BACKGROUND DELEGATION CONTINUATION" in delivered.text
+    assert delivered.metadata["delegation_completion_max_turns"] == 5
+    assert delivered.metadata["delegation_completion_payload"] == "review result"
+    assert delivered.metadata["disable_delegation_for_turn"] is True
+
+
+def test_unbounded_completion_is_not_stamped(monkeypatch):
+    """completion_max_turns = 0 keeps upstream's legacy full-turn delivery."""
+    adapter = SimpleNamespace(handle_message=AsyncMock())
+    runner = _runner(adapter)
+    event = _async_event("deleg_legacy")
+    monkeypatch.setattr("gateway.run._delegation_completion_max_turns", lambda *a, **k: 0)
+
+    asyncio.run(runner._inject_watch_notification("review result", event))
+
+    delivered = adapter.handle_message.await_args.args[0]
+    assert delivered.text == "review result"
+    assert "delegation_completion_max_turns" not in delivered.metadata
+
+
+def test_bounded_completion_silence_is_suppressed_only_for_bounded_turns():
+    from gateway.run import _is_bounded_delegation_silence
+
+    sentinel = "[NO_USER_VISIBLE_UPDATE]"
+    assert _is_bounded_delegation_silence(sentinel, bounded=True) is True
+    assert _is_bounded_delegation_silence(sentinel, bounded=False) is False
+    assert _is_bounded_delegation_silence("useful delta", bounded=True) is False
+
+
+def test_bounded_turn_budget_never_expands_configured_max():
+    from gateway.run import _effective_turn_max_iterations
+
+    assert _effective_turn_max_iterations(50, 5) == 5
+    # A cap larger than the configured budget must NOT raise the ceiling.
+    assert _effective_turn_max_iterations(3, 99) == 3
+    assert _effective_turn_max_iterations(50, None) == 50
+    assert _effective_turn_max_iterations(50, "bogus") == 50
+
+
+def test_bounded_turn_disables_delegation_toolset():
+    """The bounded continuation cannot spawn further background work."""
+    from gateway.run_turn_runner import TurnRunner
+
+    ctx = SimpleNamespace(disabled_toolsets=None, turn_disable_delegation=True)
+    runner = TurnRunner.__new__(TurnRunner)
+    runner._ctx = ctx
+    assert "delegation" in runner._turn_disabled_toolsets()
+
+    ctx.turn_disable_delegation = False
+    assert runner._turn_disabled_toolsets() is None
+
+    ctx.disabled_toolsets = ["voice"]
+    ctx.turn_disable_delegation = True
+    assert set(runner._turn_disabled_toolsets()) == {"voice", "delegation"}

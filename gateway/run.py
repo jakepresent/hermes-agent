@@ -1565,6 +1565,72 @@ def _current_max_iterations() -> int:
     return _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
 
 
+_BOUNDED_DELEGATION_SILENCE = "[NO_USER_VISIBLE_UPDATE]"
+
+
+def _delegation_completion_max_turns(config: Optional[dict] = None) -> int:
+    """Return the bounded budget for late delegation continuations.
+
+    ``0`` preserves the legacy full-turn behavior. Positive values are capped
+    only by the main agent budget when a late completion starts a fresh turn.
+    """
+    if config is None:
+        try:
+            config = _load_gateway_config()
+        except Exception:
+            config = {}
+    delegation = config.get("delegation") if isinstance(config, dict) else None
+    raw = delegation.get("completion_max_turns", 0) if isinstance(delegation, dict) else 0
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        logger.warning(
+            "delegation.completion_max_turns=%r is invalid; using legacy full-turn delivery",
+            raw,
+        )
+        return 0
+
+
+def _effective_turn_max_iterations(configured_max: int, override: Optional[int]) -> int:
+    """Clamp a one-turn override without ever expanding the configured budget."""
+    if override is None:
+        return configured_max
+    try:
+        return max(1, min(configured_max, int(override)))
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid per-turn max_iterations override: %r", override)
+        return configured_max
+
+
+def _bounded_delegation_completion_prompt(payload: str, max_turns: int) -> str:
+    """Wrap a late result with bounded, non-recursive continuation guidance."""
+    return (
+        f"[BOUNDED BACKGROUND DELEGATION CONTINUATION — max {max_turns} rounds]\n"
+        "A subagent result arrived after its commissioning turn ended. Reconcile "
+        "it with the current session state and use the limited rounds only for a "
+        "meaningful delta: inspect, make a small correction, run a focused check, "
+        "or explain what changed. Do not delegate again and do not start background "
+        "work. If the parent already handled everything and there is no useful "
+        f"user-visible update, respond exactly {_BOUNDED_DELEGATION_SILENCE}.\n\n"
+        f"{payload}"
+    )
+
+
+def _active_turn_delegation_completion_prompt(payload: str) -> str:
+    """Tail context for a result absorbed into the still-running parent turn."""
+    return (
+        "[BACKGROUND DELEGATION COMPLETED DURING THIS TURN]\n"
+        "Incorporate this result if it materially helps the current task. If it is "
+        "stale or already handled, continue the original task without restating it. "
+        "Do not start another delegation in response.\n\n"
+        f"{payload}"
+    )
+
+
+def _is_bounded_delegation_silence(response: object, *, bounded: bool) -> bool:
+    return bounded and str(response or "").strip() == _BOUNDED_DELEGATION_SILENCE
+
+
 from contextlib import asynccontextmanager as _asynccontextmanager, contextmanager as _contextmanager, suppress
 
 

@@ -947,6 +947,20 @@ class TurnRunner:
             inline_fallback=True,
         )
 
+    def _turn_disabled_toolsets(self):
+        """Per-turn disabled toolsets, plus ``delegation`` on a bounded continuation.
+
+        A late async-delegation completion must not spawn further background work
+        (it would recurse: completion -> delegate -> completion). Upstream has no
+        per-turn delegation switch, so the fork disables the toolset for that turn
+        only, leaving the session's configured toolsets untouched.
+        """
+        ctx = self._ctx
+        disabled = list(ctx.disabled_toolsets or [])
+        if getattr(ctx, "turn_disable_delegation", False) and "delegation" not in disabled:
+            disabled.append("delegation")
+        return disabled or None
+
     def _build_fresh_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations,
                            reasoning_config, pr, skip_context_files):
         from gateway.run import _checkpoint_agent_kwargs
@@ -956,7 +970,8 @@ class TurnRunner:
         return ctx.AIAgent(
             model=turn_route["model"], **turn_route["runtime"], **_checkpoint_agent_kwargs(ctx.user_config),
             max_iterations=max_iterations, quiet_mode=True, verbose_logging=False,
-            enabled_toolsets=ctx.enabled_toolsets, disabled_toolsets=ctx.disabled_toolsets,
+            enabled_toolsets=ctx.enabled_toolsets,
+            disabled_toolsets=self._turn_disabled_toolsets(),
             ephemeral_system_prompt=combined_ephemeral or None,
             prefill_messages=runner._prefill_messages or None,
             reasoning_config=reasoning_config, service_tier=runner._service_tier,
@@ -1607,7 +1622,10 @@ class TurnRunner:
         every rebind. session_key propagates via contextvars (_set_session_env / set_current_session_key)
         — never os.environ["HERMES_SESSION_KEY"], which would misroute approvals across sessions.
         """
-        from gateway.run import _current_max_iterations, _normalize_empty_agent_response, _sanitize_gateway_final_response
+        from gateway.run import (
+            _current_max_iterations, _effective_turn_max_iterations,
+            _normalize_empty_agent_response, _sanitize_gateway_final_response,
+        )
         ctx = self._ctx
         runner = self._runner
         # Platform.LOCAL ("local") maps to the "cli" hint key the agent understands.
@@ -1623,7 +1641,11 @@ class TurnRunner:
         # removing this in-process gateway write does not affect any of them.
         platform_key = "cli" if ctx.source.platform == Platform.LOCAL else ctx.source.platform.value
         combined_ephemeral = self._combined_ephemeral_prompt()
-        max_iterations = _current_max_iterations()
+        # Fork: a bounded delegation continuation clamps THIS turn's budget.
+        # _effective_turn_max_iterations never expands the configured maximum.
+        max_iterations = _effective_turn_max_iterations(
+            _current_max_iterations(), getattr(ctx, "turn_max_iterations", None),
+        )
         try:
             model, runtime_kwargs = runner._resolve_session_agent_runtime(
                 source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,

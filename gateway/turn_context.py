@@ -57,6 +57,11 @@ class TurnContext:
     # "internal_notification" for async-delegation/background notifications (#82888).
     persist_user_display_kind: Optional[str] = None
     persist_user_display_metadata: Optional[dict] = None
+    # Fork: bounded async-delegation continuation. ``turn_max_iterations`` caps
+    # THIS turn's budget (never expands it); ``turn_disable_delegation`` blocks
+    # re-delegation so a late completion cannot spawn more background work.
+    turn_max_iterations: Optional[int] = None
+    turn_disable_delegation: bool = False
     user_config: Any = None
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None

@@ -1209,6 +1209,12 @@ DEFAULT_CONFIG = {
     # cheaper/faster model. Uses the same runtime provider resolution as CLI/gateway startup, so
     # every configured provider is supported.
     "delegation": {
+        # Bounded late-completion continuation. A subagent result arriving AFTER
+        # its commissioning turn ended normally starts a full fresh turn. A
+        # positive value instead runs a continuation capped at N rounds with
+        # re-delegation disabled, so a late result cannot recurse into more
+        # background work. 0 = upstream's legacy full-turn delivery.
+        "completion_max_turns": 0,
         "model": "",  # e.g. "google/gemini-3-flash-preview" (empty = inherit parent)
         "provider": "",  # e.g. "openrouter" (empty = inherit parent provider + credentials)
         # Fallback chain for delegated children (same entry format as the top-level list).

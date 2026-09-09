@@ -6,7 +6,7 @@ Last audited: 2026-09-09
 
 - Upstream base: `v2026.9.7` at `2237be3559`
 - Clean candidate branch: `jake/v2026.9.7-clean`
-- Latest verified behavior commit: `0117914da4`
+- Latest verified behavior commit: `374c8d5c64`
 - Package version: Hermes Agent 0.21.1
 - Cleanup ledger: `ChatWorkspace/hermes/v2026.9.7-cleanup-ledger.md`, rev 13
 
@@ -196,6 +196,16 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 **Replay commit:** `0117914da4`
 
 **Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/platforms/base.py`, and `tests/gateway/test_discord_attachment_download.py`.
+
+### 17. Configurable Discord long-response delivery
+
+**Purpose:** Deliver useful long replies without losing their tail or adding visual chunk counters, while retaining upstream's flood guard by default.
+
+**Behavior to preserve:** `discord.max_split_messages` and `discord.chunk_indicators` bridge into the Discord platform's extra config. Defaults remain upstream-compatible at 8 messages and indicators enabled. Jake's local config uses 16 messages and disables indicators. Normal sends, forum posts, streaming previews, and edit-overflow continuations share the same behavior.
+
+**Replay commit:** `374c8d5c64`
+
+**Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/config_loader.py`, and `tests/gateway/test_discord_split_cap.py`.
 
 ## Intentionally absent
 

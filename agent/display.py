@@ -521,6 +521,9 @@ _TOOL_VERB_TOOLS: frozenset[str] = frozenset({
     "image_generate", "video_generate", "text_to_speech", "vision_analyze", "session_search",
     "skill_view", "skills_list", "skill_manage", "delegate_task", "cronjob_manage", "clarify",
     "memory", "todo_list",
+    # Fork: tools the user sees often that upstream leaves as raw registry names in progress
+    # lines. "todo" is the pre-rename alias, kept so a progress line never regresses to it.
+    "memory_search", "todo",
 })
 
 
@@ -531,7 +534,7 @@ def _tool_verb(tool_name: str) -> str | None:
 # Verbs that read better without the argument preview appended.
 _TOOL_VERBS_NO_PREVIEW: frozenset[str] = frozenset({"skills_list", "session_search"})
 # Verbs joined to the preview with " for " (search-style phrasing).
-_TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({"web_search", "search_files"})
+_TOOL_VERBS_FOR_CONNECTOR: frozenset[str] = frozenset({"web_search", "search_files", "memory_search"})
 
 _BRIDGE_GENERATING_TOOLS: frozenset[str] = frozenset({"tool_call", "tool_search", "tool_describe"})
 

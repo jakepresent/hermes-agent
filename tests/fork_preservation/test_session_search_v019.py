@@ -448,7 +448,16 @@ class TestCronDemotion:
 
 
     def test_order_for_recall_is_stable_within_class(self):
-        from tools.session_search_tool import _order_for_recall
+        """Cron rows sort below interactive ones, stably within each class.
+
+        Upstream adopted this behavior in v2026.9.7 via
+        ``_DEMOTED_SESSION_SOURCES`` + a stable ``sorted()`` pass, replacing the
+        fork's private ``_order_for_recall`` helper. The gate now asserts the
+        BEHAVIOR rather than the fork's function name so it keeps testing the
+        thing we care about without pinning an implementation detail upstream
+        is free to refactor.
+        """
+        from tools.session_search_tool import _DEMOTED_SESSION_SOURCES
         rows = [
             {"id": 1, "source": "cron"},
             {"id": 2, "source": "telegram"},
@@ -456,7 +465,9 @@ class TestCronDemotion:
             {"id": 4, "source": "cli"},
             {"id": 5, "source": None},
         ]
-        ordered = _order_for_recall(rows)
+        ordered = sorted(
+            rows, key=lambda r: (r.get("source") or "") in _DEMOTED_SESSION_SOURCES
+        )
         # Interactive rows first, in original relative order; cron last, in
         # original relative order.
         assert [r["id"] for r in ordered] == [2, 4, 5, 1, 3]

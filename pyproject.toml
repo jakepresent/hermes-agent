@@ -125,6 +125,22 @@ dependencies = [
   "websockets==15.0.1",
   # .gitignore-aware file matching for desktop build stamp.
   "pathspec==1.1.1",
+  # Local vector search for Gemini-backed durable memory retrieval
+  # (tools/memory_search_tool.py). Fork-only dependency.
+  "sqlite-vec==0.1.9",
+  # Local vector scoring for the Gemini semantic path
+  # (_normalize_dense_matrix). Upstream only declares numpy under [voice]/
+  # [wake]; memory_search is a core fork tool, so it is declared here rather
+  # than relying on an optional extra being installed.
+  "numpy==2.4.3",
+  # Required by the fork's Gemini-backed memory_search query path. The batch
+  # preindex path uses direct HTTP, but live semantic queries use google-genai;
+  # omitting it makes a fully populated cache fall back to keyword after a venv
+  # rebuild. 2.12.1 is the newest release compatible with google-auth 2.55.1.
+  "google-genai==2.12.1",
+  # SVG rasterization for vision/attachment routing — without it .svg inputs
+  # fail the rasterizer chain and must be renamed to .txt to be read at all.
+  "cairosvg==2.9.1",
   "fastapi>=0.104.0,<1",
   # CIDR-aware forwarded_allow_ips requires uvicorn >=0.31.0.
   "uvicorn[standard]>=0.31.0,<1",
@@ -468,6 +484,9 @@ asyncpg = false
 azure-identity = false
 boto3 = false
 brotlicffi = false
+# Fork deps: exact-pinned, so exclude-newer adds no float protection. cairosvg
+# 2.9.1 published 2026-09-07 and is inside the 14-day window.
+cairosvg = false
 certifi = false
 concurrent-log-handler = false
 croniter = false

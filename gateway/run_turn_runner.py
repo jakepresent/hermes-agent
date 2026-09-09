@@ -20,7 +20,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from agent.interrupt_compat import _accepts_keyword
-from agent.replay_cleanup import strip_stale_dangerous_confirmations
 from gateway.config import Platform
 from gateway.media_repair import repair_explicit_computer_use_media_paths
 from gateway.platforms.base import BasePlatformAdapter
@@ -1307,7 +1306,7 @@ class TurnRunner:
     def _load_turn_history(self, agent, reused_cached_agent):
         from gateway.run import (
             _build_gateway_agent_history, _collect_history_media_paths, _message_timestamps_enabled,
-            _select_cached_agent_history,
+            _select_cached_replay_history,
         )
         ctx = self._ctx
         # Transcript rows ({role, content, timestamp}) lose timestamps; interrupt-path agent messages
@@ -1323,7 +1322,16 @@ class TurnRunner:
         # Replacing the live transcript with that shorter copy causes immediate same-session amnesia. See
         # #50502.
         if reused_cached_agent and getattr(agent, "session_id", None) == ctx.session_id:
-            selected = _select_cached_agent_history(agent_history, getattr(agent, "_session_messages", None))
+            # Fork: normalize the LIVE side through the same replay cleanup as the
+            # disk side before comparing. Comparing cleaned-vs-raw made intentional
+            # cleanup look like a shorter persisted transcript (false FTS-corruption
+            # warning) and let the raw list win, reintroducing the dangling tool
+            # tails replay had just stripped.
+            selected = _select_cached_replay_history(
+                agent_history, getattr(agent, "_session_messages", None),
+                channel_prompt=ctx.channel_prompt,
+                inject_timestamps=_message_timestamps_enabled(ctx.user_config),
+            )
             if selected is not agent_history:
                 logger.warning(
                     "Persisted transcript lagged live cached history for "
@@ -1331,9 +1339,7 @@ class TurnRunner:
                     "conversation context (possible FTS write corruption)",
                     ctx.session_key, len(agent_history), len(selected),
                 )
-                # The live history bypassed _build_gateway_agent_history's cleanup — re-apply the
-                # stale-confirmation expiry so a dangerous confirmation can't slip through.
-                agent_history = strip_stale_dangerous_confirmations(selected, now=time.time())
+                agent_history = selected
         # MEDIA paths already in history are excluded from this turn's extraction (compression-safe).
         return agent_history, observed_group_context, _collect_history_media_paths(agent_history)
 

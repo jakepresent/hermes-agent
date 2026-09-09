@@ -1229,6 +1229,42 @@ def _build_gateway_agent_history(
     return agent_history, observed_context
 
 
+def _select_cached_replay_history(
+    persisted_history: List[Dict[str, Any]],
+    live_history: Any,
+    *,
+    channel_prompt: Optional[str] = None,
+    inject_timestamps: bool = False,
+) -> List[Dict[str, Any]]:
+    """Fork: compare cached and persisted history after IDENTICAL replay cleanup.
+
+    ``_build_gateway_agent_history`` drops session_meta/observed rows, strips
+    interrupted tool tails, removes dangling tool-call tails, and expires stale
+    dangerous confirmations. A cached ``AIAgent`` keeps its RAW message list, so
+    normalizing only the disk side compares a cleaned transcript against an
+    uncleaned one. Two consequences, both observed:
+
+    * Intentional cleanup reads as a SHORTER persisted transcript, producing a
+      false "possible FTS write corruption" warning on an entirely healthy
+      session.
+    * The longer raw list then wins, reintroducing exactly the rows replay
+      cleanup had just removed. A dangling read-only tool call comes back and
+      the model re-issues it on resume (the #49201 restart-loop class).
+
+    Re-applying only ``strip_stale_dangerous_confirmations`` to the live side
+    covers the security case but not the tool-tail cases; normalizing both
+    sides through the same builder covers all of them.
+    """
+    if not isinstance(live_history, list):
+        return persisted_history
+    live_replay_history, _ = _build_gateway_agent_history(
+        live_history,
+        channel_prompt=channel_prompt,
+        inject_timestamps=inject_timestamps,
+    )
+    return _select_cached_agent_history(persisted_history, live_replay_history)
+
+
 def _select_cached_agent_history(
     persisted_history: List[Dict[str, Any]], live_history: Any) -> List[Dict[str, Any]]:
     """Prefer the cached live transcript only when it is longer AND has a real, non-ephemeral unpersisted row.

@@ -1184,8 +1184,36 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
             if getattr(source, "message_id", None):
                 from gateway.session_identity import replace_source
                 source = replace_source(source, message_id=None)
+            # Fork: a late async-delegation completion may run as a BOUNDED
+            # continuation instead of a full fresh turn. Stamp the budget +
+            # payload here so the turn path can cap iterations and suppress a
+            # no-op reply. delegation.completion_max_turns = 0 keeps upstream's
+            # legacy full-turn behavior.
+            event_text = synth_text
+            if evt.get("type") == "async_delegation":
+                from gateway.run import (
+                    _bounded_delegation_completion_prompt,
+                    _delegation_completion_max_turns,
+                    _profile_runtime_scope,
+                )
+                try:
+                    profile_home = self._resolve_profile_home_for_source(source)
+                    with _profile_runtime_scope(profile_home):
+                        completion_max_turns = _delegation_completion_max_turns()
+                except Exception:
+                    completion_max_turns = _delegation_completion_max_turns()
+                if completion_max_turns > 0:
+                    metadata.update({
+                        "synthetic_event_type": "async_delegation",
+                        "delegation_completion_max_turns": completion_max_turns,
+                        "delegation_completion_payload": synth_text,
+                        "disable_delegation_for_turn": True,
+                    })
+                    event_text = _bounded_delegation_completion_prompt(
+                        synth_text, completion_max_turns,
+                    )
             synth_event = MessageEvent(
-                text=synth_text, message_type=MessageType.TEXT, source=source, internal=True,
+                text=event_text, message_type=MessageType.TEXT, source=source, internal=True,
                 metadata=metadata,
             )
             logger.info(

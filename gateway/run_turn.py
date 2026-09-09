@@ -1503,12 +1503,14 @@ class GatewayTurnMixin:
         _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,
         persist_user_display_kind: Optional[str] = None,
         reply_expected: Optional[bool] = None,
+        bounded_delegation_completion: bool = False,
     ):
         """Turn the raw agent result into the outbound text: sentinel/silence handling, response
         logging, resume-pending clear, empty-response normalization, and identity-guarded
         post-compression session_id propagation. Returns
         ``(response, _intentional_silence, agent_messages)``."""
         from gateway.run import (
+            _is_bounded_delegation_silence,
             _is_gateway_hidden_reasoning_incomplete_turn, _normalize_empty_agent_response,
             _sanitize_gateway_final_response, _should_clear_resume_pending_after_turn,
         )
@@ -1516,6 +1518,11 @@ class GatewayTurnMixin:
         # Hidden-reasoning-only retry exhaustion: the loop's sentinel text doubles as final_response
         # and would be delivered verbatim (peer agents would ingest it as a completed turn).
         if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
+            response = ""
+        # Fork: a bounded delegation continuation may legitimately have nothing to
+        # add. It answers with the silence sentinel, which is suppressed here so
+        # the late completion stays invisible instead of posting filler.
+        if _is_bounded_delegation_silence(response, bounded=bounded_delegation_completion):
             response = ""
         _intentional_silence = self._is_intentional_silence(agent_result, response)
         # A queued (/queue) chain's TERMINAL turn owns the silence verdict, not the event that
@@ -2193,9 +2200,29 @@ class GatewayTurnMixin:
                 # Persist the coherent context+channel pair before execution: a crash during the
                 # human turn may be followed by an internal startup-resume on the next process.
                 await self._persist_prompt_pins(session_key, _run_start_session_id)
+            # Fork: bounded async-delegation continuation. A late completion runs
+            # with a capped iteration budget and no re-delegation instead of a
+            # full fresh turn (delegation.completion_max_turns).
+            _event_metadata = event.metadata if isinstance(event.metadata, dict) else {}
+            try:
+                _completion_turn_cap = max(
+                    0, int(_event_metadata.get("delegation_completion_max_turns", 0))
+                )
+            except (TypeError, ValueError):
+                _completion_turn_cap = 0
+            _is_bounded_delegation_completion = (
+                _event_metadata.get("synthetic_event_type") == "async_delegation"
+                and _completion_turn_cap > 0
+            )
             agent_result = await self._run_agent(
                 message=message_text, context_prompt=prepared.context_prompt, history=history, source=_turn_source,
                 session_id=_run_start_session_id, session_key=session_key,
+                turn_max_iterations=(
+                    _completion_turn_cap if _is_bounded_delegation_completion else None
+                ),
+                turn_disable_delegation=bool(
+                    _event_metadata.get("disable_delegation_for_turn", False)
+                ),
                 run_generation=run_generation, event_message_id=self._reply_anchor_for_event(event),
                 inbound_message_id=str(event.message_id) if event.message_id else None,
                 channel_prompt=_turn_channel_prompt, moa_config=getattr(event, "_moa_config", None),
@@ -2236,6 +2263,7 @@ class GatewayTurnMixin:
                 _quick_key, run_generation, _run_start_session_id, _platform_name, _msg_start_time,
                 persist_user_display_kind=prepared.persist_user_display_kind,
                 reply_expected=event.reply_expected,
+                bounded_delegation_completion=_is_bounded_delegation_completion,
             )
             response = self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence)
             _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
@@ -4273,6 +4301,7 @@ class GatewayTurnMixin:
         reply_expected: Optional[bool] = None,
         scheduled_heartbeat: bool = False,
         title_user_message: Optional[str] = None,
+        turn_max_iterations: Optional[int] = None, turn_disable_delegation: bool = False,
     ) -> dict[str, Any]:
         """Run the agent; returns the full run_conversation result dict.
 
@@ -4312,6 +4341,8 @@ class GatewayTurnMixin:
             reply_expected=reply_expected,
             persist_user_display_metadata=persist_user_display_metadata, scheduled_heartbeat=scheduled_heartbeat,
             voice_turn=str(getattr(message_type, "value", message_type) or "").lower() == "voice",
+            turn_max_iterations=turn_max_iterations,
+            turn_disable_delegation=turn_disable_delegation,
         )
         _status_thread_metadata = self._run_agent_bind_turn_wiring(
             turn_ctx, turn_runner, source, event_message_id, disp._native_slack_task_cards,

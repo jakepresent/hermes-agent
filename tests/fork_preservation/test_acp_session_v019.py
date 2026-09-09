@@ -164,6 +164,10 @@ class TestListAndCleanup:
 
         manager = SessionManager(agent_factory=factory, db=db)
         state = manager.create_session(cwd="/work")
+        # Upstream keeps EMPTY ACP sessions ephemeral, so the agent-owned row
+        # this test simulates must exist before messages can reference it
+        # (append_message enforces the session FK).
+        db.create_session(session_id=state.session_id, source="acp", model="test-model")
 
         # Simulate the agent's own persistence: it flushed the live transcript,
         # then compression archived the pre-compaction turns and inserted a
@@ -233,6 +237,9 @@ class TestListAndCleanup:
             agent_factory=lambda: SimpleNamespace(model="m"), db=db
         )
         state = manager.create_session(cwd="/work")
+        # Upstream keeps EMPTY ACP sessions ephemeral; create the row the
+        # already-flushed transcript this test simulates would have written.
+        db.create_session(session_id=state.session_id, source="acp", model="m")
 
         # Session flushed a live turn, then compaction archived it.
         db.append_message(
@@ -308,7 +315,16 @@ class TestPersistence:
         assert captured["enabled_toolsets"] == ["hermes-acp", "mcp-olympus", "mcp-exa"]
 
     def test_create_session_writes_to_db(self, manager):
+        """A session with history persists with source=acp and its cwd.
+
+        Upstream v2026.9.7 deliberately keeps EMPTY sessions ephemeral (editor
+        probes open sessions that never get a prompt), so the gate now saves a
+        turn first. The preserved behavior under test is the row shape, not the
+        eager write-on-create the fork used to do.
+        """
         state = manager.create_session(cwd="/project")
+        state.history = [{"role": "user", "content": "hello"}]
+        manager.save_session(state.session_id)
         db = manager._get_db()
         assert db is not None
         row = db.get_session(state.session_id)
@@ -344,22 +360,25 @@ class TestPersistence:
 
 
 
-    def test_remove_session_deletes_from_db(self, manager):
-        state = manager.create_session()
-        db = manager._get_db()
-        assert db.get_session(state.session_id) is not None
-        manager.remove_session(state.session_id)
-        assert db.get_session(state.session_id) is None
+    def test_remove_session_deletes_from_db(self):
+        """SKIPPED: ``SessionManager.remove_session`` was deleted upstream.
 
-    def test_cleanup_removes_all_from_db(self, manager):
-        s1 = manager.create_session()
-        s2 = manager.create_session()
-        db = manager._get_db()
-        assert db.get_session(s1.session_id) is not None
-        assert db.get_session(s2.session_id) is not None
-        manager.cleanup()
-        assert db.get_session(s1.session_id) is None
-        assert db.get_session(s2.session_id) is None
+        The fork carried remove_session()/cleanup() but NOTHING called them
+        (verified across the whole fork tree at 30b7740026 — the only
+        ``.cleanup()`` hits were unrelated aiohttp AppRunners). Upstream
+        v2026.9.7 removed both. There is no behavior left to preserve, so this
+        gate is retired rather than re-implemented against a dead API.
+        """
+        pytest.skip("remove_session removed upstream; fork had no callers")
+
+
+    def test_cleanup_removes_all_from_db(self):
+        """SKIPPED: ``SessionManager.cleanup`` was deleted upstream.
+
+        Same reasoning as test_remove_session_deletes_from_db above.
+        """
+        pytest.skip("cleanup removed upstream; fork had no callers")
+
 
     def test_list_sessions_includes_db_only(self, manager):
         """Sessions only in DB (not in memory) appear in list_sessions."""
@@ -442,6 +461,9 @@ class TestPersistence:
     def test_update_cwd_restores_from_db(self, manager):
         state = manager.create_session(cwd="/old")
         sid = state.session_id
+        # Upstream only persists sessions that carry history.
+        state.history = [{"role": "user", "content": "hello"}]
+        manager.save_session(sid)
 
         with manager._lock:
             del manager._sessions[sid]
@@ -521,6 +543,10 @@ class TestPersistence:
         with patch("run_agent.AIAgent", side_effect=fake_agent):
             manager = SessionManager(db=db)
             state = manager.create_session(cwd="/work")
+            # Upstream keeps EMPTY ACP sessions ephemeral, so a session must
+            # carry history before save_session() writes the provider snapshot
+            # this gate restores from.
+            state.history = [{"role": "user", "content": "hello"}]
             manager.save_session(state.session_id)
 
             with manager._lock:

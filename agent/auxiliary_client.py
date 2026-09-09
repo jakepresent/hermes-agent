@@ -108,7 +108,7 @@ def aux_probe_mode():
 
 from agent.credential_pool import load_pool
 from agent.model_metadata import (
-    MINIMUM_CONTEXT_LENGTH, get_model_context_length,
+    MINIMUM_CONTEXT_LENGTH, estimate_messages_tokens_rough, get_model_context_length,
     strip_codex_context_variant_suffix as _strip_codex_ctx_variant,
 )
 from hermes_cli.config import get_hermes_home
@@ -382,6 +382,35 @@ def _anthropic_aux_stream_event_hook() -> Callable[[Any], None]:
 # A dead stream fails at the no-progress window (first token AND between tokens); a live
 # stream re-arms per event, bounded by _aux_stream_total_ceiling().
 _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS = 60.0
+
+
+def _aux_stream_no_progress_timeout(
+    messages: List[Dict[str, Any]],
+    total_timeout: Optional[float],
+) -> float:
+    """Fork: prefill-aware first-token window for an auxiliary request.
+
+    Upstream applies a flat 60s fence. That is right for an ordinary dead
+    stream, but a compression request sends hundreds of thousands of input
+    tokens and the provider cannot emit a first token until it has read them —
+    so the fence fires on a perfectly healthy stream and the caller falls back.
+
+    Only the NO-PROGRESS window scales. The hard ceiling
+    (``_aux_stream_total_ceiling``) still bounds a pathological token drip, and
+    an explicitly configured shorter timeout still wins via the min() below.
+    """
+    estimated_tokens = estimate_messages_tokens_rough(messages)
+    if estimated_tokens > 400_000:
+        no_progress_timeout = 300.0
+    elif estimated_tokens > 250_000:
+        no_progress_timeout = 180.0
+    elif estimated_tokens > 100_000:
+        no_progress_timeout = 120.0
+    else:
+        no_progress_timeout = _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
+    if total_timeout is not None:
+        no_progress_timeout = min(no_progress_timeout, float(total_timeout))
+    return no_progress_timeout
 
 
 @contextlib.contextmanager
@@ -1107,11 +1136,24 @@ class _CodexStreamGuard:
     from ``_aux_stream_total_ceiling`` still terminates a pathological drip.
     """
 
-    def __init__(self, client: Any, total_timeout: Optional[float]):
+    def __init__(
+        self, client: Any, total_timeout: Optional[float],
+        first_progress_timeout: Optional[float] = None,
+    ):
         self._client = client
         self.total_timeout = total_timeout
         self._start = time.monotonic()
         self.no_progress_timeout = _AUX_STREAM_NO_PROGRESS_TIMEOUT_SECONDS
+        # Fork: the FIRST token may take much longer than subsequent ones when the
+        # request carries a large prefill — the provider must read hundreds of
+        # thousands of input tokens before it can emit anything. Only that first
+        # window is widened; once the stream is alive, re-arming uses the base
+        # window, so a stream that goes quiet mid-flight still fails fast.
+        self.first_progress_timeout = (
+            float(first_progress_timeout)
+            if first_progress_timeout is not None
+            else self.no_progress_timeout
+        )
         # Progress-aware stream deadlines (supersedes the old single absolute kill at ``total_timeout``).
         # Three regimes: 1. First token: the stream must produce its first substantive payload within
         # ``no_progress_timeout`` (60s default) or we fail fast and let the caller's normal retry/fallback
@@ -1126,6 +1168,7 @@ class _CodexStreamGuard:
         # chat.completions path uses) so a pathological one-token-per-59s drip still terminates.
         if total_timeout is not None:
             self.no_progress_timeout = min(self.no_progress_timeout, float(total_timeout))
+            self.first_progress_timeout = min(self.first_progress_timeout, float(total_timeout))
         self.hard_deadline = self._start + _aux_stream_total_ceiling(total_timeout)
         # The waiting host's absolute deadline clamps the ceiling so the watchdog Timer severs
         # the socket the instant the host stops waiting — a stream blocked between events
@@ -1134,7 +1177,8 @@ class _CodexStreamGuard:
         if isinstance(host_deadline, (int, float)) and host_deadline < self.hard_deadline:
             self.hard_deadline = float(host_deadline)
         self._deadline_lock = threading.Lock()
-        self._progress_deadline = self._start + self.no_progress_timeout
+        # Fork: the initial deadline uses the (possibly widened) FIRST-token window.
+        self._progress_deadline = self._start + self.first_progress_timeout
         self.saw_content = threading.Event()
         self.timed_out = threading.Event()
         # Set only when the timeout WON (not when the owner hard-cancelled first): tells the
@@ -1451,7 +1495,21 @@ class _CodexCompletionsAdapter:
         # ``response.completed.response.output``, which Codex returns as ``null`` (SDK crash).
         resp_kwargs, model, timeout = self._build_responses_kwargs(kwargs)
         total_timeout = timeout if isinstance(timeout, (int, float)) and timeout > 0 else None
-        guard = _CodexStreamGuard(self._client, total_timeout)
+        # Fork: scale the first-token fence by prefill size so a large
+        # compression request is not killed before the provider can respond.
+        # Fork: scale the first-token fence by prefill size so a large
+        # compression request is not killed before the provider can respond.
+        # ``instructions`` carries the system prompt separately from ``input``
+        # on the Responses API, and it is substantial for compression — count
+        # both, or the estimate understates the real prefill.
+        _prefill = list(resp_kwargs.get("input") or [])
+        _instructions = resp_kwargs.get("instructions")
+        if _instructions:
+            _prefill = [{"role": "system", "content": _instructions}, *_prefill]
+        guard = _CodexStreamGuard(
+            self._client, total_timeout,
+            _aux_stream_no_progress_timeout(_prefill, total_timeout),
+        )
         try:
             guard.start()
             from agent.codex_runtime import _bypass_sdk_request_transform, _consume_codex_event_stream
@@ -3204,14 +3262,28 @@ def _is_invalid_aux_response_error(exc: Exception) -> bool:
 _TIMEOUT_NO_RETRY_TASKS = frozenset({"compression", "vision"})
 
 
-def _should_skip_same_provider_retry(task: Optional[str], exc: Exception) -> bool:
+def _should_skip_same_provider_retry(
+    task: Optional[str], exc: Exception, messages: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     """True when a transient error on a critical-path task should go straight to fallback.
 
     Carve-out: a fast first-token fail (dead stream within the no-progress window, zero output —
     see ``_timeout_message``) is cheap and keeps the same-provider retry; mid-stream stalls and
     hard-ceiling timeouts skip to fallback.
+
+    Fork exception to that carve-out: with a LARGE prefill the no-progress window is itself
+    widened (``_aux_stream_no_progress_timeout`` scales it up to 300s), so a "cheap" first-token
+    fail already cost the full window — and retrying the same provider re-sends the same
+    oversized payload for the same result. Above 100k estimated tokens, skip to fallback.
+    Without this, a stuck compression burns 3 stacked windows before falling back.
     """
-    return task in _TIMEOUT_NO_RETRY_TASKS and _is_timeout_error(exc) and "no-progress timeout" not in str(exc)
+    if task not in _TIMEOUT_NO_RETRY_TASKS or not _is_timeout_error(exc):
+        return False
+    if "no-progress timeout" not in str(exc):
+        return True
+    if not messages:
+        return False
+    return estimate_messages_tokens_rough(messages) > 100_000
 
 
 def _evict_cached_clients(provider: str) -> None:
@@ -7089,13 +7161,16 @@ def _plan_aux_call(
     return req, retry_kwargs, candidate_kwargs
 
 
-def _should_retry_same_provider(task: Optional[str], exc: Exception, tag: str) -> bool:
+def _should_retry_same_provider(
+    task: Optional[str], exc: Exception, tag: str,
+    messages: Optional[List[Dict[str, Any]]] = None,
+) -> bool:
     """True when ``exc`` is a transient transport blip worth a same-provider retry; critical-path
     tasks skip it on a full-budget timeout (``_should_skip_same_provider_retry``) and go straight
-    to fallback."""
+    to fallback. ``messages`` lets the large-prefill exception measure the real request cost."""
     if not _is_transient_transport_error(exc):
         return False
-    if _should_skip_same_provider_retry(task, exc):
+    if _should_skip_same_provider_retry(task, exc, messages):
         logger.info("Auxiliary %s%s: timeout on the critical path; "
                     "skipping same-provider retry and falling back: %s", task, tag, exc)
         return False
@@ -7191,7 +7266,7 @@ def _call_llm_impl(
         try:
             return _primary(provider=request_provider, base_url=req.base_info)
         except Exception as transient_err:
-            if not _should_retry_same_provider(task, transient_err, ""):
+            if not _should_retry_same_provider(task, transient_err, "", kwargs.get("messages")):
                 raise
             _max_transient_retries = _transient_retry_count()
             _last_transient = transient_err
@@ -7357,7 +7432,7 @@ async def _async_call_llm_impl(
             return await _primary(provider=request_provider, base_url=req.base_info)
         except Exception as transient_err:
             # The async Codex adapter wraps the sync stream via to_thread: same TimeoutError here.
-            if not _should_retry_same_provider(task, transient_err, " (async)"):
+            if not _should_retry_same_provider(task, transient_err, " (async)", kwargs.get("messages")):
                 raise
             logger.info("Auxiliary %s (async): transient transport error; retrying "
                         "once on the same provider before fallback: %s", task or "call", transient_err)

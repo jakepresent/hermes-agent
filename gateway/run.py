@@ -4224,36 +4224,6 @@ class GatewayRunner(
             task.cancel()
         self._event_loop_watchdog_task = None
 
-    def _start_loop_heartbeat_task(self) -> None:
-        """Start the loop-liveness heartbeat task (#66892), idempotent.
-
-        An asyncio task so a frozen loop stops refreshing
-        ``state/gateway.heartbeat``. Cancelled with the other background
-        tasks during stop(). Best-effort — a liveness probe must never be
-        able to abort startup.
-        """
-        try:
-            _existing_hb = getattr(self, "_loop_heartbeat_task", None)
-            if _existing_hb is not None and not _existing_hb.done():
-                return
-            self._loop_heartbeat_task = asyncio.create_task(
-                loop_heartbeat_forever(
-                    interval_s=DEFAULT_HEARTBEAT_INTERVAL_S,
-                    start_time=getattr(self, "_gateway_started_at", 0.0),
-                )
-            )
-            # PERMANENT for the process lifetime, same as a
-            # _spawn_supervised watcher — tag it so
-            # _scale_to_zero_has_live_background_work() doesn't treat an
-            # armed, otherwise-idle gateway as busy forever.
-            self._loop_heartbeat_task._hermes_supervised_watcher = True  # type: ignore[attr-defined]
-            _bg = getattr(self, "_background_tasks", None)
-            if _bg is not None:
-                _bg.add(self._loop_heartbeat_task)
-                self._loop_heartbeat_task.add_done_callback(_bg.discard)
-        except Exception:
-            logger.debug("Failed to start gateway loop heartbeat", exc_info=True)
-
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
         if hasattr(self, "session_store") and self.session_store is not None:

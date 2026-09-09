@@ -1369,6 +1369,19 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     """
     from agent.opencode_affinity import merge_opencode_session_headers
 
+    # Fork: replay prior provider-confirmed 413 rewrites onto this request.
+    # Upstream shrinks once per turn, so without this every later model/tool
+    # round rebuilds the original oversized inline image and re-earns the same
+    # rejection. Durable history keeps the original; only the request clone is
+    # rewritten. Applied here (not per api_mode) so all four wire formats and
+    # every retry path share one seam.
+    _apply_cached = getattr(agent, "_apply_cached_image_shrinks", None)
+    if callable(_apply_cached):
+        try:
+            _apply_cached(api_messages)
+        except Exception as _shrink_exc:  # never block a request on the cache
+            logger.debug("cached image-shrink replay skipped: %s", _shrink_exc)
+
     kwargs = _build_api_kwargs_for_mode(agent, api_messages, tools_for_api)
     return merge_opencode_session_headers(
         kwargs,

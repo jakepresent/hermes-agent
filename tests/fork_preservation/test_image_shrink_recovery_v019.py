@@ -26,7 +26,9 @@ import sys
 from types import SimpleNamespace
 
 
-from agent.conversation_loop import _image_error_max_dimension
+# Upstream v2026.9.7 moved the 413 recovery path out of conversation_loop
+# into agent/turn_recovery.py. The gate follows the symbol, not the old home.
+from agent.turn_recovery import _image_error_max_dimension
 from agent.error_classifier import FailoverReason, classify_api_error
 
 

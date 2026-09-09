@@ -12,7 +12,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from agent.lazy_forward import forward_static as _forward_static
 from agent.tool_dispatch_helpers import _is_multimodal_tool_result, _multimodal_text_summary
@@ -252,7 +252,46 @@ class VisionMessagePrepMixin:
         )
         return summary
 
-    _try_shrink_image_parts_in_messages = _forward_static("agent.conversation_compression", "try_shrink_image_parts_in_messages")
+    def _image_shrink_cache_for_active_model(self) -> Dict[str, str]:
+        """Fork: bounded request-rewrite cache, scoped to the active (provider, model).
+
+        Scoped because a rewrite confirmed by one provider says nothing about
+        another's limits. At most 4 destinations are retained.
+        """
+        caches = getattr(self, "_image_shrink_request_caches", None)
+        if not isinstance(caches, dict):
+            caches = {}
+            self._image_shrink_request_caches = caches
+        scope = (
+            (getattr(self, "provider", "") or "").strip().lower(),
+            (getattr(self, "model", "") or "").strip(),
+        )
+        if scope not in caches:
+            while len(caches) >= 4:
+                caches.pop(next(iter(caches)))
+            caches[scope] = {}
+        return caches[scope]
+
+    def _try_shrink_image_parts_in_messages(
+        self, api_messages: list, *, max_dimension: int = 8000,
+    ) -> bool:
+        """Forwarder — see ``agent.conversation_compression``.
+
+        Fork: passes the session-local shrink cache so a confirmed rewrite is
+        remembered for later rounds on this same provider/model.
+        """
+        from agent.conversation_compression import try_shrink_image_parts_in_messages
+        return try_shrink_image_parts_in_messages(
+            api_messages, max_dimension=max_dimension,
+            shrink_cache=self._image_shrink_cache_for_active_model(),
+        )
+
+    def _apply_cached_image_shrinks(self, api_messages: list) -> int:
+        """Fork: replay prior 413 rewrites onto a fresh request clone."""
+        from agent.conversation_compression import apply_cached_image_shrinks
+        return apply_cached_image_shrinks(
+            api_messages, shrink_cache=self._image_shrink_cache_for_active_model(),
+        )
 
     def _try_strip_image_parts_from_tool_messages(
         self, api_messages: list, *, remember_model: bool = True

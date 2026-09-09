@@ -1182,6 +1182,32 @@ from plugins.platforms.discord.adapter_reactions import DiscordReactionsMixin
 from plugins.platforms.discord.adapter_vault_code import DiscordVaultCodeMixin, build_vault_code_view
 
 
+def _make_invisible_unicode_visible(text: str) -> str:
+    """Fork: render zero-width / bidi / invisible codepoints as \\uXXXX escapes.
+
+    A prompt is a security surface: an approval question or clarify choice
+    containing zero-width joiners, RTL overrides, or invisible separators can
+    read as something different from what it executes. Discord renders those as
+    nothing at all, so the user approves text they cannot actually see.
+    """
+    if not text:
+        return ""
+    out = []
+    for ch in str(text):
+        code = ord(ch)
+        invisible = (
+            code in (0x00AD, 0x061C, 0x180E, 0xFEFF)
+            or 0x200B <= code <= 0x200F
+            or 0x202A <= code <= 0x202E
+            or 0x2060 <= code <= 0x2064
+            or 0x2066 <= code <= 0x2069
+            or 0xFFF9 <= code <= 0xFFFB
+            or 0xE0000 <= code <= 0xE007F
+        )
+        out.append(f"\\u{code:04x}" if invisible else ch)
+    return "".join(out)
+
+
 class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin,
                      DiscordSlashAuthMixin, DiscordReactionsMixin, DiscordVaultCodeMixin, BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
@@ -5372,6 +5398,40 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             body = body[: max(0, budget - len(truncated_suffix))] + truncated_suffix
         return f"{prefix}{body}{suffix}"
 
+    def _clarify_prompt_content(self, question: str, choices: list, hint: str) -> str:
+        """Fork: plain-content clarify payload carrying the NUMBERED choices.
+
+        Buttons and embeds can both fail to render (mobile web, accessibility
+        clients, notification previews), so content must stand alone. Upstream
+        numbers the choices only when one is too long for a button label.
+
+        Choices are dropped from the TAIL when the message would exceed
+        ``MAX_MESSAGE_LENGTH`` — the tail is not budgeted by
+        ``_self_contained_prompt_content`` (which only truncates the body), so an
+        unbounded choice list would push the whole send over Discord's limit and
+        fail outright. Losing later choices from the text copy is recoverable:
+        the buttons still carry them.
+        """
+        header = f"❓ **{t('platform.discord.prompt.clarify_title')}**"
+        safe_question = _make_invisible_unicode_visible(question)
+        rendered = [_make_invisible_unicode_visible(c) for c in (choices or [])]
+
+        def _tail(items: list) -> str:
+            lines = [""]
+            if items:
+                # Same "N. choice" shape as upstream's numbered_clarify_choices.
+                lines.extend(f"{i}. {c}" for i, c in enumerate(items, start=1))
+                lines.append("")
+            lines.append(hint)
+            return "\n" + "\n".join(lines)
+
+        kept = list(rendered)
+        while True:
+            content = self._self_contained_prompt_content(header, safe_question, tail=_tail(kept))
+            if len(content) <= self.MAX_MESSAGE_LENGTH or not kept:
+                return content
+            kept.pop()
+
     def _approval_mention_content(self) -> Optional[str]:
         """User mentions for approval prompts, gated on ``discord.approval_mentions``
         (``DISCORD_APPROVAL_MENTIONS``). Only numeric allowlist entries; default off."""
@@ -5539,6 +5599,7 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
                 title=_truncate_discord_component_text(f"❓ {clarify_title}", _DISCORD_EMBED_TITLE_LIMIT), color=discord.Color.orange())
             # 5 buttons × 5 rows = 25; one slot is reserved for "Other".
             clean_choices = [s for s in (_flatten_choice(c) for c in (choices or [])) if s][:24]
+            numbered = None
             if clean_choices:
                 hint = t("platform.discord.prompt.clarify_hint_buttons")
                 # Button labels clip past ~40 columns on mobile with no tooltip (#78115): when
@@ -5546,7 +5607,8 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
                 # Capped at half the 2000-char content so the question keeps the rest; every
                 # option keeps its line (shortened) so each button still has one to match.
                 numbered = numbered_clarify_choices(clean_choices, max_label_cols=40, max_chars=1000,
-                                                    escape=lambda s: re.sub(r"([\\*_~`|<>\[\]])", r"\\\1", s))
+                                                    escape=lambda s: re.sub(r"([\\*_~`|<>\[\]])", r"\\\1",
+                                                                            _make_invisible_unicode_visible(s)))
                 if numbered:
                     hint = f"{numbered}\n\n{hint}"
                 view = ClarifyChoiceView(
@@ -5557,8 +5619,15 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             else:
                 hint = t("platform.discord.prompt.clarify_hint_text")
                 view = None
-            content = self._self_contained_prompt_content(
-                f"❓ **{clarify_title}**", str(question or "").strip(), tail=f"\n\n{hint}",
+            # Fork: the plain-content copy carries the NUMBERED CHOICES, not just
+            # the hint. Buttons and embeds can both fail to render (mobile web,
+            # accessibility clients, notification previews); without the choices in
+            # content the user sees a question with no options. Upstream numbers them
+            # only when a label is too long for a button; then the hint already
+            # carries the list and the fork adds none. Invisible codepoints are
+            # escaped so a prompt can't hide part of itself.
+            content = self._clarify_prompt_content(
+                str(question or "").strip(), [] if numbered else clean_choices, hint,
             )
             send_kwargs = {"content": content, "embed": embed}
             if view:

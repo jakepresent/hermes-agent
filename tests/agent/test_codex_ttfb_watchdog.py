@@ -229,6 +229,36 @@ def test_non_codex_api_mode_installs_no_request_token(tmp_path, monkeypatch):
 
 
 
+def test_ttfb_status_emitted_once_per_model_and_input(tmp_path, monkeypatch):
+    """Repeated physical reconnects for one logical request must not spam the same status."""
+    from agent import chat_completion_helpers as h
+
+    agent = _make_codex_agent(tmp_path, monkeypatch)
+    monkeypatch.setenv("HERMES_CODEX_TTFB_TIMEOUT_SECONDS", "0.2")
+    statuses, closes = [], []
+    dummy_client = SimpleNamespace()
+    monkeypatch.setattr(agent, "_create_request_openai_client", lambda **k: dummy_client)
+    monkeypatch.setattr(agent, "_buffer_status", statuses.append)
+    monkeypatch.setattr(agent, "_abort_request_openai_client", lambda c, reason=None: closes.append(reason))
+    monkeypatch.setattr(agent, "_close_request_openai_client", lambda c, reason=None: closes.append(reason))
+
+    def fake_hang(api_kwargs, client=None, on_first_delta=None):
+        deadline = time.time() + 30
+        while time.time() < deadline and not agent._interrupt_requested:
+            time.sleep(0.02)
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(agent, "_run_codex_stream", fake_hang)
+    for input_text in ("hi", "hi", "new prompt"):
+        with pytest.raises(TimeoutError):
+            h.interruptible_api_call(agent, {"model": "gpt-5.5", "input": input_text})
+
+    ttfb_statuses = [s for s in statuses if "No first stream event from provider" in s]
+    assert len(ttfb_statuses) == 2
+    assert ttfb_statuses[0] == ttfb_statuses[1]
+    assert closes.count("codex_ttfb_kill") == 3
+
+
 def test_ttfb_does_not_kill_when_events_flow(tmp_path, monkeypatch):
     """Once a stream event has arrived, a generation that runs past the TTFB
     cutoff is NOT killed by the watchdog — it completes normally."""

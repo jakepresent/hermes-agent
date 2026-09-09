@@ -173,9 +173,15 @@ class _NonStreamRequest:
             "(%.0fs > %.0fs, model=%s). Backend accepted the connection "
             "but sent no stream events. Killing connection so the retry loop can reconnect.", elapsed,
             wd.ttfb_timeout, self._model())
-        agent._buffer_status(
-            f"⚠️ No first stream event from provider in {int(elapsed)}s (codex stream, model: {self._model()}). "
-            f"Reconnecting." + (f" {silent_hint}" if silent_hint else ""))
+        ttfb_status = (
+            f"⚠️ No first stream event from provider in {int(elapsed)}s "
+            f"(codex stream, model: {self._model()}). Reconnecting."
+            + (f" {silent_hint}" if silent_hint else "")
+        )
+        ttfb_status_key = (self._model(), repr(self.api_kwargs.get("input")))
+        if getattr(agent, "_last_codex_ttfb_status_key", None) != ttfb_status_key:
+            agent._buffer_status(ttfb_status)
+            agent._last_codex_ttfb_status_key = ttfb_status_key
         self._abort_request("codex_ttfb_kill")
         agent._emit_wait_notice(f"⚠ no response from provider in {int(elapsed)}s — reconnecting...")
         agent._touch_activity(f"codex stream killed after {int(elapsed)}s with no first stream event")

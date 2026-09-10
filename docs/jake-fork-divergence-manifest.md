@@ -6,9 +6,9 @@ Last audited: 2026-09-09
 
 - Upstream base: `v2026.9.7` at `2237be3559`
 - Clean candidate branch: `jake/v2026.9.7-clean`
-- Latest verified behavior commit: `374c8d5c64`
+- Latest verified behavior commit: `6874c0387e`
 - Package version: Hermes Agent 0.21.1
-- Cleanup ledger: `ChatWorkspace/hermes/v2026.9.7-cleanup-ledger.md`, rev 13
+- Cleanup ledger: `ChatWorkspace/hermes/v2026.9.7-cleanup-ledger.md`, rev 16
 
 This file lists only behavior intentionally retained beyond upstream. It is not a history of old integrations or dropped code. During the next upgrade, start from the new upstream tag and replay the commits below. Before carrying a patch forward, check whether upstream now owns the behavior and prefer upstream's implementation when it does.
 
@@ -191,11 +191,11 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Purpose:** Make SVG attachments readable without depending on Discord's native-image cache or a rasterizer.
 
-**Behavior to preserve:** detect SVG by MIME type or filename, cache it through the authenticated document path, classify it as a document, and inject small UTF-8 SVG source into the prompt. Do not route SVG XML through the raster magic-byte validator.
+**Behavior to preserve:** detect SVG by MIME type or filename, cache it through the authenticated document path, classify it as a document, and inject small UTF-8 SVG source into the prompt. SVGs above the 100 KB text-inline cap must reach the agent as readable document-path notes with `media_text_inlined=false`. Never route `image/svg+xml` through native-image handling or the raster magic-byte validator, including in mixed SVG+raster messages.
 
-**Replay commit:** `0117914da4`
+**Replay commits:** `0117914da4`, `6874c0387e`
 
-**Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/platforms/base.py`, and `tests/gateway/test_discord_attachment_download.py`.
+**Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/platforms/base.py`, `gateway/run.py`, `tests/gateway/test_discord_attachment_download.py`, and `tests/gateway/test_mixed_attachment_routing.py`.
 
 ### 17. Configurable Discord long-response delivery
 

@@ -2625,6 +2625,9 @@ def _event_media_kind_is(event, index: int, mime_prefix: str, fallback_types: fr
 
 
 def _event_media_is_image(event, index: int) -> bool:
+    mtype = _event_media_type_at(event, index).split(";", 1)[0].strip().lower()
+    if mtype == "image/svg+xml":
+        return False
     return _event_media_kind_is(event, index, "image/", frozenset({MessageType.PHOTO}))
 
 

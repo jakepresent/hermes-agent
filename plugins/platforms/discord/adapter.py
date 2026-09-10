@@ -5730,9 +5730,10 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
             return att.url
 
     async def _collect_attachment_media(self, all_attachments: list) -> tuple:
-        """Cache every attachment and return ``(media_urls, media_types, pending_text_injection)``."""
+        """Cache attachments and report which document bodies were inlined into text."""
         media_urls = []
         media_types = []
+        media_text_inlined = []
         pending_text_injection: Optional[str] = None
         for att in all_attachments:
             content_type = att.content_type or "unknown"
@@ -5740,10 +5741,12 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 media_urls.append(await self._cache_simple_media(
                     att, content_type, "image", {".jpg", ".jpeg", ".png", ".gif", ".webp"}, ".jpg"))
                 media_types.append(content_type)
+                media_text_inlined.append(None)
             elif content_type.startswith("audio/"):
                 media_urls.append(await self._cache_simple_media(
                     att, content_type, "audio", {".ogg", ".mp3", ".wav", ".webm", ".m4a"}, ".ogg"))
                 media_types.append(content_type)
+                media_text_inlined.append(None)
             else:
                 ext = ""
                 if att.filename:
@@ -5762,6 +5765,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                     )
                     continue
                 try:
+                    text_inlined = False
                     raw_bytes = await self._cache_discord_document(att, ext)
                     cached_path = await cache_document_from_bytes_async(raw_bytes, att.filename or f"document{ext or '.bin'}")
                     if in_allowlist:
@@ -5791,11 +5795,13 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                                 pending_text_injection = f"{pending_text_injection}\n\n{injection}"
                             else:
                                 pending_text_injection = injection
+                            text_inlined = True
                         except UnicodeDecodeError:
                             pass
+                    media_text_inlined.append(text_inlined)
                 except Exception as e:
                     logger.warning("[Discord] Failed to cache document %s: %s", att.filename, e, exc_info=True)
-        return media_urls, media_types, pending_text_injection
+        return media_urls, media_types, pending_text_injection, media_text_inlined
 
     def _attachment_message_type(self, att: Any) -> MessageType:
         """MessageType from the first attachment's MIME. Any non-media (or untyped) attachment
@@ -5972,7 +5978,9 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
                 or self._derive_auto_thread_name(message.content or "")
             ) if auto_threaded_channel is not None else None,
         )
-        media_urls, media_types, pending_text_injection = await self._collect_attachment_media(all_attachments)
+        media_urls, media_types, pending_text_injection, media_text_inlined = (
+            await self._collect_attachment_media(all_attachments)
+        )
         event_text = normalized_content
         if pending_text_injection:
             event_text = f"{pending_text_injection}\n\n{event_text}" if event_text else pending_text_injection
@@ -6019,6 +6027,7 @@ class DiscordAdapter(DiscordMediaMixin, BasePlatformAdapter):
         event = MessageEvent(
             text=event_text, message_type=msg_type, source=source, raw_message=message,
             message_id=str(message.id), media_urls=media_urls, media_types=media_types,
+            media_text_inlined=media_text_inlined,
             reply_to_message_id=reply_to_id, reply_to_text=reply_to_text,
             timestamp=message.created_at, auto_skill=_skills, channel_prompt=_channel_prompt,
             channel_context=_channel_context,

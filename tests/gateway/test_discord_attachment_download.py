@@ -167,7 +167,7 @@ class TestCacheDiscordImage:
             "plugins.platforms.discord.adapter.cache_image_from_bytes_async",
             new=AsyncMock(),
         ) as mock_image:
-            media_urls, media_types, pending_text = await adapter._collect_attachment_media([att])
+            media_urls, media_types, pending_text, text_inlined = await adapter._collect_attachment_media([att])
 
         mock_document.assert_awaited_once_with(att, ".svg")
         mock_cache_document.assert_awaited_once_with(svg, "art.svg")
@@ -175,7 +175,35 @@ class TestCacheDiscordImage:
         assert media_urls == ["/tmp/art.svg"]
         assert media_types == ["image/svg+xml"]
         assert pending_text == f"[Content of art.svg]:\n{svg.decode()}"
+        assert text_inlined == [True]
         assert adapter._attachment_message_type(att) is MessageType.DOCUMENT
+
+    @pytest.mark.asyncio
+    async def test_large_svg_records_that_text_was_not_inlined(self):
+        adapter = _make_adapter()
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg">' + b" " * (101 * 1024) + b"</svg>"
+        att = SimpleNamespace(
+            url="https://cdn.discordapp.com/attachments/fake/large.svg",
+            filename="large.svg",
+            content_type="image/svg+xml",
+            size=len(svg),
+            read=AsyncMock(return_value=svg),
+        )
+
+        with patch.object(
+            adapter,
+            "_cache_discord_document",
+            new=AsyncMock(return_value=svg),
+        ), patch(
+            "plugins.platforms.discord.adapter.cache_document_from_bytes_async",
+            new=AsyncMock(return_value="/tmp/large.svg"),
+        ):
+            media_urls, media_types, pending_text, text_inlined = await adapter._collect_attachment_media([att])
+
+        assert media_urls == ["/tmp/large.svg"]
+        assert media_types == ["image/svg+xml"]
+        assert pending_text is None
+        assert text_inlined == [False]
 
 
 # ---------------------------------------------------------------------------

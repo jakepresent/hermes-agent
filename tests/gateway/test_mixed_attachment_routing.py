@@ -52,6 +52,55 @@ def test_image_trusts_own_mime_over_photo_message_type():
     assert _event_media_is_image(evt, 1) is False
 
 
+def test_svg_mime_is_a_document_while_raster_siblings_remain_images():
+    evt = _evt(
+        ["/c/art.svg", "/c/preview.png"],
+        ["image/svg+xml", "image/png"],
+        MessageType.DOCUMENT,
+    )
+    assert _event_media_is_image(evt, 0) is False
+    assert _event_media_is_image(evt, 1) is True
+
+
+@pytest.mark.asyncio
+async def test_large_svg_reaches_agent_as_a_document_path_note():
+    runner = object.__new__(GatewayRunner)
+    runner.config = GatewayConfig(
+        platforms={Platform.DISCORD: PlatformConfig(enabled=True, token="fake")}
+    )
+    runner.adapters = {}
+    runner._pending_native_image_paths_by_session = {}
+    runner._session_model_overrides = {}
+    runner._session_reasoning_overrides = {}
+    source = SessionSource(
+        platform=Platform.DISCORD,
+        chat_id="svg-document",
+        chat_type="dm",
+        user_id="42",
+        user_name="Tester",
+    )
+    path = "/cache/large.svg"
+    event = MessageEvent(
+        text="inspect this",
+        message_type=MessageType.DOCUMENT,
+        source=source,
+        media_urls=[path],
+        media_types=["image/svg+xml"],
+        media_text_inlined=[False],
+    )
+
+    prepared = await runner._prepare_inbound_message_text(
+        event=event,
+        source=source,
+        history=[],
+    )
+
+    assert prepared is not None
+    assert path in prepared
+    assert "text is not inlined" in prepared
+    assert "inspect this" in prepared
+
+
 # ─── _build_media_placeholder ────────────────────────────────────────────────
 
 

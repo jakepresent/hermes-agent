@@ -48,6 +48,16 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Primary gates:** `tests/fork_preservation/test_async_delegation_v019.py` and `tests/gateway/test_subagent_protection_30170.py`.
 
+### 2a. Delegation budget visibility
+
+**Purpose:** Put the active child iteration and wall-clock limits directly in the model-facing `delegate_task` description so task sizing happens before a child is spawned.
+
+**Behavior to preserve:** The dynamic tool schema reads the active profile’s `delegation.max_iterations` and `delegation.child_timeout_seconds`, states both limits, and tells the parent to scope below them and reserve budget for a final summary. The current default profile therefore exposes `50 iterations; 600s wall-clock` instead of leaving those constraints hidden in config.
+
+**Replay commit:** `12ca26efec`
+
+**Primary gate:** `scripts/run_tests.sh tests/tools/test_delegate.py -k 'top_level_description or dynamic_limits'`.
+
 ### 3. Session-local image shrink recovery
 
 **Purpose:** Recover from provider HTTP 413 image-size failures without repeatedly recompressing the same image or mutating unrelated sessions.

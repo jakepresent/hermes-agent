@@ -616,7 +616,33 @@ def _build_top_level_description(*, independent_completions=None) -> str:
         "each ungrouped task / `group` returns on its own"
         if independent_completions else "one message per call"
     )
-    return _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + _DESCRIPTION_TAIL
+    # Fork: put the child and late-result budgets in the model-facing description so task sizing
+    # happens before a child is spawned, and the parent does not confuse its own continuation
+    # allowance with the child's.
+    try:
+        delegation_config = _load_config()
+        max_iterations = int(delegation_config.get("max_iterations", DEFAULT_MAX_ITERATIONS))
+    except (TypeError, ValueError):
+        delegation_config = {}
+        max_iterations = DEFAULT_MAX_ITERATIONS
+    try:
+        child_timeout = _get_child_timeout()
+    except Exception:
+        child_timeout = None
+    # Upstream measures child_timeout_seconds as INACTIVITY (resets on progress), not wall-clock.
+    timeout_text = "no inactivity cap" if child_timeout is None else f"{child_timeout:g}s without progress"
+    try:
+        completion_max_turns = int(delegation_config.get("completion_max_turns", 0))
+    except (TypeError, ValueError):
+        completion_max_turns = 0
+    continuation_text = (
+        "a full parent turn" if completion_max_turns <= 0 else f"{completion_max_turns} parent rounds"
+    )
+    budget_rule = (
+        f"- Limits: child {max_iterations} iterations / {timeout_text}; "
+        f"late-result continuation {continuation_text}. Reserve room to summarize.\n"
+    )
+    return _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + budget_rule + _DESCRIPTION_TAIL
 
 _DESCRIPTION_HEAD = (
     "Spawn subagents in isolated contexts; each gets its own conversation, terminal session, and toolset, and only its "

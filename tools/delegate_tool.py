@@ -516,17 +516,28 @@ def _build_top_level_description() -> str:
     else:
         restrictions_rule = "- Children cannot call delegate_task, clarify, memory, or cronjob.\n"
     try:
-        max_iterations = int(_load_config().get("max_iterations", DEFAULT_MAX_ITERATIONS))
+        delegation_config = _load_config()
+        max_iterations = int(delegation_config.get("max_iterations", DEFAULT_MAX_ITERATIONS))
     except (TypeError, ValueError):
+        delegation_config = {}
         max_iterations = DEFAULT_MAX_ITERATIONS
+    try:
+        completion_max_turns = int(delegation_config.get("completion_max_turns", 0))
+    except (TypeError, ValueError):
+        completion_max_turns = 0
     try:
         child_timeout = _get_child_timeout()
     except Exception:
         child_timeout = None
     timeout_text = "no wall-clock cap" if child_timeout is None else f"{child_timeout:g}s wall-clock"
+    continuation_text = (
+        "a full parent turn"
+        if completion_max_turns <= 0
+        else f"{completion_max_turns} parent rounds"
+    )
     budget_rule = (
-        f"- Per-child limit: {max_iterations} iterations; {timeout_text}. "
-        "Scope below both and reserve budget to summarize.\n"
+        f"- Limits: child {max_iterations} iterations / {timeout_text}; "
+        f"late-result continuation {continuation_text}. Reserve room to summarize.\n"
     )
     return _DESCRIPTION_HEAD + restrictions_rule + budget_rule + _DESCRIPTION_TAIL
 

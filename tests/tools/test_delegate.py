@@ -128,6 +128,8 @@ class TestDelegateRequirements(unittest.TestCase):
             patch("tools.delegate_tool._get_max_concurrent_children", return_value=7),
             patch("tools.delegate_tool._get_max_spawn_depth", return_value=4),
             patch("tools.delegate_tool._get_orchestrator_enabled", return_value=True),
+            patch("tools.delegate_tool._get_child_timeout", return_value=600.0),
+            patch("tools.delegate_tool._load_config", return_value={"max_iterations": 50}),
         ):
             overrides = _build_dynamic_schema_overrides()
             definition = registry.get_definitions({"delegate_task"})[0]["function"]
@@ -138,6 +140,9 @@ class TestDelegateRequirements(unittest.TestCase):
         # Depth ceiling now rides the depth-derived recursion rule in the
         # top-level text (only rendered when nesting is available).
         self.assertIn("max_spawn_depth=4", overrides["description"])
+        self.assertIn("50 iterations", overrides["description"])
+        self.assertIn("600s wall-clock", overrides["description"])
+        self.assertIn("reserve budget to summarize", overrides["description"])
         self.assertNotIn("up to 7", overrides["description"])
 
 class TestChildSystemPrompt(unittest.TestCase):

@@ -515,7 +515,20 @@ def _build_top_level_description() -> str:
         )
     else:
         restrictions_rule = "- Children cannot call delegate_task, clarify, memory, or cronjob.\n"
-    return _DESCRIPTION_HEAD + restrictions_rule + _DESCRIPTION_TAIL
+    try:
+        max_iterations = int(_load_config().get("max_iterations", DEFAULT_MAX_ITERATIONS))
+    except (TypeError, ValueError):
+        max_iterations = DEFAULT_MAX_ITERATIONS
+    try:
+        child_timeout = _get_child_timeout()
+    except Exception:
+        child_timeout = None
+    timeout_text = "no wall-clock cap" if child_timeout is None else f"{child_timeout:g}s wall-clock"
+    budget_rule = (
+        f"- Per-child limit: {max_iterations} iterations; {timeout_text}. "
+        "Scope below both and reserve budget to summarize.\n"
+    )
+    return _DESCRIPTION_HEAD + restrictions_rule + budget_rule + _DESCRIPTION_TAIL
 
 _DESCRIPTION_HEAD = (
     "Spawn subagents in isolated contexts; each gets its own conversation, terminal session, and toolset, and only its "

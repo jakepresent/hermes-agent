@@ -50,11 +50,11 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 ### 2a. Delegation budget visibility
 
-**Purpose:** Put the active child iteration and wall-clock limits directly in the model-facing `delegate_task` description so task sizing happens before a child is spawned.
+**Purpose:** Put the active child iteration limit, child wall-clock limit, and late-result parent continuation limit directly in the model-facing `delegate_task` description so task sizing happens before a child is spawned and a parent does not confuse its own continuation warning with the child’s allowance.
 
-**Behavior to preserve:** The dynamic tool schema reads the active profile’s `delegation.max_iterations` and `delegation.child_timeout_seconds`, states both limits, and tells the parent to scope below them and reserve budget for a final summary. The current default profile therefore exposes `50 iterations; 600s wall-clock` instead of leaving those constraints hidden in config.
+**Behavior to preserve:** The dynamic tool schema reads `delegation.max_iterations`, `delegation.child_timeout_seconds`, and `delegation.completion_max_turns`, labels the child and parent budgets separately, and tells the parent to reserve room for synthesis. The current default profile therefore exposes `child 50 iterations / 600s wall-clock; late-result continuation 10 parent rounds` instead of leaving those constraints hidden in config.
 
-**Replay commit:** `12ca26efec`
+**Replay commits:** `12ca26efec` and `752e39e323`
 
 **Primary gate:** `scripts/run_tests.sh tests/tools/test_delegate.py -k 'top_level_description or dynamic_limits'`.
 

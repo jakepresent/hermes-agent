@@ -34,6 +34,39 @@ if TYPE_CHECKING:  # string annotations only; never imported at runtime (cycle)
 # Log-record parity with the origin module.
 logger = logging.getLogger("gateway.run")
 
+# Default filler words removed from Discord transcript echoes (``stt.echo_strip_fillers``).
+# Deliberately minimal: words like "like" / "you know" are often load-bearing. Override the
+# whole list via ``stt.echo_filler_words`` in config.yaml.
+DEFAULT_STT_ECHO_FILLER_WORDS = ("um", "umm", "uh", "uhh", "uhm", "erm", "mm-hmm", "mm-hm")
+
+_STT_ECHO_FILLER_PATTERNS: Dict[Tuple[str, ...], "re.Pattern[str]"] = {}
+
+
+def _strip_stt_filler_words(text: str, filler_words: Optional[Tuple[str, ...]] = None) -> str:
+    """Remove standalone filler words (case-insensitive) and tidy spacing/caps.
+
+    Standalone only: "I um think" → "I think", never touching words that merely contain a
+    filler ("umbrella", "upshot"). Trailing punctuation left on the last remaining word, and a
+    word that followed a removed filler gets capitalized when it starts the new sentence.
+    """
+    if not (text or "").strip():
+        return text
+    words = tuple(filler_words) if filler_words else DEFAULT_STT_ECHO_FILLER_WORDS
+    pattern = _STT_ECHO_FILLER_PATTERNS.get(words)
+    if pattern is None:
+        alternation = "|".join(re.escape(w) for w in words)
+        pattern = re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+        _STT_ECHO_FILLER_PATTERNS[words] = pattern
+    cleaned = pattern.sub(" ", text)
+    cleaned = re.sub(r"\s+", " ", cleaned)                       # collapse filler gaps
+    cleaned = re.sub(r"([,.!?;:])(?:\s*[,.;:!?])+", r"\1", cleaned)  # ", ," → ","
+    cleaned = re.sub(r"\s+([,.!?;:])", r"\1", cleaned)           # space before punctuation
+    cleaned = re.sub(r"([,.!?;:])(?=[^\s\d])", r"\1 ", cleaned)  # missing space after
+    cleaned = re.sub(r"^[,.;:!?]\s*", "", cleaned.strip())       # leading punct from first filler
+    if cleaned and cleaned[0].isalpha():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    return cleaned
+
 
 class GatewayInboundMixin:
     """Inbound message pipeline (_handle_message, text/media preparation, durable-turn markers, plugin injection) for GatewayRunner."""
@@ -1394,10 +1427,16 @@ class GatewayInboundMixin:
     async def _echo_stt_transcripts(
         self, adapter, source: SessionSource, transcripts: List[str], *, metadata=None, log_context: str = "Transcript"
     ) -> None:
-        """Send each transcript back as ``🎙️ "…"`` (best-effort; failures are logged, never raised)."""
+        """Send each transcript back as ``🎙️ "…"``, optionally with filler words stripped
+        (``stt.echo_strip_fillers``); failures are logged, never raised."""
         for tx in transcripts:
             try:
-                await adapter.send(source.chat_id, f'🎙️ "{tx}"', metadata=metadata)
+                if self._should_strip_stt_echo_fillers():
+                    words = tuple(getattr(self.config, "stt_echo_filler_words", None) or ()) or None
+                    shown = _strip_stt_filler_words(tx, words)
+                else:
+                    shown = tx
+                await adapter.send(source.chat_id, f'🎙️ "{shown}"', metadata=metadata)
             except Exception as echo_exc:
                 logger.debug("%s echo failed (non-fatal): %s", log_context, echo_exc)
 

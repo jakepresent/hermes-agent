@@ -6,6 +6,7 @@ import contextlib
 import logging
 import math
 import os
+import re
 from pathlib import Path
 from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Dict, List, Optional, Any, Callable
@@ -40,6 +41,18 @@ def _coerce_bool(value: Any, default: bool = True) -> bool:
         parsed = _bool_token(value)
         return default if parsed is None else parsed
     return is_truthy_value(value, default=default)
+
+
+def _coerce_str_list(value: Any) -> Optional[List[str]]:
+    """Coerce a config value to a list of non-empty strings; None/empty/malformed → None."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [part for part in re.split(r"[,\s]+", value) if part]
+    if not isinstance(value, (list, tuple)):
+        return None
+    cleaned = [str(item).strip() for item in value if str(item).strip()]
+    return cleaned or None
 
 
 def _normalize_multiplex_profile_allowlist(value: Any) -> Optional[List[str]]:
@@ -553,6 +566,8 @@ class GatewayConfig:
     filter_silence_narration: bool = True
     stt_enabled: bool = True  # Auto-transcribe inbound voice messages
     stt_echo_transcripts: bool = True  # Echo raw STT transcripts back to the user
+    stt_echo_strip_fillers: bool = False  # Remove filler words (um/uh/…) from echoed transcripts
+    stt_echo_filler_words: Optional[List[str]] = None  # Override the default filler word list
     group_sessions_per_user: bool = True  # Isolate group sessions per participant when user IDs exist
     thread_sessions_per_user: bool = False  # False = threads shared across participants
     max_concurrent_sessions: Optional[int] = None  # Positive int caps simultaneous active sessions
@@ -587,7 +602,8 @@ class GatewayConfig:
     # Scalar fields serialized verbatim by ``to_dict`` (in output order).
     _SCALAR_DICT_FIELDS = (
         "write_sessions_json", "always_log_local", "filter_silence_narration", "stt_enabled",
-        "stt_echo_transcripts", "group_sessions_per_user", "thread_sessions_per_user",
+        "stt_echo_transcripts", "stt_echo_strip_fillers", "stt_echo_filler_words",
+        "group_sessions_per_user", "thread_sessions_per_user",
         "max_concurrent_sessions", "multiplex_profiles", "multiplex_profile_allowlist",
         "room_link_url", "systemd_watchdog_seconds", "loop_watchdog",
         "loop_watchdog_probe_interval_s", "loop_watchdog_probe_timeout_s",
@@ -730,6 +746,8 @@ class GatewayConfig:
             **{name: _coerce_bool(data.get(name), default) for name, default in _TOPLEVEL_BOOL_DEFAULTS.items()},
             stt_enabled=_coerce_bool(stt_setting("stt_enabled", "enabled"), True),
             stt_echo_transcripts=_coerce_bool(stt_setting("stt_echo_transcripts", "echo_transcripts"), True),
+            stt_echo_strip_fillers=_coerce_bool(stt_setting("stt_echo_strip_fillers", "echo_strip_fillers"), False),
+            stt_echo_filler_words=_coerce_str_list(stt_setting("stt_echo_filler_words", "echo_filler_words")),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
             multiplex_profile_allowlist=pick("multiplex_profile_allowlist"),
             room_link_url=room_link_url if isinstance(room_link_url, str) else None,

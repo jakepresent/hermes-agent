@@ -314,6 +314,9 @@ class GatewayVoiceMixin:
     def _should_echo_stt_transcripts(self) -> bool:
         return bool(getattr(self.config, "stt_echo_transcripts", True))
 
+    def _should_strip_stt_echo_fillers(self) -> bool:
+        return bool(getattr(self.config, "stt_echo_strip_fillers", False))
+
     async def _send_voice_reply(self, event: MessageEvent, text: str) -> None:
         """Generate TTS audio and send as a voice message before the text reply. The TTS tool
         may return one combined file or several separately valid ones (combination unavailable /

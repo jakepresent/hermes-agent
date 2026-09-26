@@ -217,6 +217,16 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/config_loader.py`, and `tests/gateway/test_discord_split_cap.py`.
 
+### 18. Avoid redundant paid vision analysis for native images
+
+**Purpose:** When a user image is already attached natively to the model, do not suggest an extra `vision_analyze` call just because the user referenced that image.
+
+**Behavior to preserve:** The tool schema reserves `vision_analyze` for images not already in the model's context, new image files/URLs, or a genuinely needed closer crop. Native user-message routing remains unchanged; the auxiliary vision fallback remains available for sessions that need it. The default profile uses an authenticated OpenRouter auxiliary vision provider with explicit DeepInfra-only, no-fallback, ZDR routing in `~/.hermes/config.yaml` (local config, not a fork commit).
+
+**Replay commit:** `329facc1eb`
+
+**Primary gate:** `tests/tools/test_vision_tools.py::TestVisionRegistration::test_vision_analyze_registered_with_schema` and `tests/tools/test_vision_native_fast_path.py`.
+
 ## Intentionally absent
 
 Do not revive these from the old fork unless Jake makes a new product decision:

@@ -706,6 +706,23 @@ class TestErrorClassification:
         assert "smaller" in result["analysis"].lower()
 
 
+class TestVisionRegistration:
+    def test_vision_analyze_registered_with_schema(self):
+        from tools.registry import registry
+
+        entry = registry._tools.get("vision_analyze")
+        assert entry is not None
+        assert entry.toolset == "vision"
+        assert entry.is_async is True
+        assert callable(entry.handler)
+
+        props = entry.schema.get("parameters", {}).get("properties", {})
+        assert "image_url" in props
+        assert "question" in props
+        description = entry.schema["description"].lower()
+        assert "already attached" in description
+        assert "do not call" in description
+        assert "crop" in description
 
 
 # ---------------------------------------------------------------------------

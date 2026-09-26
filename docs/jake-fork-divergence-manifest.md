@@ -227,6 +227,16 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Primary gate:** `tests/tools/test_vision_tools.py::TestVisionRegistration::test_vision_analyze_registered_with_schema` and `tests/tools/test_vision_native_fast_path.py`.
 
+### 19. Reject truncated execution and edit payloads
+
+**Purpose:** Prevent a historical tool-argument preview from being executed as code or saved as an edit when the model copies Hermes's `...[truncated]` suffix into a fresh tool call.
+
+**Behavior to preserve:** Before executing `execute_code`, `terminal`, `write_file`, or `patch`, reject affected payload fields ending with the truncation marker (allow trailing whitespace). Check again after request/pre-tool hooks and at the final dispatch point after execution middleware. Return an explicit blocked tool result telling the model to read the original source and retry with a complete, smaller payload. Keep read-only searches for the marker and non-final occurrences in legitimate code available. This is a boundary guard, not proof of where the malformed call originated.
+
+**Replay commit:** `9a6da6d72d`
+
+**Primary gates:** `tests/test_truncated_tool_arguments.py` and `tests/test_model_tools.py`.
+
 ## Intentionally absent
 
 Do not revive these from the old fork unless Jake makes a new product decision:

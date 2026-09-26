@@ -614,6 +614,27 @@ _LEGACY_TOOL_ALIASES = {
 }
 _READ_SEARCH_TOOLS = {"read_file", "search_files"}
 
+# Context compression shortens historical tool argument strings with this suffix. If a model
+# copies such a fragment into a fresh executable/write payload, refuse it rather than running
+# incomplete code or persisting the marker into a file. Only inspect payload fields: read-only
+# searches for the marker and code containing it as a non-final string remain legitimate.
+_TRUNCATED_ARGUMENT_SUFFIX = "...[truncated]"
+_MUTATING_PAYLOAD_FIELDS = {
+    "execute_code": ("code",),
+    "terminal": ("command",),
+    "write_file": ("content",),
+    "patch": ("old_string", "new_string", "patch"),
+}
+
+
+def _truncated_payload_field(function_name: str, function_args: Dict[str, Any]) -> Optional[str]:
+    """Return the field whose payload ends with Hermes's historical truncation marker."""
+    for field in _MUTATING_PAYLOAD_FIELDS.get(function_name, ()):
+        value = function_args.get(field)
+        if isinstance(value, str) and value.rstrip().endswith(_TRUNCATED_ARGUMENT_SUFFIX):
+            return field
+    return None
+
 
 # --- Tool error sanitization --------------------------------------------------
 # Defense-in-depth: strip role tags / CDATA / code fences from exception text the
@@ -833,6 +854,15 @@ def _execute_tool(function_name: str, function_args: dict[str, Any], original_ar
         dispatch_kwargs["user_task"] = user_task
 
     def _dispatch(next_args: dict[str, Any]) -> Any:
+        # Fork: execution middleware can replace arguments after the outer pre-dispatch guard,
+        # so the legacy-marker check runs again at the final seam, before any dispatch route.
+        field = _truncated_payload_field(function_name, next_args)
+        if field is not None:
+            return tool_error(
+                f"{function_name}.{field} ends with Hermes's ...[truncated] marker; "
+                "the tool call was not executed. Read the original source and retry "
+                "with a complete, smaller payload."
+            )
         from tools.connectors import dispatch_connector_call, is_connector_name
         if is_connector_name(function_name):
             return dispatch_connector_call(function_name, next_args, ids.tool_call_id, ids.turn_id, ids.task_id)
@@ -938,10 +968,30 @@ def handle_function_call(
         if function_name in _AGENT_LOOP_TOOLS:
             return tool_error(f"{function_name} must be handled by the agent loop")
 
+        def _reject_truncated_payload() -> Optional[str]:
+            field = _truncated_payload_field(function_name, function_args)
+            if field is None:
+                return None
+            message = (
+                f"{function_name}.{field} ends with Hermes's ...[truncated] marker; "
+                "the tool call was not executed. Read the original source and retry with a "
+                "complete, smaller payload. Do not fill in missing text from the preview."
+            )
+            return _emit(tool_error(message), status="blocked",
+                         error_type="truncated_tool_arguments", error_message=message)
+
+        # Reject before pre-tool hooks or edit approvals; check again after hooks because
+        # a plugin may replace the arguments before dispatch.
+        truncated_result = _reject_truncated_payload()
+        if truncated_result is not None:
+            return truncated_result
         function_args, blocked = _pre_dispatch_guards(function_name, function_args, skip_pre_tool_call_hook, ids, trace)
         if blocked is not None:
             result, error_type, error_message = blocked
             return _emit(result, status="blocked", error_type=error_type, error_message=error_message)
+        truncated_result = _reject_truncated_payload()
+        if truncated_result is not None:
+            return truncated_result
 
         # Any non-read/search tool resets the consecutive-read-loop counter.
         if function_name not in _READ_SEARCH_TOOLS:

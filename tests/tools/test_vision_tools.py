@@ -721,6 +721,10 @@ class TestVisionRegistration:
         props = entry.schema.get("parameters", {}).get("properties", {})
         assert "image_url" in props
         assert "question" in props
+        description = entry.schema["description"].lower()
+        assert "already attached" in description
+        assert "do not call" in description
+        assert "crop" in description
 
 
 # ---------------------------------------------------------------------------

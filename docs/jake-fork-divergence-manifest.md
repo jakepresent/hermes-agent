@@ -221,7 +221,7 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Purpose:** When a user image is already attached natively to the model, do not suggest an extra `vision_analyze` call just because the user referenced that image.
 
-**Behavior to preserve:** The tool schema reserves `vision_analyze` for images not already in the model's context, new image files/URLs, or a genuinely needed closer crop. Native user-message routing remains unchanged; the auxiliary vision fallback remains available for sessions that need it. The default profile uses an authenticated OpenRouter auxiliary vision provider with explicit DeepInfra-only, no-fallback, ZDR routing in `~/.hermes/config.yaml` (local config, not a fork commit).
+**Behavior to preserve:** The tool schema reserves `vision_analyze` for images not already in the model's context, new image files/URLs, or a genuinely needed closer crop. Native user-message routing remains unchanged; the auxiliary vision fallback remains available for sessions that need it. The default profile uses authenticated OpenRouter providers for auxiliary vision and compression, with explicit DeepInfra-only, no-fallback, ZDR routing in `~/.hermes/config.yaml` (local config, not a fork commit).
 
 **Replay commit:** `329facc1eb`
 

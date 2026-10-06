@@ -707,7 +707,10 @@ class TestMicroCompaction:
         assert cc._micro_compact_rolling_summary
         assert cc._micro_compact_cursor > 0
 
-        cc.compress(msgs, force=True)
+        # Exercise a validated full summary, not an unavailable provider's old
+        # deterministic fallback. Only successful replacement resets micro state.
+        with patch.object(cc, "_generate_summary", return_value="validated full summary"):
+            cc.compress(msgs, force=True)
 
         assert cc._micro_compact_rolling_summary == ""
         assert cc._micro_compact_cursor == 0

@@ -296,13 +296,9 @@ class TestFlushAfterCompression:
             # for a reason INDEPENDENT of _db_persisted (ephemeral scaffolding,
             # synthetic recovery turns). Keep this fixture free of such messages
             # or the row count would legitimately differ from len(compressed).
-            # The transcript must also be large enough that the provider-less
-            # static fallback net-shrinks it (middle drops must outweigh the
-            # fixed compaction marker overhead), or the no-growth commit guard
-            # correctly refuses the rotation this test exercises. Sized for
-            # the lean tail default: the 10K-token tail floor must leave a
-            # substantial compressible middle (~2K chars/message × 40 ≈ 20K
-            # estimated tokens total).
+            # A validated summary must net-shrink the fixture, or the no-growth
+            # commit guard correctly refuses the rotation. The lean tail floor
+            # must leave a substantial compressible middle.
             messages = [
                 {
                     "role": "user" if i % 2 == 0 else "assistant",
@@ -312,7 +308,11 @@ class TestFlushAfterCompression:
                 for i in range(40)
             ]
 
-            with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
+            from types import SimpleNamespace
+            response = SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop", message=SimpleNamespace(content="Validated checkpoint", reasoning_content=None),
+            )])
+            with patch("agent.context_compressor.call_llm", return_value=response):
                 compressed, _ = compress_context(
                     agent, messages, approx_tokens=100_000, system_message="sys"
                 )

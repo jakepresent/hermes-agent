@@ -435,8 +435,8 @@ class TestCompress:
             {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}", "_db_persisted": True}
             for i in range(10)
         ]
-        with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
-            result = compressor.compress(msgs)
+        with patch.object(compressor, "_generate_summary", return_value="validated summary"):
+            result = compressor.compress(msgs, force=True)
         assert len(result) < len(msgs)
         assert all("_db_persisted" not in msg for msg in result)
 
@@ -454,8 +454,8 @@ class TestCompress:
         ]
         # Make the per-site helper leak the marker (dict.copy keeps it).
         with patch.object(_cc, "_fresh_compaction_message_copy", lambda m: m.copy()), \
-             patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
-            result = compressor.compress(msgs)
+             patch.object(compressor, "_generate_summary", return_value="validated summary"):
+            result = compressor.compress(msgs, force=True)
         assert len(result) < len(msgs)
         assert all("_db_persisted" not in msg for msg in result), (
             "terminal sweep must strip _db_persisted even when a copy site leaks"
@@ -630,8 +630,8 @@ class TestGenerateSummaryNoneContent:
             {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
             for i in range(10)
         ]
-        with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
-            result = c.compress(msgs)
+        with patch.object(c, "_generate_summary", return_value="validated summary"):
+            result = c.compress(msgs, force=True)
         assert len(result) < len(msgs)
 
 
@@ -874,8 +874,8 @@ class TestAuthFailureAborts:
         assert c._last_summary_fallback_used is False
         assert c._last_summary_dropped_count == 0
 
-    def test_402_quota_with_retry_uses_existing_fallback(self):
-        """A reset-window quota remains transient instead of aborting compression."""
+    def test_402_quota_full_compression_fails_closed(self):
+        """A reset-window quota remains transient but full compaction fails closed."""
         err = StubProviderError(
             "quota exceeded, please retry after the window resets",
             status_code=402,
@@ -892,10 +892,10 @@ class TestAuthFailureAborts:
         with patch("agent.context_compressor.call_llm", side_effect=err):
             result = c.compress(msgs, current_tokens=999999, force=True)
 
-        assert result != msgs
+        assert result is msgs
         assert c._last_summary_auth_failure is False
-        assert c._last_compress_aborted is False
-        assert c._last_summary_fallback_used is True
+        assert c._last_compress_aborted is True
+        assert c._last_summary_fallback_used is False
 
 
     def test_403_also_flags_auth_failure(self):
@@ -1261,7 +1261,7 @@ class TestAuxModelFallbackSurfacedToCallers:
             {"role": "user", "content": "msg 7"},
         ]
 
-    def test_compress_exposes_aux_failure_fields_after_successful_fallback(self):
+    def test_compress_exposes_aux_failure_fields_without_retry(self):
         mock_ok = MagicMock()
         mock_ok.choices = [MagicMock()]
         mock_ok.choices[0].message.content = "summary via main"
@@ -1283,17 +1283,15 @@ class TestAuxModelFallbackSurfacedToCallers:
         ):
             result = c.compress(self._make_msgs())
 
-        # Recovery succeeded → no fallback placeholder
+        # No second model request and no deterministic fallback placeholder
         assert c._last_summary_fallback_used is False
         # But aux-model failure IS recorded for the gateway/CLI warning
         assert c._last_aux_model_failure_model == "broken-aux-model"
         assert c._last_aux_model_failure_error is not None
         assert "400" in c._last_aux_model_failure_error
-        # Result is well-formed with a real summary, not a placeholder
-        assert any(
-            isinstance(m.get("content"), str) and "summary via main" in m["content"]
-            for m in result
-        )
+        assert result == self._make_msgs()
+        assert c._last_compress_aborted is True
+        assert c.summary_model == "broken-aux-model"
 
     def test_compress_clears_aux_failure_fields_at_start_of_next_call(self):
         """A subsequent successful compression must clear the aux-failure
@@ -1313,33 +1311,31 @@ class TestAuxModelFallbackSurfacedToCallers:
                 protect_last_n=2,
             )
 
-        # Call 1: aux fails, retry-on-main succeeds
+        # Call 1: aux fails without an immediate retry
         with patch(
             "agent.context_compressor.call_llm",
             side_effect=[err_400, mock_ok],
         ):
-            c.compress(self._make_msgs())
+            c.compress(self._make_msgs(), force=True)
         assert c._last_aux_model_failure_model == "broken-aux-model"
 
-        # Call 2: clean run on main (summary_model was cleared to "" after
-        # first fallback).  Aux-failure fields MUST reset at compress() start
-        # so the old warning state doesn't leak into this call.
+        # Call 2: explicit retry succeeds on the same configured route.
+        # Aux-failure warning fields reset at compress() start.
         with patch(
             "agent.context_compressor.call_llm",
             return_value=mock_ok,
         ):
-            c.compress(self._make_msgs())
+            c.compress(self._make_msgs(), force=True)
         assert c._last_aux_model_failure_model is None
         assert c._last_aux_model_failure_error is None
 
 
 class TestSummaryFailureTrackingForGatewayWarning:
-    """Default behavior (compression.abort_on_summary_failure=False):
-    summary-generation failure inserts a static fallback placeholder and
-    records dropped count + fallback flag so gateway hygiene & /compress
-    can surface a visible warning."""
+    """Full compaction fails closed even with the legacy non-aborting setting.
+    Warning fields describe the failed call; no rows are dropped and no static
+    fallback is persisted."""
 
-    def test_compress_records_fallback_and_dropped_count_on_summary_failure(self):
+    def test_compress_records_abort_without_dropping_source(self):
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=2, protect_last_n=2)
 
@@ -1355,19 +1351,16 @@ class TestSummaryFailureTrackingForGatewayWarning:
         ]
 
         with patch("agent.context_compressor.call_llm", side_effect=Exception("404 model not found")):
-            result = c.compress(msgs)
+            result = c.compress(msgs, force=True)
 
-        assert c._last_summary_fallback_used is True
-        assert c._last_summary_dropped_count > 0
+        assert c._last_summary_fallback_used is False
+        assert c._last_summary_dropped_count == 0
         assert c._last_summary_error is not None
-        # Default mode: abort flag must NOT fire.
-        assert c._last_compress_aborted is False
-        assert any(
-            isinstance(m.get("content"), str) and "Summary generation was unavailable" in m["content"]
-            for m in result
-        )
+        # Even the legacy non-aborting setting cannot drop unsummarized rows.
+        assert c._last_compress_aborted is True
+        assert result is msgs
 
-    def test_summary_failure_fallback_preserves_tool_paths_and_redacts_secret_context(self):
+    def test_summary_failure_preserves_source_and_redacts_full_input(self):
         with patch("agent.context_compressor.get_model_context_length", return_value=100000):
             c = ContextCompressor(model="test", quiet_mode=True, protect_first_n=1, protect_last_n=1)
 
@@ -1395,14 +1388,16 @@ class TestSummaryFailureTrackingForGatewayWarning:
             {"role": "user", "content": "current live request should stay in tail"},
         ]
 
-        with patch("agent.context_compressor.call_llm", side_effect=Exception("timeout")):
-            result = c.compress(msgs)
+        with patch("agent.context_compressor.call_llm", side_effect=Exception("timeout")) as transport:
+            result = c.compress(msgs, force=True)
 
-        fallback = next(m["content"] for m in result if "Summary generation was unavailable" in m.get("content", ""))
-        assert "Called tool(s): read_file" in fallback
-        assert "/tmp/project/app.py" in fallback
-        assert secret not in fallback
-        assert "ghp_" not in fallback
+        assert result is msgs
+        assert c._last_summary_fallback_used is False
+        prompt = transport.call_args.kwargs["messages"][0]["content"]
+        assert "read_file" in prompt and "/tmp/project/app.py" in prompt
+        # Existing strict redaction may retain a masked token-type prefix;
+        # the full credential must never reach the summary transport.
+        assert secret not in prompt
 
 
 
@@ -1833,8 +1828,8 @@ class TestSummaryTargetRatio:
             + [{"role": "user" if i % 2 == 0 else "assistant", "content": f"msg {i}"}
                for i in range(8)]
         )
-        with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
-            result = c.compress(msgs)
+        with patch.object(c, "_generate_summary", return_value="validated summary"):
+            result = c.compress(msgs, force=True)
         # System prompt (msg[0]) survives as head
         assert result[0]["role"] == "system"
         assert result[0]["content"].startswith("System prompt")
@@ -3547,8 +3542,8 @@ class TestPreLlmFeasibilityCheck:
         mock_gen.assert_not_called()
         assert compressor._prellm_skip_count == 1
         assert compressor._last_feasibility_skip is True
-        # Deterministic dropping still made progress.
-        assert len(result) < len(msgs)
+        # Feasibility skip cannot publish destructive cleanup.
+        assert result is msgs
 
     def test_boundary_accounting_skip_does_not_feed_fallback_streak(self, compressor):
         """The interaction teknium's sweeper review flagged on #68334: the
@@ -3563,16 +3558,15 @@ class TestPreLlmFeasibilityCheck:
 
         for _ in range(2):
             with patch.object(compressor, "_generate_summary") as mock_gen:
-                compressor.compress(list(msgs), force=False)
+                attempt_input = list(msgs)
+                result = compressor.compress(attempt_input, force=False)
             mock_gen.assert_not_called()
             # Mirror the boundary wrapper's bookkeeping
             # (agent/conversation_compression.py: record_completed_compaction
             # call after a made-progress boundary).
-            assert compressor._last_compression_made_progress is True
-            compressor.record_completed_compaction(
-                used_fallback=compressor._last_summary_fallback_used,
-                feasibility_skip=compressor._last_feasibility_skip,
-            )
+            assert result is attempt_input
+            assert compressor._last_compression_made_progress is False
+            # The boundary records completion only after real progress.
 
         assert compressor._prellm_skip_count == 2
         assert compressor._fallback_compression_streak == 0
@@ -3594,7 +3588,7 @@ class TestPreLlmFeasibilityCheck:
 
         assert compressor._fallback_compression_streak == 1
 
-    def test_real_fallback_still_feeds_streak(self, compressor):
+    def test_failed_full_summary_does_not_feed_fallback_streak(self, compressor):
         """Negative control: a genuine summary-failure fallback boundary
         (no feasibility skip) must keep incrementing the streak breaker."""
         compressor._ineffective_compression_count = 1
@@ -3604,12 +3598,10 @@ class TestPreLlmFeasibilityCheck:
             compressor.compress(list(msgs), force=False)
 
         assert compressor._last_feasibility_skip is False
-        assert compressor._last_summary_fallback_used is True
-        compressor.record_completed_compaction(
-            used_fallback=compressor._last_summary_fallback_used,
-            feasibility_skip=compressor._last_feasibility_skip,
-        )
-        assert compressor._fallback_compression_streak == 1
+        assert compressor._last_summary_fallback_used is False
+        assert compressor._last_compress_aborted is True
+        # No completed boundary is recorded when the original input survives.
+        assert compressor._fallback_compression_streak == 0
 
 
 class TestSanitizeToolPairsWhitespace:

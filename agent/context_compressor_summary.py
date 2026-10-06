@@ -30,6 +30,7 @@ class SummaryDispatchMixin:
     def _summarize_window(
         self, messages: List[Dict[str, Any]], turns_to_summarize: List[Dict[str, Any]], scan: "_HandoffScan",
         focus_topic: Optional[str], memory_context: str, bypass_cooldown: bool,
+        full_input: Any = None,
     ) -> Optional[str]:
         """Run the summary LLM; a cancellation rolls back the handoff scan's self-heal mutation first."""
         # Focus-topic derivation scans user turns; only pay when a summary is generated.
@@ -39,6 +40,7 @@ class SummaryDispatchMixin:
         }
         if _accepts_keyword_argument(self._generate_summary, "bypass_cooldown"):
             summary_kwargs["bypass_cooldown"] = bypass_cooldown
+        self._full_summary_input = full_input
         try:
             return self._generate_summary(turns_to_summarize, **summary_kwargs)
         except AuxiliaryExplicitCancellation:
@@ -46,3 +48,6 @@ class SummaryDispatchMixin:
             self._previous_summary = scan.previous_summary_before
             self._summary_has_user_turn = scan.has_user_turn_before
             raise
+        finally:
+            # Never let a later micro/direct call consume this attempt's source.
+            self._full_summary_input = None

@@ -193,7 +193,7 @@ auxiliary:
 | `threshold` | `0.50` | 0.0-1.0 | Compression triggers when prompt tokens ≥ `threshold × context_length` |
 | `model_thresholds` | `{}` | map | Per-model overrides of `threshold`. Keys are substring-matched against the model name (longest match wins). The small-context floor still applies on top (see below) |
 | `target_ratio` | `0.20` | 0.10-0.80 | Controls tail protection token budget: `threshold_tokens × target_ratio` (legacy mode only — `lean` uses its own clamp) |
-| `tail_mode` | `lean` | `lean`, `legacy` | Tail retention policy. `legacy` keeps a `target_ratio`-sized verbatim tail (~100K+ tokens on big-window models). `lean` keeps a clamped tail of `2.5% × context window` (10K floor, 25K cap) and instead carries continuity in the summary: a detailed identifier-preserving session log (produced by the same single summary request — lean compaction makes exactly one auxiliary LLM call per attempt), a mechanically extracted anchor index (PR numbers, SHAs, paths, error strings — regex, never paraphrased), every real user message quoted verbatim (newest-first budget), and a `session_search` recovery pointer so the agent can re-access anything summarized away. Oversized regions are evenly sampled into the summarizer input (with explicit elision markers) rather than triggering extra calls. Result on 500K-token real sessions: ~49K retained vs ~162K, with higher recall when paired with recovery (see `evals/compaction/results/`). Old tool results inside the lean tail are demoted to one-line stubs carrying a recovery pointer |
+| `tail_mode` | `lean` | `lean`, `legacy` | Tail retention policy. `legacy` keeps a `target_ratio`-sized tail; `lean` uses a clamped tail of `2.5% × context window` (10K floor, 25K cap), a detailed session log from the same summary request, an extracted anchor index, removed real user messages quoted under the existing output budget, and a history-recovery pointer. Both modes send full conversation text and tool arguments/results without input clipping or sampling. Old lean-tail result bodies become stubs only after the summary succeeds. |
 | `protect_last_n` | `20` | ≥1 | Minimum number of recent messages always preserved |
 | `min_tail_user_messages` | `1` | ≥1 | Minimum number of REAL (actionable) user messages guaranteed to survive in the uncompressed tail. `1` = the existing single last-user anchor (behavior-preserving default). Raise to e.g. `3` to keep the last 3 real user turns verbatim even when bulky tool outputs fill the tail token budget. Blank platform echoes, compaction handoffs, and synthetic continuation rows never count toward N. The guarantee wins over the tail token budget — the tail may exceed the budget when the anchor pulls the cut back |
 | `protect_first_n` | `3` | (hardcoded) | System prompt + first exchange always preserved |
@@ -381,15 +381,30 @@ summary can be produced, not when compression fires.
 
 The `ContextCompressor.compress()` method follows a 4-phase algorithm:
 
-### Phase 1: Prune Old Tool Results (cheap, no LLM call)
+### Phase 1: Stage the source and output views
 
-Old tool results (>200 chars) outside the protected tail are replaced with:
-```
-[Old tool output cleared to save context space]
-```
+Full automatic, manual, and overflow compaction snapshots the visible conversation
+before compaction-specific shortening. The summary request includes all session
+text, full tool-call arguments/results, and the protected recent tail. Standing
+system instructions and tool schemas are not session material. Existing strict
+secret redaction, historical-data framing, and text-only media annotations still
+apply; this does not add vision analysis or tool execution.
 
-This is a cheap pre-pass that saves significant tokens from verbose tool
-outputs (file contents, terminal output, search results).
+Deterministic tool-result/argument pruning and blank-echo cleanup operate on
+copies used for boundaries and the eventual output. No body/argument slices,
+head/tail input cap, or sampling limit the full summary request. Staged changes
+are published only after a valid summary. Failure, cancellation, cooldown,
+structural no-op and feasibility skip preserve the original transcript and
+pre-attempt handoff state. A generic fallback never replaces unsummarized data,
+even when `abort_on_summary_failure` is false.
+
+The built-in proactive path now retires only stale tool-image payloads under the
+existing media policy; it does **not** shorten text, deduplicate result bodies,
+or truncate arguments before a full summary sees them. Its existing threshold,
+minimum reclaim, durable atomic archive and rearm/cache-break gates remain.
+There is no hidden parallel history cache. Independently scoped semantic
+micro-compaction remains an exchange/rolling-summary call, not a full transcript
+request on every exchange. It cannot inherit a full attempt's transient input.
 
 ### Phase 2: Determine Boundaries
 
@@ -415,11 +430,22 @@ to find the parent assistant message, keeping groups intact.
 ### Phase 3: Generate Structured Summary
 
 :::warning Summary model context length
-The summary model must have a context window **at least as large** as the main agent model's. The entire middle section is sent to the summary model in a single `call_llm(task="compression")` call. If the summary model's context is smaller, the API returns a context-length error — `_generate_summary()` catches it, logs a warning, and returns `None`. The compressor then drops the middle turns **without a summary**, silently losing conversation context. This is the most common cause of degraded compaction quality.
+The selected summary route must accept the full visible conversation in one
+`call_llm(task="compression")` invocation, with no tools or executor loop. Input
+can be substantially larger than the replaced region. There is no local catalog-
+based clipping cap or chunk/map-reduce fallback. A real provider rejection fails
+closed and preserves the transcript; the full compactor does not immediately
+make a second main-model summary call. Caller-owned bounded overflow/stall
+recovery and auxiliary transport contracts remain separate.
 :::
 
-The middle turns are summarized using the auxiliary LLM with a structured
-template:
+The model sees chronological retained-head, replaced-region and retained-tail
+labels. Useful outcomes from every region can enter the handoff before retained
+tool bodies become stubs. Newer corrections and completed work supersede older
+proposals; active-state interpretation and deterministic task grounding use the
+full conversation. Verbatim user/steering appendices quote only removed rows,
+so retained corrections are not delivered again as synthetic user messages.
+The auxiliary LLM uses the existing structured template:
 
 ```
 ## Goal
@@ -459,7 +485,7 @@ Summary budget scales with the amount of content being compressed:
 The compressed message list is:
 1. Head messages (with a note appended to system prompt on first compression)
 2. Summary message (role chosen to avoid consecutive same-role violations)
-3. Tail messages (unmodified)
+3. Protected tail messages (with existing post-success media/result reductions)
 
 Orphaned tool_call/tool_result pairs are cleaned up by `_sanitize_tool_pairs()`:
 - Tool results referencing removed calls → removed
@@ -467,13 +493,16 @@ Orphaned tool_call/tool_result pairs are cleaned up by `_sanitize_tool_pairs()`:
 
 ### Iterative Re-compression
 
-On subsequent compressions, the previous summary is passed to the LLM with
-instructions to **update** it rather than summarize from scratch. This preserves
+On subsequent full compressions, the existing handoff appears once in the
+source conversation, not again in a separate prior-summary field. Instructions
+ask the model to **update** the checkpoint rather than start over. This preserves
 information across multiple compactions — items move from "In Progress" to "Done",
 new progress is added, and obsolete information is removed.
 
-The `_previous_summary` field on the compressor instance stores the last summary
-text for this purpose.
+The `_previous_summary` field stores the last validated summary. Failure/no-op
+restores its pre-attempt value; per-attempt full input is always cleared in a
+`finally` block. Input ownership and serialization live in
+`agent/context_compressor_input.py`, separate from boundary/output helpers.
 
 
 ## Before/After Example

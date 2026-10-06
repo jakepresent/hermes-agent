@@ -13,7 +13,6 @@ from unittest.mock import patch
 
 from agent.context_compressor import (
     ContextCompressor,
-    _PRUNED_TOOL_PLACEHOLDER,
     _estimate_msg_budget_tokens,
 )
 
@@ -48,7 +47,10 @@ def _assistant_call(cid, name="terminal", args='{"cmd":"ls"}'):
 
 
 def _tool_msg(cid, content):
-    return {"role": "tool", "tool_call_id": cid, "content": content}
+    return {"role": "tool", "tool_call_id": cid, "content": [
+        {"type": "text", "text": content},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
+    ]}
 
 
 def _build(n_pairs, big_indices, big_chars=9000, small="ok"):
@@ -83,8 +85,8 @@ def test_prunes_below_compression_threshold():
     assert len(result) == len(msgs)
     for cid in ("call_0", "call_1", "call_2"):
         m = _tool_by_id(result, cid)
-        assert len(m["content"]) < 9000                       # summarized
-        assert m["content"] != _PRUNED_TOOL_PLACEHOLDER       # informative, not a blank placeholder
+        assert len(m["content"][0]["text"]) == 9000  # Unsummarized text is preserved.
+        assert not any(part.get("type") == "image_url" for part in m["content"])
 
 
 
@@ -109,10 +111,11 @@ def test_idempotent():
 
 
 def test_rearms_only_after_reclaimed_token_runway():
-    """A prune boundary must earn back its cache break before the next one."""
+    """An image retirement boundary must earn back its cache break."""
     c = _compressor(
         proactive_prune_tokens=48_000,
         proactive_prune_min_result_chars=8_000,
+        proactive_prune_min_reclaim_tokens=0,
     )
     msgs = _build(8, big_indices={0, 1, 2, 6, 7})
 
@@ -138,8 +141,8 @@ def test_rearms_only_after_reclaimed_token_runway():
     blocked, n2 = c.prune_tool_results_only(grown, current_tokens=_under_threshold)
     assert n2 == 0
     assert blocked is grown
-    assert len(_tool_by_id(blocked, "call_6")["content"]) == 9000
-    assert len(_tool_by_id(blocked, "call_7")["content"]) == 9000
+    assert len(_tool_by_id(blocked, "call_6")["content"][0]["text"]) == 9000
+    assert len(_tool_by_id(blocked, "call_7")["content"][0]["text"]) == 9000
 
     missing = rearm_tokens - sum(map(_estimate_msg_budget_tokens, grown))
     regrown = grown + [{"role": "user", "content": "x" * (missing * 4)}]

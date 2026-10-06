@@ -183,12 +183,12 @@ def test_resume_handoff_after_default_protected_head_decays_initial_turns():
         result = compressor.compress(_messages_with_default_handoff(old_summary))
 
     prompt = mock_call.call_args.kwargs["messages"][0]["content"]
-    assert "PREVIOUS SUMMARY:" in prompt
+    assert "FULL CONVERSATION" in prompt
     assert prompt.count(old_summary) == 1
     assert "original task before first compaction" in prompt
     assert "original answer before first compaction" in prompt
     assert "original follow-up before first compaction" in prompt
-    assert f"[ASSISTANT]: {SUMMARY_PREFIX}" not in prompt
+    assert prompt.count(f"[ASSISTANT]: {SUMMARY_PREFIX}") == 1
     # Grounding (761a0b124e) may prepend a deterministic task-snapshot
     # section — pin the contract, not the exact stored string.
     stored_summary = compressor._previous_summary or ""
@@ -270,7 +270,7 @@ def test_zero_protect_first_n_still_folds_restart_fossil():
 
     result_text = "\n".join(str(msg.get("content", "")) for msg in result)
     assert old_summary not in result_text
-    assert result_text.index(_SUMMARY_END_MARKER) < result_text.index("active request")
+    assert result_text.index(_SUMMARY_END_MARKER) < result_text.rindex("active request")
     assert sum(
         1 for msg in result if ContextCompressor._is_context_summary_message(msg)
     ) == 1
@@ -443,9 +443,8 @@ def test_empty_post_handoff_window_noops_without_summary_call():
 
     mock_generate_summary.assert_not_called()
     assert result == messages
-    # The rehydrated summary state is deliberately kept: the handoff is
-    # genuinely present in the returned (unchanged) transcript.
-    assert compressor._previous_summary == old_summary
+    # A no-op restores pre-attempt state; the next attempt can rehydrate again.
+    assert compressor._previous_summary is None
     assert compressor.compression_count == 0
     # Mirrors the sibling no-compressible-window guard, but as a structural
     # no-op (#93022): the window holds nothing eligible to compress, so the

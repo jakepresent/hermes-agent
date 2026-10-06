@@ -151,6 +151,16 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Primary paths/gate:** `agent/compaction_steering.py`, `agent/context_compressor.py`, and `scripts/run_tests.sh tests/agent/test_compaction_steering_preservation.py`.
 
+### 10b. Full-conversation, single-call compaction
+
+**Purpose:** Preserve useful outcomes and later corrections before deterministic pruning can turn them into metadata or recovery stubs.
+
+**Behavior to preserve:** Full automatic/manual/overflow compaction sends all visible session text and full tool arguments/results (including the recent retained tail) in one no-tools auxiliary invocation. No input cap/sampling, extra digest, executor loop, or local catalog-based truncation. Standing system/tool schemas are excluded; strict secret/media/historical-data policies remain. Boundary/output pruning is staged on copies and published only after a validated summary; failures, cooldown, feasibility skips and no-ops preserve data and restore handoff state, without generic fallback or immediate second-model summary retry. Full-conversation task grounding supersedes stale cut chronology. Prior handoffs enter once; removed-row verbatim steering/user sections do not redeliver retained corrections. Proactive text pruning is disabled; existing media retirement, archive/cache/rearm guards and independent semantic micro-compaction remain.
+
+**Replay commit:** Pending parent review (working-tree change based on `3596ffcd132e73948b4e0c18f399b3b7635bbe1e`). No model metadata or live configuration change.
+
+**Primary paths/gate:** `agent/context_compressor_input.py`, `agent/context_compressor_summary.py`, `agent/context_compressor.py`; `scripts/run_tests.sh tests/agent/test_full_conversation_compaction.py`. Generic real-compressor/transport invariants cover full bodies/arguments, old/recent outcomes, correction precedence, iterative handoffs, proactive-to-full flow, no-tools single-call and failure/no-op immutability with real temp-home SessionDB. Private replay source data is not part of the repository.
+
 ### 11. Auxiliary provider and prefill timeout behavior
 
 **Purpose:** Avoid false auxiliary-stream timeouts before expected prefills arrive, while retaining model/provider routing used by Jake's setup.

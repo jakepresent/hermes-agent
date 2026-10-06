@@ -153,7 +153,10 @@ def test_compress_boundary_preserves_steering_for_summary_and_retained_tail(monk
     assert messages == original
     tail = next(m for m in compressed if m.get("tool_call_id") == "call-17")
     assert tail["role"] == "tool" and _text(tail["content"]).endswith(long_steers)
-    assert "ordinary disposable output" not in _text(tail["content"])
+    if summary_succeeds:
+        assert "ordinary disposable output" not in _text(tail["content"])
+    else:
+        assert compressed is messages  # No destructive shortening without a checkpoint.
     # The historical correction must survive even if the model omits it or fails.
     summary_text = "\n".join(_text(m.get("content", "")) for m in compressed if m.get("tool_call_id") != "call-17")
     assert long_steers in summary_text

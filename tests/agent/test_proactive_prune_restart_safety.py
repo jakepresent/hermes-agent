@@ -29,7 +29,11 @@ def _assistant_call(call_id: str) -> dict:
 
 
 def _tool_result(call_id: str, content: str) -> dict:
-    return {"role": "tool", "tool_call_id": call_id, "content": content}
+    # Unsummarized text remains; only stale screenshots can be retired early.
+    return {"role": "tool", "tool_call_id": call_id, "content": [
+        {"type": "text", "text": content},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
+    ]}
 
 
 def _history(*, large_chars: int = 24_000) -> list[dict]:
@@ -94,7 +98,8 @@ def test_gateway_eviction_reload_keeps_prune_and_durable_runway(tmp_path: Path) 
     assert [message["content"] for message in durable] == [
         message["content"] for message in pruned
     ]
-    assert len(durable[2]["content"]) < 24_000
+    assert len(durable[2]["content"][0]["text"]) == 24_000
+    assert not any(part.get("type") == "image_url" for part in durable[2]["content"])
     stored_runway = _model_config(db, session_id)[_REARM_KEY]
     assert _model_config(db, session_id)["keep"] == "value"
     assert stored_runway > sum(map(_estimate_msg_budget_tokens, durable))

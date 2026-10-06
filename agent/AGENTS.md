@@ -72,8 +72,10 @@ Adding one: register in that table (no `if name == ...` chain); `tools/todo_tool
 
 Two layers: gateway session hygiene (85% threshold) and the agent `ContextCompressor` (50%,
 configurable; per-model overrides; failure cooldown after provider-proven overflow). The algorithm
-prunes old tool results first (no LLM call), then picks boundaries, then generates a structured
-summary with the `auxiliary` compression model. In-place compaction keeps a single stable session
+stages pruning on copies for boundaries/output, then generates a structured
+summary from full unshortened session text with the `auxiliary` compression model
+(one call, no tools; failure/no-op preserves source). Input ownership is in
+`context_compressor_input.py`; proactive pruning retires media only. In-place compaction keeps a single stable session
 id; native Responses/Codex compaction paths are provider-specific. Compression is the sanctioned
 cache break — keep it the only one. Full detail:
 `website/docs/developer-guide/context-compression-and-caching.md`.

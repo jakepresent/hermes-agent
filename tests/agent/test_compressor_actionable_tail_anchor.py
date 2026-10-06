@@ -165,7 +165,8 @@ def test_completion_at_compress_start_survives_when_blank_echo_is_compress_end(
     assert not any(
         message.get(COMPRESSED_SUMMARY_METADATA_KEY) for message in result
     )
-    assert len(result) == len(messages) - 1
+    # A structural no-op must not commit blank-echo cleanup either.
+    assert result is messages
     assert compressor.compression_count == 0
     assert compressor._last_compression_savings_pct == 0.0
     generate_summary.assert_not_called()
@@ -176,10 +177,10 @@ def test_completion_at_compress_start_survives_when_blank_echo_is_compress_end(
         "user",
         "assistant",
         "user",
+        "user",  # The original blank echo is untouched on a no-op.
         "assistant",
         "tool",
         "assistant",
     ]
-    _assert_no_adjacent_user_roles(result)
 
 

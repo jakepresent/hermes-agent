@@ -147,7 +147,7 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Behavior to preserve:** Exact canonical complete steering blocks remain at their original tool positions through ordinary, protected-tail, duplicate-result, native-envelope, and lean-tail pruning. Summary-input slicing retains whole blocks and source tool labels; compacted corrections are quoted as historical context without creating fresh user deliveries. Ordinary tool bodies remain prunable, stale API sidecars are discarded after rewrites, and existing strict summary secret redaction still applies.
 
-**Replay commit:** Pending parent review/commit of the working-tree fix.
+**Replay commit:** `9c6bec5db2`. Negative control: 83 of 104 new cases fail on `3a73536212`, including all four real-compression boundary cases. The targeted preservation gate passed 389 tests; independent parent rerun passed 303. A real Luna replay retained the missing correction in the complete checkpoint, and the continuation recognized it as superseding the earlier proposal.
 
 **Primary paths/gate:** `agent/compaction_steering.py`, `agent/context_compressor.py`, and `scripts/run_tests.sh tests/agent/test_compaction_steering_preservation.py`.
 

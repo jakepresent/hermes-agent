@@ -23,6 +23,9 @@ from agent.auxiliary_client import (
 )
 from agent.context_engine import ContextEngine, sanitize_memory_context
 from agent.context_compressor_summary import SummaryDispatchMixin
+from agent.compaction_steering import (
+    historical_steering_section, join_steering, split_steering_suffix, steering_preserving_slices, tool_text,
+)
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.micro_compaction import MicroCompactionMixin
 from agent.model_metadata import (
@@ -30,6 +33,7 @@ from agent.model_metadata import (
     strip_opaque_replay_items,
 )
 from agent.redact import redact_sensitive_text
+from agent.prompt_builder import STEER_MARKER_OPEN
 from agent.turn_context import drop_stale_api_content
 from tools.todo_tool import TODO_INJECTION_HEADER
 
@@ -1214,7 +1218,9 @@ def _strip_images_from_tool_msg(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]
     content = msg.get("content")
     if isinstance(content, dict) and content.get("_multimodal"):
         summary = content.get("text_summary") or "[screenshot removed to save context]"
-        return _rewritten(msg, f"[screenshot removed] {str(summary)[:200]}")
+        body, _ = split_steering_suffix(str(summary))
+        _, steering = split_steering_suffix(tool_text(content))
+        return _rewritten(msg, join_steering(f"[screenshot removed] {body[:200]}", steering))
     stripped = _replace_image_parts(content, "[screenshot removed to save context]")
     return None if stripped is None else _rewritten(msg, stripped)
 
@@ -1383,12 +1389,13 @@ def _str_arg(args: dict, key: str, default: str = "") -> str:
 
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """1-line summary of a tool call + result. Never raises: a malformed historical call must not crash-loop compression."""
+    body, steering = split_steering_suffix(tool_content) if isinstance(tool_content, str) else (tool_content, "")
     try:
-        return _summarize_tool_result_unguarded(tool_name, tool_args, tool_content)
+        return join_steering(_summarize_tool_result_unguarded(tool_name, tool_args, body), steering)
     except Exception as exc:  # noqa: BLE001 — a summary must never crash compression
         logger.debug("Tool-result summary failed for %s: %s", tool_name, exc)
-        _len = len(tool_content) if isinstance(tool_content, str) else 0
-        return f"[{tool_name}] ({_len:,} chars result)"
+        _len = len(body) if isinstance(body, str) else 0
+        return join_steering(f"[{tool_name}] ({_len:,} chars result)", steering)
 
 
 def _sum_terminal(name, args, content, content_len, line_count):
@@ -2608,12 +2615,15 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         for i in range(len(result) - 1, -1, -1):
             msg = result[i]
             content = msg.get("content") or ""
-            # Non-string/multimodal-envelope shapes can't be hashed by text.
-            if msg.get("role") != "tool" or not isinstance(content, str) or len(content) < _PRUNE_MIN_CHARS:
+            # Do not dedupe structured/image payloads by text alone.
+            if msg.get("role") != "tool" or not isinstance(content, str):
                 continue
-            h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+            body, steering = split_steering_suffix(content)
+            if len(body) < _PRUNE_MIN_CHARS:
+                continue
+            h = hashlib.md5(body.encode("utf-8", errors="replace")).hexdigest()[:12]
             if h in content_hashes:
-                result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
+                result[i] = _rewritten(msg, "[Duplicate tool output — same content as a more recent call]" + steering)
                 pruned += 1
             content_hashes.add(h)
         return pruned
@@ -2650,11 +2660,13 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             new_msg = _strip_images_from_tool_msg(msg)
             if new_msg is not None:
                 result[idx] = new_msg
-            return new_msg is not None
+                return True
+            content = tool_text(content)
+        body, _ = split_steering_suffix(content) if isinstance(content, str) else ("", "")
         if (
             not isinstance(content, str) or not content or content == _PRUNED_TOOL_PLACEHOLDER
             or content.startswith(("[Duplicate tool output", "[screenshot removed"))
-            or _is_summary_stub(content) or len(content) <= min_prune_chars
+            or _is_summary_stub(content) or len(body) <= min_prune_chars
         ):
             return False
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
@@ -2662,7 +2674,7 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             _skill = _json_dict(tool_args).get("name", "")
             if isinstance(_skill, str) and _skill.lower() in protected_skills:
                 return False
-        result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
+        result[idx] = _rewritten(msg, _summarize_tool_result(tool_name, tool_args, content))
         return True
 
     def _pressure_demote_tail(
@@ -2924,15 +2936,21 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
         for msg in turns:
             role = msg.get("role", "unknown")
             content = msg.get("content")
+            if role == "tool" and isinstance(content, dict) and content.get("_multimodal"):
+                content = tool_text(content)
             if isinstance(content, list):
                 content = "\n".join(_summary_part_text(part) for part in content if isinstance(part, (dict, str)))
             content = _redact_compaction_text(content or "")
-            content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
+            body, steering = split_steering_suffix(content) if role == "tool" else (content, "")
+            content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", body) + steering
             # Strip inline <think>-style blocks: scratch work wastes summarizer context and risks being kept as fact.
             if role == "assistant" and content:
                 content = strip_think_blocks(None, content)
             if len(content) > self._CONTENT_MAX:
-                content = content[:self._CONTENT_HEAD] + "\n...[truncated]...\n" + content[-self._CONTENT_TAIL:]
+                content = steering_preserving_slices(
+                    content, [(0, self._CONTENT_HEAD), (len(content) - self._CONTENT_TAIL, len(content))],
+                    "\n...[truncated]...\n",
+                )
             if role == "tool":
                 parts.append(f"[TOOL RESULT {msg.get('tool_call_id', '')}]: {content}")
                 continue
@@ -3089,19 +3107,21 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         demoted = 0
         for i in range(tail_start, len(messages)):
             msg = messages[i]
-            content = msg.get("content")
-            if msg.get("role") != "tool" or i in protected or not isinstance(content, str):
+            if msg.get("role") != "tool" or i in protected:
                 continue
-            if len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content or _is_summary_stub(content):
+            content = tool_text(msg.get("content"))
+            body, steering = split_steering_suffix(content)
+            if len(body) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in body or _is_summary_stub(body):
                 continue
-            result[i] = _rewritten(msg, _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id))
+            result[i] = _rewritten(msg, _lean_recovery_stub(msg.get("tool_name") or "", len(body), session_id) + steering)
             demoted += 1
         if demoted and not self.quiet_mode:
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)
         return result
 
     def _augment_summary_lean(self, summary: str, turns_to_summarize: List[Dict[str, Any]]) -> str:
-        """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
+        """Retain historical steering in every mode, then append lean-only sections."""
+        summary += _redact_compaction_text(historical_steering_section(turns_to_summarize))
         if getattr(self, "tail_mode", "lean") != "lean":
             return summary
         for heading, build in (
@@ -3131,8 +3151,9 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             head_chars = int(remaining * 0.45)
             tail_chars = remaining - head_chars
             omitted = max(len(content) - head_chars - tail_chars, 0)
-        tail = content[-tail_chars:].lstrip() if tail_chars else ""
-        return content[:head_chars].rstrip() + marker + tail
+        return steering_preserving_slices(
+            content, [(0, head_chars), (len(content) - tail_chars, len(content))], marker,
+        )
 
     # Lean-mode sampling slice count: 8 keeps slices ~20K chars at the 160K cap.
     _SAMPLED_INPUT_SLICES = 8
@@ -3151,6 +3172,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         slice_len = budget // n
         stride = len(content) / n
         parts: list[str] = []
+        ranges: list[tuple[int, int]] = []
         prev_end = 0
         for i in range(n):
             start = int(i * stride)
@@ -3158,10 +3180,15 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
                 # Last slice anchors to the END: newest turns carry the most state.
                 start = max(start, len(content) - slice_len)
             end = min(start + slice_len, len(content))
+            ranges.append((start, end))
             if start > prev_end:
                 parts.append(marker_template.format(elided=start - prev_end))
             parts.append(content[start:end])
             prev_end = end
+        if STEER_MARKER_OPEN in content:
+            return steering_preserving_slices(
+                content, ranges, "\n\n...[ordinary summary input elided — recover via session_search]...\n\n",
+            )
         return "".join(parts)
 
     def _fallback_to_main_for_compression(self, e: Exception, reason: str) -> None:

@@ -141,6 +141,16 @@ Commit `c10a0ad576` restores the still-relevant fork-preservation tests on top o
 
 **Primary gates:** `tests/gateway/test_busy_command.py`, `tests/gateway/test_busy_session_ack.py`, and `tests/run_agent/test_steer.py`.
 
+### 10a. Steering survives tool-result compaction
+
+**Purpose:** Keep runtime-appended user corrections from disappearing when their surrounding tool output is shortened.
+
+**Behavior to preserve:** Exact canonical complete steering blocks remain at their original tool positions through ordinary, protected-tail, duplicate-result, native-envelope, and lean-tail pruning. Summary-input slicing retains whole blocks and source tool labels; compacted corrections are quoted as historical context without creating fresh user deliveries. Ordinary tool bodies remain prunable, stale API sidecars are discarded after rewrites, and existing strict summary secret redaction still applies.
+
+**Replay commit:** Pending parent review/commit of the working-tree fix.
+
+**Primary paths/gate:** `agent/compaction_steering.py`, `agent/context_compressor.py`, and `scripts/run_tests.sh tests/agent/test_compaction_steering_preservation.py`.
+
 ### 11. Auxiliary provider and prefill timeout behavior
 
 **Purpose:** Avoid false auxiliary-stream timeouts before expected prefills arrive, while retaining model/provider routing used by Jake's setup.

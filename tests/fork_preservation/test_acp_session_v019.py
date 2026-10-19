@@ -62,22 +62,22 @@ class TestCreateSession:
 class TestWslCwdTranslation:
 
     def test_translate_acp_cwd_handles_forward_slashes_when_wsl(self, monkeypatch):
-        monkeypatch.setattr("hermes_constants._wsl_detected", True)
+        monkeypatch.setattr("hermes_platform.host.runtime._wsl_detected", True)
 
         assert acp_session._translate_acp_cwd("D:/work/project") == "/mnt/d/work/project"
 
     def test_translate_acp_cwd_leaves_windows_drive_path_unchanged_off_wsl(self, monkeypatch):
-        monkeypatch.setattr("hermes_constants._wsl_detected", False)
+        monkeypatch.setattr("hermes_platform.host.runtime._wsl_detected", False)
 
         assert acp_session._translate_acp_cwd(r"E:\Projects\AI\paperclip") == r"E:\Projects\AI\paperclip"
 
     def test_translate_acp_cwd_leaves_posix_path_unchanged_on_wsl(self, monkeypatch):
-        monkeypatch.setattr("hermes_constants._wsl_detected", True)
+        monkeypatch.setattr("hermes_platform.host.runtime._wsl_detected", True)
 
         assert acp_session._translate_acp_cwd("/mnt/e/Projects/AI/paperclip") == "/mnt/e/Projects/AI/paperclip"
 
     def test_create_session_stores_translated_cwd_on_wsl(self, manager, monkeypatch):
-        monkeypatch.setattr("hermes_constants._wsl_detected", True)
+        monkeypatch.setattr("hermes_platform.host.runtime._wsl_detected", True)
 
         state = manager.create_session(cwd=r"E:\Projects\AI\paperclip")
 
@@ -312,7 +312,12 @@ class TestPersistence:
             manager = SessionManager(db=db)
             manager.create_session(cwd="/work")
 
-        assert captured["enabled_toolsets"] == ["hermes-acp", "mcp-olympus", "mcp-exa"]
+        # v0.22 (316d6fb8f7): ACP resolves built-in toolsets through the gateway's per-platform
+        # resolver, so the exact list is upstream's. The fork contract is the MCP half: enabled
+        # config servers arrive as mcp-<name>, disabled ones never do.
+        enabled = captured["enabled_toolsets"]
+        assert {"mcp-olympus", "mcp-exa"} <= set(enabled)
+        assert "mcp-disabled" not in enabled
 
     def test_create_session_writes_to_db(self, manager):
         """A session with history persists with source=acp and its cwd.

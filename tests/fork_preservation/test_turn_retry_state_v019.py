@@ -43,8 +43,11 @@ EXPECTED_FIELDS = {
 
 def test_all_guards_default_false():
     s = TurnRetryState()
-    for name, value in s:
-        assert value is False, f"{name} should default to False"
+    # v0.22 dropped __iter__; walk the declared bool guards instead.
+    guards = [f.name for f in fields(TurnRetryState) if f.type in (bool, "bool")]
+    assert guards
+    for name in guards:
+        assert getattr(s, name) is False, f"{name} should default to False"
 
 
 

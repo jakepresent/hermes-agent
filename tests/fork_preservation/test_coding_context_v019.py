@@ -274,12 +274,14 @@ class TestEditFormatSteering:
 # ── profile registry ────────────────────────────────────────────────────────
 
 class TestProfiles:
-    def test_registered_profiles(self):
-        assert cc.get_profile("coding") is cc.CODING_PROFILE
-        assert cc.get_profile("general") is cc.GENERAL_PROFILE
+    # v0.22 removed the get_profile() lookup (a5bd246865); the surviving contract is that
+    # profile detection only ever yields the two registered profiles, general by default.
+    def test_registered_profiles(self, tmp_path):
+        assert cc.CODING_PROFILE.name == "coding" and cc.GENERAL_PROFILE.name == "general"
+        assert cc._detect_profile("off", "cli", tmp_path) is cc.GENERAL_PROFILE
 
-    def test_unknown_profile_falls_back_to_general(self):
-        assert cc.get_profile("nonsense") is cc.GENERAL_PROFILE
+    def test_unknown_mode_falls_back_to_a_registered_profile(self, tmp_path):
+        assert cc._detect_profile("nonsense", "telegram", tmp_path) in (cc.CODING_PROFILE, cc.GENERAL_PROFILE)
 
 
 

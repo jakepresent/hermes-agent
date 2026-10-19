@@ -135,7 +135,9 @@ async def test_acp_steer_on_idle_session_runs_as_regular_prompt():
 
 
 @pytest.mark.asyncio
-async def test_acp_queue_slash_command_adds_next_turn_without_running_now():
+async def test_acp_queue_slash_command_on_idle_session_runs_now():
+    # v0.22: idle /queue drains immediately, matching the gateway's idle path
+    # (gateway/run_inbound.py _hm_cmd_queue sends the payload as a normal turn).
     acp_agent, state, fake, _conn = make_agent_and_state()
 
     response = await acp_agent.prompt(
@@ -144,8 +146,8 @@ async def test_acp_queue_slash_command_adds_next_turn_without_running_now():
     )
 
     assert response.stop_reason == "end_turn"
-    assert state.queued_prompts == ["run the tests after this"]
-    assert fake.runs == []
+    assert state.queued_prompts == []
+    assert fake.runs == ["run the tests after this"]
 
 
 @pytest.mark.asyncio

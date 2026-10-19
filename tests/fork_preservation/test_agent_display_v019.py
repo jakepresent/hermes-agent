@@ -321,9 +321,10 @@ class TestBuildToolLabel:
 
 
     def test_every_known_verb_renders_without_error(self):
-        from agent.display import build_tool_label, _TOOL_VERBS
+        from agent.display import build_tool_label, _TOOL_VERB_TOOLS
         # Each built-in verb must produce a non-empty label given minimal args.
-        for tool_name in _TOOL_VERBS:
+        # (v0.22 moved verb text to the locale catalog; the tool set is _TOOL_VERB_TOOLS.)
+        for tool_name in _TOOL_VERB_TOOLS:
             label = build_tool_label(tool_name, {"query": "x", "path": "x", "url": "x"})
             assert label, f"{tool_name} produced empty label"
 

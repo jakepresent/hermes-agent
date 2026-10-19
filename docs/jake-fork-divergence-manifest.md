@@ -1,0 +1,299 @@
+# Jake Hermes fork divergence manifest
+
+Last audited: 2026-10-18
+
+## Current anchor
+
+- Upstream base: `v0.22.2` at `d923a5eb48`
+- Clean candidate branch: `jake/v0.22.2-clean`
+- Rollback ref for the previous live head: `jake/rollback-before-v0.22.2-20261018-2130` (`97874850bd`)
+- Package version: Hermes Agent 0.22.2
+- Upgrade ledger: `ChatWorkspace/hermes/v0.22.2-upgrade-ledger.md`
+
+Replay hashes below are the `v2026.9.7` originals (the record of intent). The v0.22.2 ports live on
+`jake/v0.22.2-clean`; `git log v0.22.2..jake/v0.22.2-clean` maps each one.
+
+This file lists only behavior intentionally retained beyond upstream. It is not a history of old integrations or dropped code. During the next upgrade, start from the new upstream tag and replay the commits below. Before carrying a patch forward, check whether upstream now owns the behavior and prefer upstream's implementation when it does.
+
+## Preservation gate
+
+`tests/fork_preservation/` holds the still-relevant v0.19 preservation tests (v0.22.2: 155 passed, 2 skipped after API migration in `9f320f090b`). Treat stale tests as migration clues rather than proof that a feature is missing. Run upstream's current tests first, then adapt or retain only the assertions that still describe intentional behavior.
+
+## Keep buckets
+
+### 1. Durable hybrid memory search
+
+**Purpose:** Search Jake's canonical Markdown memory and project files through rebuildable keyword and semantic indexes.
+
+**Behavior to preserve:**
+
+- `memory_search` over ChatWorkspace, Hermes memories, and curated LocalOps notes
+- Keyword, Gemini, and local sklearn semantic modes
+- Chunk and observation granularity, source/path filters, and TOON rendering
+- Persisted sqlite-vec vectors, coverage status, bounded preindex, and provenance
+- Tool exposure in the appropriate agent toolsets
+- Explicit dependencies for sqlite-vec, NumPy, scikit-learn, google-genai, and CairoSVG
+
+**Replay commits:**
+
+- `e35946ff2b` — restore durable memory search and declare fork dependencies
+- `35473edb54` — declare scikit-learn for the local fallback
+
+**Primary paths:** `tools/memory_search_tool.py`, `tools/toon_renderer.py`, `toolsets.py`, `pyproject.toml`, and their focused tests.
+
+### 2. Bounded late delegation completion
+
+**Purpose:** Allow a completed child task to re-enter a conversation after the commissioning turn has ended, without creating an unbounded autonomous loop.
+
+**Behavior to preserve:** bounded continuation rounds, parent-session delivery, and protection against repeated late completions.
+
+**Replay commit:** `0898fd3737`
+
+**Primary gates:** `tests/fork_preservation/test_async_delegation_v019.py` and `tests/gateway/test_subagent_protection.py`.
+
+### 2a. Delegation budget visibility
+
+**Purpose:** Put the active child iteration limit, child wall-clock limit, and late-result parent continuation limit directly in the model-facing `delegate_task` description so task sizing happens before a child is spawned and a parent does not confuse its own continuation warning with the child’s allowance.
+
+**Behavior to preserve:** The dynamic tool schema reads `delegation.max_iterations`, `delegation.child_timeout_seconds`, and `delegation.completion_max_turns`, labels the child and parent budgets separately, and tells the parent to reserve room for synthesis. The current default profile therefore exposes `child 50 iterations / 600s wall-clock; late-result continuation 10 parent rounds` instead of leaving those constraints hidden in config.
+
+**Replay commits:** `12ca26efec` and `752e39e323`
+
+**Primary gate:** `scripts/run_tests.sh tests/tools/test_delegate.py -k 'top_level_description or dynamic_limits'`.
+
+### 3. Session-local image shrink recovery
+
+**Purpose:** Recover from provider HTTP 413 image-size failures without repeatedly recompressing the same image or mutating unrelated sessions.
+
+**Behavior to preserve:** session-local shrink cache and native-image fast path.
+
+**Replay commit:** `b70e715acc`
+
+**Primary paths:** `agent/vision_message_prep.py`, `tests/fork_preservation/test_image_shrink_recovery_v019.py`, and `tests/fork_preservation/test_vision_native_fast_path_v019.py`.
+
+### 4. ACP session provenance and thought-level controls
+
+**Purpose:** Preserve Aside-compatible ACP behavior while using upstream's ACP architecture.
+
+**Behavior to preserve:** thought-level selection, provider snapshot correctness, adopted session IDs, remote-host working directories, and title update behavior.
+
+**Replay commit:** `2db1801eb4`
+
+**Primary paths:** `acp_adapter/server.py`, `acp_adapter/session.py`, and ACP preservation tests.
+
+### 5. Cached gateway replay consistency
+
+**Purpose:** Avoid false gateway restarts when cached and live histories differ only because cleanup was applied asymmetrically.
+
+**Behavior to preserve:** normalize both sides with the same replay cleanup before comparison.
+
+**Replay commit:** `b99afda9c5`
+
+**Status (v0.22.2): converged upstream; fork code dropped.** Upstream's replay comparison covers this; the old fork gate file does not exist on the v0.22.2 tree. Section kept only so the next upgrade does not resurrect it.
+
+### 6. Approval and command-safety UX
+
+**Purpose:** Show users the actual security finding and make safe correction possible without weakening command guards.
+
+**Behavior to preserve:** content-complete Discord approval prompts, invisible-character surfacing, and readable choice lists.
+
+**Replay commit:** `a885165f07` (v0.22.2 port `b7c5d6b30a`)
+
+**Status (v0.22.2):** upstream deleted the Tirith scanner, so the Tirith-detail and rule-classification residue is gone with it; only the Discord prompt fixes remain.
+
+**Primary paths/gate:** `plugins/platforms/discord/adapter.py`; `tests/gateway/test_discord_prompt_content_payload.py`.
+
+### 7. Discord long-turn and blocking-prompt mentions
+
+**Purpose:** Notify Jake when a long response finishes or when a clarification blocks progress.
+
+**Behavior to preserve:** configurable elapsed-time rules for finals and immediate mentions for blocking clarification prompts. Approval mentions remain upstream-owned through `discord.approval_mentions`.
+
+**Replay commit:** `62a6d18927`
+
+**Primary paths:** `plugins/platforms/discord/adapter.py`, gateway display/config plumbing, and `tests/gateway/test_long_turn_mention.py`.
+
+### 8. Read-only `/model` status
+
+**Purpose:** Make `/model` useful as a status command without forcing a model change.
+
+**Behavior to preserve:** current model/provider/reasoning display and session-only hints.
+
+**Replay commit:** `d909bb540c`
+
+**Primary gates:** `tests/gateway/test_model_command_status.py`, `tests/gateway/test_discord_model_picker.py`, and reasoning-command tests.
+
+### 9. Gateway liveness and shutdown forensics
+
+**Purpose:** Detect a wedged event loop or a broken Discord REST delivery path even when the WebSocket appears healthy.
+
+**Behavior to preserve:** independent Discord REST liveness probe.
+
+**Replay commits:**
+
+- `e11af4dd3d` — add event-loop and Discord REST probes (v0.22.2 port `bb33dca7d9`: REST probe only)
+- `c39a5ae5f1` — skipped on v0.22.2 (removed a duplicate of an engine that is now upstream's)
+
+**Status (v0.22.2):** upstream ships its own out-of-loop event-loop watchdog; the fork's was dropped.
+
+**Primary gates:** `tests/gateway/test_discord_liveness_watchdog.py` and `tests/gateway/test_liveness_probes_fork.py`.
+
+### 10. Busy-mode steering compatibility
+
+**Purpose:** Preserve mid-run steering and busy acknowledgements while using upstream's current gateway ownership.
+
+**Behavior to preserve:** upstream's runtime mechanism plus fork-sensitive compatibility gates. Do not restore the old duplicate implementation.
+
+**Replay commit:** `cdce2ff98d`
+
+**Primary gates:** `tests/gateway/test_busy_command.py`, `tests/gateway/test_busy_session_ack.py`, and `tests/agent/test_steer.py`.
+
+### 10a. Steering survives tool-result compaction
+
+**Purpose:** Keep runtime-appended user corrections from disappearing when their surrounding tool output is shortened.
+
+**Behavior to preserve:** Exact canonical complete steering blocks remain at their original tool positions through ordinary, protected-tail, duplicate-result, native-envelope, and lean-tail pruning. Summary-input slicing retains whole blocks and source tool labels; compacted corrections are quoted as historical context without creating fresh user deliveries. Ordinary tool bodies remain prunable, stale API sidecars are discarded after rewrites, and existing strict summary secret redaction still applies.
+
+**Replay commit:** `9c6bec5db2`. Negative control: 83 of 104 new cases fail on `3a73536212`, including all four real-compression boundary cases. The targeted preservation gate passed 389 tests; independent parent rerun passed 303. A real Luna replay retained the missing correction in the complete checkpoint, and the continuation recognized it as superseding the earlier proposal.
+
+**v0.22.2:** still required. Bare upstream v0.22.2 fails 83 of 104 cases. The port (`c05ffe5397`) keeps upstream's non-imitable `elide_middle` marker and uses the steering-preserving slices only when canonical markers exist; upstream now keeps the pending tool round verbatim, so that case checks the whole retained row.
+
+**Primary paths/gate:** `agent/compaction_steering.py`, `agent/context_compressor.py`, and `scripts/run_tests.sh tests/agent/test_compaction_steering_preservation.py`.
+
+### 10b. Full-conversation, single-call compaction
+
+**Purpose:** Preserve useful outcomes and later corrections before deterministic pruning can turn them into metadata or recovery stubs.
+
+**Behavior to preserve:** Full automatic/manual/overflow compaction sends all visible session text and full tool arguments/results (including the recent retained tail) in one no-tools auxiliary invocation. No input cap/sampling, extra digest, executor loop, or local catalog-based truncation. Standing system/tool schemas are excluded; strict secret/media/historical-data policies remain. Boundary/output pruning is staged on copies and published only after a validated summary; failures, cooldown, feasibility skips and no-ops preserve data and restore handoff state, without generic fallback or immediate second-model summary retry. Full-conversation task grounding supersedes stale cut chronology. Prior handoffs enter once; removed-row verbatim steering/user sections do not redeliver retained corrections. Proactive text pruning is disabled; existing media retirement, archive/cache/rearm guards and independent semantic micro-compaction remain.
+
+**Replay commit:** `97874850bd`. No model metadata or live configuration change.
+
+**v0.22.2:** ported onto upstream's decomposed compressor as `FullConversationCompactionMixin` (`agent/context_compressor_input.py`); `ContextCompressor.compress` delegates to it. Clarify results are the one non-raw body: they render through upstream's shared answer filter (`clarify_result_text`, uncapped) so headless runtime notices persisted in the answer slot never reach the summarizer as user decisions. Upstream additions the fork contract overrides, by design: the stall ladder's deterministic rung and the sustained-overload escalation (#123167) still run but cannot publish a static fallback, so the attempt fails closed (and reports a timeout when it was one); upstream's split-turn tests run through a validated summary. A no-op or failure returns the exact input list, blank echoes included.
+
+**Primary paths/gate:** `agent/context_compressor_input.py`, `agent/context_compressor_summary.py`, `agent/context_compressor.py`; `scripts/run_tests.sh tests/agent/test_full_conversation_compaction.py`, plus the broad compaction batch (fork-adapted fail-closed assertions in `tests/agent/test_context_compressor.py`, `tests/agent/test_compaction_events.py`, `tests/agent/test_compression_attempt_effect.py`, `tests/agent/test_compression_stall_deterministic_fallback.py`, `tests/agent/test_split_turn_compaction.py`, `tests/agent/test_relay_compaction_atof.py`, `tests/agent/test_proactive_tool_result_pruning.py`, `tests/agent/test_proactive_prune_rearm_threshold.py`, and `tests/agent/test_proactive_prune_restart_safety.py`). Generic real-compressor/transport invariants cover full bodies/arguments, old/recent outcomes, correction precedence, iterative handoffs, proactive-to-full flow, no-tools single-call and failure/no-op immutability with real temp-home SessionDB. Private replay source data is not part of the repository.
+
+### 11. Auxiliary provider and prefill timeout behavior
+
+**Purpose:** Avoid false auxiliary-stream timeouts before expected prefills arrive, while retaining model/provider routing used by Jake's setup.
+
+**Behavior to preserve:** prefill-aware progress timers, model-aware auxiliary clients, and current provider/reasoning selection. Copilot-specific residue was intentionally dropped.
+
+**Replay commit:** `1d36d1334b`
+
+**Primary paths:** `agent/auxiliary_client.py`, `agent/chat_completion_helpers.py`, `agent/conversation_compression.py`, and focused auxiliary timeout tests.
+
+### 12. Terminal progress expansion and friendly labels
+
+**Purpose:** Show complete terminal commands without enabling globally verbose tool output.
+
+**Behavior to preserve:** `expand_terminal_commands`, default off; per-platform override; shell strict-mode line removal; upstream-owned preview rendering; and consistent friendly progress labels.
+
+**Replay commits:**
+
+- `76923cb3bb` — expand terminal progress independently of verbose mode
+- `87d0c180ad` — finish friendly progress-label migration
+
+**Primary gates:** `tests/gateway/test_terminal_expansion_and_labels_fork.py`, `tests/gateway/test_run_progress_topics.py`, and `tests/fork_preservation/test_agent_display_v019.py`.
+
+### 13. Conservative background curation
+
+**Purpose:** Prevent routine conversations from creating noisy durable memories or unnecessary skill edits.
+
+**Behavior to preserve:** save only genuinely new durable facts, route detail to canonical files, and update skills only when there is reusable procedural learning.
+
+**Replay commits:**
+
+- `ba94e76b7c` — conservative curator prompts
+- `533557994e` — align class-first prompt gates with that policy
+
+**Primary gates:** `tests/agent/test_background_review_prompt_hygiene.py` and `tests/agent/test_review_prompt_class_first.py` (restored on v0.22.2; upstream purged it).
+
+### 14. Recall-layer routing and session-scoped skill reuse
+
+**Purpose:** Use the right source for durable context, transcript recall, live files, and current web facts without repeatedly reloading an unchanged skill.
+
+**Behavior to preserve:** memory_search as durable cache, session_search as transcript archive, file tools as live disk, web tools for current external facts, and skill reuse within an ongoing task.
+
+**Replay commit:** `697f0aad07`
+
+**Primary paths:** `agent/prompt_builder.py` and its prompt/toolset tests.
+
+### 15. Codex Responses alias and TTFB handling
+
+**Purpose:** Prevent duplicate tool calls when Responses events use different item IDs for the same `call_id`, and avoid repeated time-to-first-byte status messages for one request.
+
+**Behavior to preserve:** deduplicate TTFB status by model/input while still reconnecting.
+
+**Replay commit:** `3ca41c4420` (v0.22.2 port `7251e84b63`: TTFB dedupe only)
+
+**Status (v0.22.2):** upstream fixed the alias duplication; the fork's original alias tests pass verbatim against upstream's code, so the alias engine was dropped.
+
+**Primary gates:** `tests/agent/test_codex_responses_settle_pending_tool_calls.py` and `tests/agent/test_codex_ttfb_watchdog.py`.
+
+### 16. Discord SVG source ingestion
+
+**Purpose:** Make SVG attachments readable without depending on Discord's native-image cache or a rasterizer.
+
+**Behavior to preserve:** detect SVG by MIME type or filename, cache it through the authenticated document path, classify it as a document, and inject small UTF-8 SVG source into the prompt. SVGs above the 100 KB text-inline cap must reach the agent as readable document-path notes with `media_text_inlined=false`. Never route `image/svg+xml` through native-image handling or the raster magic-byte validator, including in mixed SVG+raster messages.
+
+**Replay commits:** `0117914da4`, `6874c0387e`
+
+**Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/platforms/base.py`, `gateway/run.py`, `tests/gateway/test_discord_attachment_download.py`, and `tests/gateway/test_mixed_attachment_routing.py`.
+
+### 17. Configurable Discord long-response delivery
+
+**Purpose:** Deliver useful long replies without losing their tail or adding visual chunk counters, while retaining upstream's flood guard by default.
+
+**Behavior to preserve:** `discord.max_split_messages` and `discord.chunk_indicators` bridge into the Discord platform's extra config. Defaults remain upstream-compatible at 8 messages and indicators enabled. Jake's local config uses 16 messages and disables indicators. Normal sends, forum posts, streaming previews, and edit-overflow continuations share the same behavior.
+
+**Replay commit:** `374c8d5c64`
+
+**Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/config_loader.py`, and `tests/gateway/test_discord_split_cap.py`.
+
+### 18. Avoid redundant paid vision analysis for native images
+
+**Purpose:** When a user image is already attached natively to the model, do not suggest an extra `vision_analyze` call just because the user referenced that image.
+
+**Behavior to preserve:** The tool schema reserves `vision_analyze` for images not already in the model's context, new image files/URLs, or a genuinely needed closer crop. Native user-message routing remains unchanged; the auxiliary vision fallback remains available for sessions that need it. The default profile uses authenticated OpenRouter providers for auxiliary vision and compression, with explicit DeepInfra-only, no-fallback, ZDR routing in `~/.hermes/config.yaml` (local config, not a fork commit).
+
+**Replay commit:** `329facc1eb`
+
+**Primary gate:** `tests/tools/test_vision_tools.py::TestVisionRegistration::test_vision_analyze_registered_with_schema` and `tests/tools/test_vision_native_fast_path.py`.
+
+### 19. Reject truncated execution and edit payloads
+
+**Purpose:** Prevent a historical tool-argument preview from being executed as code or saved as an edit when the model copies Hermes's `...[truncated]` suffix into a fresh tool call.
+
+**Behavior to preserve:** Before executing `execute_code`, `terminal`, `write_file`, or `patch`, reject affected payload fields ending with the truncation marker (allow trailing whitespace). Check again after request/pre-tool hooks and at the final dispatch point after execution middleware. Return an explicit blocked tool result telling the model to read the original source and retry with a complete, smaller payload. Keep read-only searches for the marker and non-final occurrences in legitimate code available. This is a boundary guard, not proof of where the malformed call originated.
+
+**Replay commit:** `9a6da6d72d` (v0.22.2 port `39a2878795`)
+
+**Status (v0.22.2):** upstream ships its own guard keyed on its new non-imitable marker and treats the legacy suffix as content. The fork keeps a narrow legacy-only check because the live `state.db` still held ~70k tool-call rows with the old suffix at upgrade time; remove once legacy sessions age out.
+
+**Primary gates:** `tests/test_truncated_tool_arguments.py` and `tests/tools/test_model_tools.py`.
+
+## Intentionally absent
+
+Do not revive these from the old fork unless Jake makes a new product decision:
+
+- Discord guild-history search bridge
+- Heredoc-specific terminal summarizer
+- MCP reconnect/schema fork
+- Copilot compatibility residue
+- OCR fallback for non-vision models
+- Dashboard recent-session ordering fork
+- Fork-local MoA safeguards
+- Historical integration notes and superseded implementation paths
+
+ACP remains required because Aside depends on it.
+
+## Upgrade method
+
+1. Create a clean branch from the new upstream release tag.
+2. Run upstream's copy of any apparently stale test before concluding behavior is missing.
+3. Replay these focused commits in order, dropping any commit whose behavior has converged upstream.
+4. Hand-port conflicts into the current upstream module that owns the runtime seam. Never restore whole files from an old fork.
+5. Verify behavior at runtime and retain a focused permanent gate for each surviving fork behavior.
+6. Run owner suites serially. The repository's monolithic suite currently leaks process state across suites, and xdist is not valid evidence.
+7. Push the candidate before changing the live checkout.
+8. Keep a rollback ref for the old live head, refresh the live environment, let Jake restart the gateway, and verify health plus real Discord and attachment traffic.

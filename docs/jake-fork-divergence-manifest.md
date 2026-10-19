@@ -40,7 +40,9 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 - `e35946ff2b` — restore durable memory search and declare fork dependencies
 - `35473edb54` — declare scikit-learn for the local fallback
 
-**Primary paths:** `tools/memory_search_tool.py`, `tools/toon_renderer.py`, `toolsets.py`, `pyproject.toml`, and their focused tests.
+**Primary paths:** `tools/memory_search_tool.py`, `tools/toon_renderer.py`, `toolsets.py`, `hermes_cli/tools_config.py` (configurable toolset), and `pyproject.toml`.
+
+**Gates:** `tests/tools/test_memory_search_tool.py`, `tests/tools/test_toon_renderer.py`, and `tests/tui_gateway/test_profiles_toolset_pin.py` (an explicit pin without `memory_search` drops it).
 
 ### 2. Bounded late delegation completion
 
@@ -80,7 +82,9 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Replay commit:** `2db1801eb4`
 
-**Primary paths:** `acp_adapter/server.py`, `acp_adapter/session.py`, and ACP preservation tests.
+**Primary paths:** `acp_adapter/server.py` and `acp_adapter/session.py`.
+
+**Gates:** `tests/acp_adapter/test_server.py` (thought-level selector and provider snapshot, fork hunks of `e308a8286a`), `tests/fork_preservation/test_acp_session_v019.py` (remote-host/WSL cwd translation), and `tests/fork_preservation/test_acp_commands_v019.py` (steer/queue).
 
 ### 5. Cached gateway replay consistency
 
@@ -217,7 +221,9 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Replay commit:** `697f0aad07`
 
-**Primary paths:** `agent/prompt_builder.py` and its prompt/toolset tests.
+**Primary paths:** `agent/prompt_builder.py`.
+
+**Gates:** `tests/agent/test_prompt_builder.py` (recall-layer routing and session-scoped skill reuse), with `tests/fixtures/prompt_surface/` carrying the rendered wording.
 
 ### 15. Codex Responses alias and TTFB handling
 

@@ -279,6 +279,16 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Primary gates:** `tests/test_truncated_tool_arguments.py` and `tests/tools/test_model_tools.py`.
 
+### 20. Voice transcripts saved to daily logs
+
+**Purpose:** Keep a durable, `memory_search`-indexed record of what Jake said in Discord voice notes.
+
+**Behavior to preserve:** When `stt.persist_voice_transcripts: true`, every successful inbound transcription (normal turns AND mid-run voice steering, which share `_enrich_message_with_transcription`) appends `## <timestamp>`, the audio filename, and the verbatim transcript to `<stt.voice_transcripts_dir>/<YYYY-MM-DD>.md` (default `<HERMES_HOME>/memories/memory-media/transcripts`). Off by default. Empty/failed transcriptions write nothing. A disk error is logged and never blocks the turn. Independent of `stt.echo_transcripts`.
+
+**History:** Original `2aa6e1cfb` (2026-05-23). Dropped by accident in the v2026.9.7 clean rebuild (area 6 was KEEP, never in the approved DROP set): config keys stayed set but nothing read them, and the last log is `2026-09-09.md`. Restored in v0.22.2 against upstream's extracted `gateway/run_inbound.py` transcription loop and `GatewayConfig` STT fields.
+
+**Primary gates:** `tests/fork_preservation/test_voice_transcript_persistence.py` (drives the real config loader and the real transcription loop, including the busy-steer path, so a rebuild that keeps the helper but drops the call site or config wiring fails).
+
 ## Intentionally absent
 
 Do not revive these from the old fork unless Jake makes a new product decision:

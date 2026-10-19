@@ -1980,6 +1980,34 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
         # and made the LLM comment on voice mode instead.
         return transcript, f'"{transcript}"'
 
+    async def _persist_voice_transcript(self, transcript: str, audio_path: str) -> None:
+        """Jake fork: append an inbound voice transcript to a daily markdown log (``stt.persist_voice_transcripts``).
+
+        Off by default. Never raises: a disk problem must not cost the user their turn."""
+        if not getattr(self.config, "persist_voice_transcripts", False):
+            return
+        transcript = (transcript or "").strip()
+        if not transcript:
+            return
+        try:
+            from datetime import datetime
+            from hermes_constants import get_hermes_home
+            configured = getattr(self.config, "voice_transcripts_dir", "") or ""
+            out_dir = (Path(configured).expanduser() if configured
+                       else get_hermes_home() / "memories" / "memory-media" / "transcripts")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            now = datetime.now()
+            target = out_dir / f"{now:%Y-%m-%d}.md"
+            entry = (f"\n## {now:%Y-%m-%d %H:%M:%S}\n\n- Audio file: `{os.path.basename(audio_path or '')}`\n"
+                     f"- Transcript: {transcript}\n")
+            if not target.exists():
+                target.write_text(f"# Voice transcripts - {now:%Y-%m-%d}\n", encoding="utf-8")
+            with target.open("a", encoding="utf-8") as fh:
+                fh.write(entry)
+            logger.info("Persisted voice transcript to %s", target)
+        except Exception as exc:
+            logger.warning("Failed to persist voice transcript: %s", exc)
+
     async def _enrich_message_with_transcription(
         self, user_text: str, audio_paths: list[str]
     ) -> tuple[str, list[str]]:
@@ -2014,6 +2042,7 @@ class GatewayInboundMixin(GatewayPluginInjectionMixin):
                     path, transcribe_audio, transcribe_audio_local_fallback,
                 )
                 if transcript is not None:
+                    await self._persist_voice_transcript(transcript, path)
                     successful_transcripts.append(transcript)
                 enriched_parts.append(note)
             except Exception as e:

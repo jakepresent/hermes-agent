@@ -613,6 +613,9 @@ class GatewayConfig:
     stt_echo_transcripts: bool = True  # Echo raw STT transcripts back to the user
     stt_echo_strip_fillers: bool = False  # Remove filler words (um/uh/…) from echoed transcripts
     stt_echo_filler_words: Optional[List[str]] = None  # Override the default filler word list
+    # Jake fork: save inbound voice transcripts to daily markdown logs (searchable by memory_search).
+    persist_voice_transcripts: bool = False
+    voice_transcripts_dir: str = ""  # empty -> <HERMES_HOME>/memories/memory-media/transcripts
     group_sessions_per_user: bool = True  # Isolate group sessions per participant when user IDs exist
     thread_sessions_per_user: bool = False  # False = threads shared across participants
     max_concurrent_sessions: Optional[int] = None  # Positive int caps simultaneous active sessions
@@ -660,6 +663,7 @@ class GatewayConfig:
     _SCALAR_DICT_FIELDS = (
         "write_sessions_json", "always_log_local", "filter_silence_narration", "stt_enabled",
         "stt_echo_transcripts", "stt_echo_strip_fillers", "stt_echo_filler_words",
+        "persist_voice_transcripts", "voice_transcripts_dir",
         "group_sessions_per_user", "thread_sessions_per_user",
         "max_concurrent_sessions", "multiplex_profiles",
         "on_all_adapters_down",
@@ -816,6 +820,9 @@ class GatewayConfig:
             stt_echo_transcripts=_coerce_bool(stt_setting("stt_echo_transcripts", "echo_transcripts"), True),
             stt_echo_strip_fillers=_coerce_bool(stt_setting("stt_echo_strip_fillers", "echo_strip_fillers"), False),
             stt_echo_filler_words=_coerce_str_list(stt_setting("stt_echo_filler_words", "echo_filler_words")),
+            persist_voice_transcripts=_coerce_bool(
+                stt_setting("persist_voice_transcripts", "persist_voice_transcripts"), False),
+            voice_transcripts_dir=str(stt_setting("voice_transcripts_dir", "voice_transcripts_dir") or ""),
             multiplex_profiles=None if multiplex_profiles is None else _coerce_bool(multiplex_profiles, True),
             room_link_url=room_link_url if isinstance(room_link_url, str) else None,
             systemd_watchdog_seconds=systemd_watchdog_seconds,

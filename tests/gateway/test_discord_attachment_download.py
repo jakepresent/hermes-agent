@@ -168,7 +168,7 @@ class TestCacheDiscordImage:
             "plugins.platforms.discord.adapter.cache_image_from_bytes_async",
             new=AsyncMock(),
         ) as mock_image:
-            media_urls, media_types, pending_text = await adapter._collect_attachment_media([att])
+            media_urls, media_types, media_text_inlined, pending_text = await adapter._collect_attachment_media([att])
 
         mock_document.assert_awaited_once_with(att, ".svg")
         mock_cache_document.assert_awaited_once_with(svg, "art.svg")
@@ -176,6 +176,7 @@ class TestCacheDiscordImage:
         assert media_urls == ["/tmp/art.svg"]
         assert media_types == ["image/svg+xml"]
         assert pending_text == f"[Content of art.svg]:\n{svg.decode()}"
+        assert media_text_inlined == [True]
         assert adapter._attachment_message_type(att) is MessageType.DOCUMENT
 
 

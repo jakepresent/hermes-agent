@@ -176,7 +176,7 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Purpose:** Avoid false auxiliary-stream timeouts before expected prefills arrive, while retaining model/provider routing used by Jake's setup.
 
-**Behavior to preserve:** prefill-aware progress timers, model-aware auxiliary clients, and current provider/reasoning selection. Copilot-specific residue was intentionally dropped.
+**Behavior to preserve:** prefill-aware progress timers, model-aware auxiliary clients, and current provider/reasoning selection. Copilot-specific residue was intentionally dropped. On v0.22.2 the widening applies only to the default first-token window: an explicit `auxiliary.<task>.no_progress_timeout` (upstream #108104) wins outright (`90dfabde79`; red/green `tests/agent/test_auxiliary_client.py::TestCodexAuxiliaryAdapterTimeout::test_no_progress_timeout_kwarg_overrides_default_window`).
 
 **Replay commit:** `1d36d1334b`
 

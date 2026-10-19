@@ -1,0 +1,103 @@
+{
+  "description": "Search Jake's durable, auditable memory files without using the browser. Indexes ~/ChatWorkspace, ~/.hermes/memories, and ~/LocalOps/hermes into a rebuildable SQLite FTS cache; root-local .memoryignore files exclude generated or archival paths. Use action='search' (default) for retrieval, action='status' to inspect Gemini semantic-cache coverage/missing path prefixes, and action='preindex' to regenerate missing semantic embeddings when coverage drops after large file moves or new context imports. Use this as the cache tier when current context is missing prior/project context. If it finds durable context that should have been saved already, treat that as a cache miss and write back a tight summary to the relevant ChatWorkspace context file or Hermes memory pointer. Two granularities: 'chunk' (default) returns heading-sized passages; 'observation' returns individual fact lines written as '- [category] text #tags' with exact file line numbers. Use observation granularity (or pass a category) to pull a specific fact or list all facts of a kind, e.g. category='decision' to find decisions across every project without reading whole files. Search mode defaults to 'hybrid' so normal calls use Gemini embeddings plus keyword ranking when cache coverage is high.",
+  "name": "memory_search",
+  "parameters": {
+    "properties": {
+      "action": {
+        "description": "Operation to run. 'search' retrieves context (default). 'status' reports semantic-cache coverage and missing prefixes. 'preindex' regenerates missing Gemini embeddings, optionally bounded by max_batches.",
+        "enum": [
+          "search",
+          "status",
+          "preindex"
+        ],
+        "type": "string"
+      },
+      "category": {
+        "description": "Optional observation-category filter (e.g. 'decision', 'status', 'risk', 'todo', 'preference'). Implies granularity='observation'. Combine with an empty query to list every fact of that category.",
+        "type": "string"
+      },
+      "granularity": {
+        "description": "For search: 'chunk' (default) returns passages; 'observation' returns individual '- [category] ...' fact lines with exact line numbers. For status/preindex, use 'all' to cover both chunk and observation caches.",
+        "enum": [
+          "chunk",
+          "observation",
+          "all"
+        ],
+        "type": "string"
+      },
+      "limit": {
+        "description": "Maximum results, 1-25. Default 8.",
+        "type": "integer"
+      },
+      "max_batches": {
+        "description": "Preindex only. Maximum Gemini embedding batches to process this call. Default 0 means process all missing candidates.",
+        "type": "integer"
+      },
+      "mode": {
+        "description": "Search mode. 'hybrid' (default) uses semantic + keyword reciprocal-rank fusion; 'keyword' uses SQLite FTS only; 'semantic' uses the selected semantic backend only.",
+        "enum": [
+          "keyword",
+          "semantic",
+          "hybrid"
+        ],
+        "type": "string"
+      },
+      "path_filter": {
+        "description": "Optional substring filter for result paths, e.g. 'ngng' or 'microsoft/work_context'.",
+        "type": "string"
+      },
+      "query": {
+        "description": "Search terms. Required for action='search' except when granularity='observation' and a category/source/path filter is given. Ignored for status/preindex.",
+        "type": "string"
+      },
+      "render_format": {
+        "description": "Optional model-facing context format. Use 'toon' for compact retrieval context; default 'json' preserves the existing output shape.",
+        "enum": [
+          "json",
+          "toon"
+        ],
+        "type": "string"
+      },
+      "retry_429": {
+        "description": "Preindex only. Retry once on Gemini 429/rate-limit responses. Defaults true.",
+        "type": "boolean"
+      },
+      "semantic_backend": {
+        "description": "Semantic backend for mode='semantic' or 'hybrid'. Default 'gemini' uses Gemini embeddings and requires GEMINI_API_KEY or GOOGLE_API_KEY. 'sklearn' is local/offline LSA over TF-IDF.",
+        "enum": [
+          "sklearn",
+          "gemini"
+        ],
+        "type": "string"
+      },
+      "semantic_model": {
+        "description": "Embedding model name when semantic_backend='gemini'. Default: gemini-embedding-2.",
+        "type": "string"
+      },
+      "semantic_rebuild": {
+        "description": "Controls semantic cache rebuilds. Default 'auto' may embed bounded/cold candidates; 'never' uses only persisted/cached vectors plus keyword fallback; 'force' explicitly allows a rebuild.",
+        "enum": [
+          "auto",
+          "never",
+          "force"
+        ],
+        "type": "string"
+      },
+      "source": {
+        "description": "Optional source filter. v1 indexes ChatWorkspace, Hermes memories, and curated LocalOps/hermes notes; other sources are reserved for migration follow-ups.",
+        "enum": [
+          "all",
+          "chatworkspace",
+          "memories",
+          "localops",
+          "openclaw_legacy",
+          "legacy_sessions",
+          "discord"
+        ],
+        "type": "string"
+      }
+    },
+    "required": [],
+    "type": "object"
+  }
+}

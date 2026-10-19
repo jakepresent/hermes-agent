@@ -1619,10 +1619,14 @@ class _CodexCompletionsAdapter:
         _instructions = resp_kwargs.get("instructions")
         if _instructions:
             _prefill = [{"role": "system", "content": _instructions}, *_prefill]
+        # An explicit task window (auxiliary.<task>.no_progress_timeout, #108104) is the user's
+        # choice and wins outright; the prefill widening applies only to the default window.
+        explicit_window = kwargs.get("no_progress_timeout")
+        has_explicit_window = isinstance(explicit_window, (int, float)) and explicit_window > 0
         guard = _CodexStreamGuard(
             self._client, total_timeout,
-            no_progress_timeout=kwargs.get("no_progress_timeout"),
-            first_progress_timeout=_aux_stream_no_progress_timeout(_prefill, total_timeout),
+            no_progress_timeout=explicit_window,
+            first_progress_timeout=None if has_explicit_window else _aux_stream_no_progress_timeout(_prefill, total_timeout),
         )
         try:
             guard.start()

@@ -1434,13 +1434,15 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         self._dedup = MessageDeduplicator()
         # Reply threading mode: "off", "first" (default; first chunk only), "all" (every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
-        raw_split_cap = self.config.extra.get("max_split_messages", self.MAX_SPLIT_MESSAGES)
+        # Fork: discord.max_split_messages overrides upstream's cap. Unset (or malformed) keeps
+        # upstream's own MAX_SPLIT_MESSAGES, read at send time like upstream does.
+        raw_split_cap = self.config.extra.get("max_split_messages")
         try:
-            split_cap = int(raw_split_cap)
+            split_cap = int(raw_split_cap) if raw_split_cap is not None else None
         except (TypeError, ValueError):
-            split_cap = self.MAX_SPLIT_MESSAGES
-        # Keep a real flood guard under malformed config; 100 still bounds pathological output.
-        self._max_split_messages = min(100, max(2, split_cap))
+            split_cap = None
+        # Keep a real flood guard under any configured value; 100 still bounds pathological output.
+        self._max_split_messages: int | None = None if split_cap is None else min(100, max(2, split_cap))
         self._chunk_indicators = _config_bool(self.config.extra.get("chunk_indicators"), True)
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
         # Bot's last message ID per channel: lets history backfill skip the full channel.history() scan.
@@ -3422,7 +3424,7 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceIn
         chars as 31 back-to-back Discord messages. The full response remains available in the gateway
         session history / logs. See #86581.
         """
-        cap = getattr(self, "_max_split_messages", self.MAX_SPLIT_MESSAGES)
+        cap = getattr(self, "_max_split_messages", None) or self.MAX_SPLIT_MESSAGES
         if len(chunks) <= cap:
             return chunks
         kept = chunks[: cap - 1]

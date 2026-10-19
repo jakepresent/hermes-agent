@@ -219,5 +219,6 @@ def test_resumed_handoff_summary_redacted_before_iterative_prompt():
         c.compress(messages)
 
     prompt = mock_call.call_args.kwargs["messages"][0]["content"]
-    assert "PREVIOUS SUMMARY:" in prompt
+    # The transcript handoff enters as source DATA once, not a separate field.
+    assert "FULL CONVERSATION" in prompt
     _assert_clean(prompt)

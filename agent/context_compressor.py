@@ -1797,11 +1797,8 @@ def _filter_legacy_clarify_answers(values):
     return answers
 
 
-def _sum_clarify(name, args, content, content_len, line_count):
-    response_prefix = "[clarify] user responded: "
-    # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune passes via the
-    # min_prune_chars guard and skips the >=200-char dedup.
-    max_summary_chars = _PRUNE_MIN_CHARS - 1
+def _clarify_answers(content) -> list:
+    """Genuine user answers from a clarify result; runtime notices are dropped."""
     payload = _json_dict(content)
     responses = payload.get("responses")
     if not isinstance(responses, list) and "user_response" in payload:
@@ -1824,13 +1821,25 @@ def _sum_clarify(name, args, content, content_len, line_count):
                 # can surround a notice split by the old multi-select normalizer.
                 values = _filter_legacy_clarify_answers(values)
             answers.extend(values)
-    answers = [answer for answer in answers if isinstance(answer, str) and answer]
+    return [answer for answer in answers if isinstance(answer, str) and answer]
+
+
+def clarify_result_text(content, max_chars: Optional[int] = None) -> str:
+    """One-line clarify outcome; ``max_chars=None`` keeps the answer whole (fork full input)."""
+    answers = _clarify_answers(content)
     if not answers:
         return "[clarify] asked user a question"
     # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
     serialized = json.dumps(answers[0] if len(answers) == 1 else answers,
                             ensure_ascii=False).encode("utf-8", errors="backslashreplace")
-    return elide(response_prefix + serialized.decode("utf-8"), max_summary_chars)
+    text = "[clarify] user responded: " + serialized.decode("utf-8")
+    return text if max_chars is None else elide(text, max_chars)
+
+
+def _sum_clarify(name, args, content, content_len, line_count):
+    # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune passes via the
+    # min_prune_chars guard and skips the >=200-char dedup.
+    return clarify_result_text(content, _PRUNE_MIN_CHARS - 1)
 
 
 def _sum_skill_manage(name, args, content, content_len, line_count):

@@ -29,6 +29,9 @@ _ACTIVE_REQUEST = "Inspect every shard and preserve the active request exactly."
 _TOKEN_BUDGET = 250
 
 
+_VALIDATED_SUMMARY = "## Progress\nEarlier tool groups were read and summarized."
+
+
 def _make_compressor(**overrides) -> ContextCompressor:
     """Compressor with an explicit small tail budget so the ceiling is reachable in a short transcript."""
     kwargs = {
@@ -156,9 +159,9 @@ def test_full_compaction_preserves_active_request_and_tool_pairs(
 ) -> None:
     messages = _oversized_active_turn()
 
-    # Exercise the deterministic handoff too: even when the summary model is
-    # unavailable, splitting the turn must not lose the opening request.
-    with patch.object(compressor, "_generate_summary", return_value=None):
+    # Fork full-input compaction never commits a deterministic handoff (a failed summary leaves the
+    # transcript whole), so the split is exercised through a validated summary.
+    with patch.object(compressor, "_generate_summary", return_value=_VALIDATED_SUMMARY):
         compressed = compressor.compress(messages, current_tokens=90_000)
 
     summary_rows = [
@@ -231,7 +234,7 @@ def test_a_tail_that_fits_the_budget_still_anchors_the_active_request() -> None:
 
 
 def test_active_request_survives_repeated_compaction_and_restart(tmp_path) -> None:
-    # Fallback compaction (no LLM summary) + SQLite reload between cycles:
+    # Validated-summary compaction (fork: no fallback handoff) + SQLite reload between cycles:
     # the active request must be recognized from persisted content alone.
     from agent.conversation_compression import _ensure_compressed_has_user_turn
     from hermes_state import SessionDB
@@ -248,7 +251,7 @@ def test_active_request_survives_repeated_compaction_and_restart(tmp_path) -> No
                     messages.extend(_tool_group(index))
             original = messages
             compressor = _make_compressor()
-            with patch.object(compressor, "_generate_summary", return_value=None):
+            with patch.object(compressor, "_generate_summary", return_value=_VALIDATED_SUMMARY):
                 messages = compressor.compress(original, current_tokens=90_000, force=True)
             _ensure_compressed_has_user_turn(original, messages)
             assert len(messages) < len(original)
@@ -329,7 +332,7 @@ def test_reply_pointer_does_not_count_toward_the_request_size(gateway_kwargs: di
     cut = compressor._find_tail_cut_by_tokens(messages, compressor._protect_head_size(messages))
     assert cut > active_user_idx
 
-    with patch.object(compressor, "_generate_summary", return_value=None):
+    with patch.object(compressor, "_generate_summary", return_value=_VALIDATED_SUMMARY):
         compressed = compressor.compress(messages, current_tokens=90_000)
     assert len(compressed) < len(messages)
     _assert_tool_pairs_are_complete(compressed)
@@ -348,7 +351,7 @@ def test_restated_reply_keeps_splitting_on_later_compactions() -> None:
     compressor.tail_token_budget = 1_000
     messages = _oversized_active_turn(_gateway_reply(_ACTIVE_REQUEST), 30)
     for cycle in range(3):
-        with patch.object(compressor, "_generate_summary", return_value=None):
+        with patch.object(compressor, "_generate_summary", return_value=_VALIDATED_SUMMARY):
             compressed = compressor.compress(messages, current_tokens=90_000)
         # One cycle adds 30 tool groups (60 rows); a refused split reclaims only a handful.
         assert len(messages) - len(compressed) >= 30, f"cycle {cycle}: split refused"
@@ -373,7 +376,7 @@ def test_a_long_active_request_still_splits_and_survives_verbatim() -> None:
     cut = compressor._find_tail_cut_by_tokens(messages, compressor._protect_head_size(messages))
     assert cut > 3
 
-    with patch.object(compressor, "_generate_summary", return_value=None):
+    with patch.object(compressor, "_generate_summary", return_value=_VALIDATED_SUMMARY):
         compressed = compressor.compress(messages, current_tokens=90_000, force=True)
     assert len(compressed) < len(messages)
     _assert_tool_pairs_are_complete(compressed)
@@ -395,7 +398,7 @@ def test_split_requires_a_request_that_can_be_restated_as_text(payload, can_spli
     messages[3]["content"] = payload
     cut = compressor._find_tail_cut_by_tokens(messages, compressor._protect_head_size(messages))
     assert (cut > 3) is can_split
-    with patch.object(compressor, "_generate_summary", return_value=None):
+    with patch.object(compressor, "_generate_summary", return_value=_VALIDATED_SUMMARY):
         compressed = compressor.compress(messages, current_tokens=90_000, force=True)
     if can_split:
         assert len(compressed) < len(messages)

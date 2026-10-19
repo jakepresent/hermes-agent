@@ -14,16 +14,31 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 
-def serialize_full_records(compressor: Any, turns: list[dict[str, Any]]) -> str:
+def full_call_names(messages: list[dict[str, Any]]) -> dict[str, str]:
+    """tool_call_id -> tool name across the whole source (a result can sit in another region)."""
+    from agent.context_compressor import _extract_tool_call_name_and_args, _tc_get
+
+    return {_tc_get(tc, "id"): _extract_tool_call_name_and_args(tc)[0]
+            for msg in messages if msg.get("role") == "assistant"
+            for tc in msg.get("tool_calls") or () if _tc_get(tc, "id")}
+
+
+def serialize_full_records(compressor: Any, turns: list[dict[str, Any]],
+                           call_names: Optional[dict[str, str]] = None) -> str:
     """Serialize turns with the existing redaction/media/think policy and no text or argument limits.
 
-    Standing system rows are instructions, not session material to resummarize.
+    Standing system rows are instructions, not session material to resummarize. Clarify results
+    are the one exception to raw bodies: headless runtime notices were persisted in the answer
+    slot, so they render through the shared answer filter (whole answers, notices dropped).
     """
     from agent.agent_runtime_helpers import strip_think_blocks
     from agent.compaction_steering import split_steering_suffix, tool_text
     from agent.context_compressor import (
         _MEDIA_DIRECTIVE_RE, _extract_tool_call_name_and_args, _redact_compaction_text, _summary_part_text, _tc_get,
+        clarify_result_text,
     )
+
+    call_names = call_names if call_names is not None else full_call_names(turns)
 
     parts = []
     for msg in turns:
@@ -37,6 +52,8 @@ def serialize_full_records(compressor: Any, turns: list[dict[str, Any]]) -> str:
             content = "\n".join(_summary_part_text(part) for part in content if isinstance(part, (dict, str)))
         content = _redact_compaction_text(content or "")
         body, steering = split_steering_suffix(content) if role == "tool" else (content, "")
+        if role == "tool" and call_names.get(msg.get("tool_call_id", "")) == "clarify":
+            body = clarify_result_text(body)
         content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", body) + steering
         if role == "assistant" and content:
             content = strip_think_blocks(None, content)
@@ -80,12 +97,13 @@ class FullSummaryInput:
             compressor._is_context_summary_message(m) for m in self.messages
         ):
             parts.append("PRIOR CHECKPOINT (historical DATA):\n" + _redact_compaction_text(compressor._previous_summary))
+        call_names = full_call_names(self.messages)
         for label, rows in (
             ("RETAINED HEAD", self.messages[:self.start]),
             ("REPLACED REGION", self.messages[self.start:self.end]),
             ("RETAINED RECENT TAIL", self.messages[self.end:]),
         ):
-            parts.append(f"BEGIN {label}\n" + serialize_full_records(compressor, rows) + f"\nEND {label}")
+            parts.append(f"BEGIN {label}\n" + serialize_full_records(compressor, rows, call_names) + f"\nEND {label}")
         return "\n\n".join(parts)
 
     def ground_summary(self, compressor: Any, summary: str) -> str:
@@ -128,8 +146,8 @@ class FullConversationCompactionMixin:
         """One full-conversation summary request; publish reductions only on a validated summary.
 
         ``force`` clears the cooldown and bypasses pre-LLM skips; ``bypass_cooldown`` runs one attempt
-        without resetting the failure ladder. Every no-op, skip and failure returns the echo-filtered
-        source (the exact input when it has no blank echoes) with no new stubs and no fallback summary.
+        without resetting the failure ladder. Every no-op, skip and failure returns the exact input list:
+        no new stubs, no fallback summary, and no blank-echo cleanup committed without a summary.
         """
         from agent.context_compressor import estimate_messages_tokens_rough
         from agent.conversation_compression import _raise_if_stale_attempt
@@ -158,7 +176,7 @@ class FullConversationCompactionMixin:
             if start >= end:
                 self._record_compression_regions(head_messages=staged[:start], middle_messages=[], tail_messages=staged[end:])
                 self._structural_no_op_result(telemetry, "no_compressible_window", f"window {start}-{end} fits within tail budget")
-                return source
+                return messages
             scan = self._scan_window_handoffs(source, start, end, source[start:end])
             end = max(end, scan.tail_start)
             # Quote only rows actually removed, not protected head text the handoff scan rehydrates.
@@ -169,12 +187,12 @@ class FullConversationCompactionMixin:
             telemetry["chunk_count"] = 1 if removed else 0
             if not removed:
                 self._structural_no_op_result(telemetry, "empty_post_handoff_window", f"window {start}-{end} holds only already-summarized handoffs")
-                return source
+                return messages
             if not self.quiet_mode:
                 self._log_compression_start(display_tokens, start, end, len(removed), len(source) - scan.tail_start)
             _raise_if_stale_attempt(self)
             if not force and (self._fallback_streak_skip(telemetry) or self._feasibility_skip(telemetry, removed, start, end)):
-                return source
+                return messages
             self._full_summary_input = FullSummaryInput(source, start, end)
             try:
                 summary = self._summarize_window(source, removed, scan, focus_topic, memory_context, bypass_cooldown)
@@ -183,7 +201,7 @@ class FullConversationCompactionMixin:
                 self._full_summary_input = None
             if not summary:
                 self._abort_on_summary_failure(telemetry, end - start, previous, require_valid_summary=True)
-                return source
+                return messages
             if getattr(self, "tail_mode", "lean") == "lean":
                 staged = self._demote_stale_tail_tools(staged, end)
             compressed = self._assemble_compressed(staged, start, end, scan, summary)

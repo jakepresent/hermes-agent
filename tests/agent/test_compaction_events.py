@@ -123,16 +123,18 @@ def test_committed_summary_publishes_one_compaction_mark_with_the_v1_shape(publi
     assert SECRET not in raw and "SANITIZED SUMMARY" not in raw and "focus on" not in raw
 
 
-def test_deterministic_fallback_is_a_committed_compaction_with_its_method(published):
+def test_failed_summary_never_commits_a_deterministic_fallback(published):
+    """Fork full-input compaction fails closed even with abort_on_summary_failure=false: a
+    failed summary is an attempt mark that dropped nothing, never a committed fallback."""
     agent = _Agent(_compressor())
 
     with patch.object(agent.context_compressor, "_generate_summary", return_value=None):
-        compress_context(agent, _messages(), "system prompt", approx_tokens=80_000)
+        returned, _ = compress_context(agent, _messages(), "system prompt", approx_tokens=80_000)
 
+    assert len(returned) == len(_messages())
     [(_sid, name, payload)] = published
-    assert name == "compaction"
-    assert (payload["method"], payload["failure_class"]) == ("deterministic_fallback", "summary_generation_failed")
-    assert payload["items_dropped"] > 0
+    assert name == "compaction.attempt"
+    assert (payload["outcome"], payload["failure_class"]) == ("failed", "summary_generation_aborted")
     assert payload["trigger"] == "unknown"  # an unlabelled automatic caller
 
 
@@ -337,7 +339,13 @@ def _prune_after_tool_results(persist_disabled):
         msgs.append({"role": "assistant", "content": "", "tool_calls": [
             {"id": f"c{i}", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}
         ]})
-        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": (chr(65 + i) + SECRET) * 600 if i < 3 else "ok"})
+        body = (chr(65 + i) + SECRET) * 600 if i < 3 else "ok"
+        # Fork full-input compaction: proactive maintenance retires stale screenshots only, never text.
+        # Every result carries one so the older ones fall outside the newest-image keep window.
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": [
+            {"type": "text", "text": body},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
+        ]})
     verdict = compress_after_tool_results(
         agent, messages=msgs, system_message="sys", user_message="ask", active_system_prompt="sys",
         conversation_history=None, compression_attempts=3, max_compression_attempts=3, effective_task_id="task",

@@ -116,7 +116,8 @@ def test_committed_summary_records_trigger_effect_and_method_without_content(cap
     ]
 
 
-def test_deterministic_fallback_commit_records_its_method_and_dropped_items(caplog):
+def test_failed_summary_records_an_abort_that_dropped_nothing(caplog):
+    # Fork full-input compaction: no deterministic fallback commit, even by default.
     agent = _Agent(_compressor())
 
     with patch.object(agent.context_compressor, "_generate_summary", return_value=None):
@@ -124,10 +125,9 @@ def test_deterministic_fallback_commit_records_its_method_and_dropped_items(capl
             _compressed, _ = compress_context(agent, _messages(), "system prompt", approx_tokens=80_000)
 
     [record] = _attempt_records(caplog)
-    assert record["commit_status"] == "committed"
-    assert record["method"] == "deterministic_fallback"
-    assert record["items_dropped"] > 0
-    assert record["failure_class"] == "summary_generation_failed"
+    assert record["commit_status"] == "aborted"
+    assert record["method"] == "none" and not record["fallback_used"]
+    assert record["failure_class"] == "summary_generation_aborted"
     assert SECRET not in json.dumps(record)
 
 

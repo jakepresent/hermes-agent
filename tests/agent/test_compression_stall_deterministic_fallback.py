@@ -96,7 +96,7 @@ def fast_timeouts(monkeypatch):
     monkeypatch.setattr(cc, "resolve_context_compression_timeouts", lambda compression_cfg=None: (2.0, 20.0))
 
 
-def test_second_consecutive_stall_commits_the_deterministic_fallback_summary(tmp_path, fast_timeouts):
+def test_second_consecutive_stall_runs_the_deterministic_rung_and_fails_closed(tmp_path, fast_timeouts):
     """Real AIAgent + real ``compress_context`` + facade timeout wrap; only ``call_llm`` is stubbed.
     Stall 1: backoff recorded, transcript untouched. Stall 2 (after the backoff lapsed): the deterministic
     rung commits a fallback summary instead of continuing without compression."""
@@ -125,16 +125,19 @@ def test_second_consecutive_stall_commits_the_deterministic_fallback_summary(tmp
         calls.clear()
         second, _ = agent._compress_context(live, "sys", approx_tokens=50_000)
 
-    assert second is not live and len(second) < len(live)
-    assert len(_summary_rows(second)) == 1, "the deterministic fallback summary is committed as the handoff"
+    # Fork full-input compaction fails closed: the deterministic rung runs (no summary LLM call) but
+    # has no validated summary to publish, so the transcript stays whole instead of a static fallback.
+    assert second is live
+    assert not _summary_rows(second), "no deterministic fallback summary is committed"
     assert calls == ["primary"], "the deterministic rung makes no summary LLM call"
-    assert getattr(agent, "_last_compression_timed_out", None) is not True
-    # The stalled LLM route stays in its backoff even though the deterministic rung committed. This arm
+    # Nothing committed, so the attempt honestly ends as a timeout (gateway: "summary timed out").
+    assert getattr(agent, "_last_compression_timed_out", None) is True
+    # The stalled LLM route stays in its backoff after the deterministic rung. This arm
     # comes from the cancelled PRIMARY worker's `stall_interrupted` record (the deterministic retry path
     # never reaches `on_timeout`), written from that worker's thread — read it once the worker is done.
     _wait_cancelled_workers_settled()
     assert compressor._summary_failure_cooldown_until > time.monotonic(), (
-        "the stalled LLM route keeps its stall backoff after the deterministic commit"
+        "the stalled LLM route keeps its stall backoff after the deterministic rung"
     )
 
 
@@ -282,7 +285,7 @@ def test_admitted_unchanged_commit_at_deadline_retries_without_overlap():
     assert timeout_callbacks == []
 
 
-def test_over_window_request_commits_the_deterministic_fallback_on_the_first_stall(tmp_path, fast_timeouts):
+def test_over_window_request_runs_the_deterministic_rung_on_the_first_stall_and_fails_closed(tmp_path, fast_timeouts):
     """A request above the model's context window cannot be sent unchanged, so waiting for a SECOND stall
     (which on the messaging gateway never comes — the first one auto-reset the session) is a dead end:
     the deterministic rung runs on the first stall and the transcript is committed (#114594)."""
@@ -296,6 +299,7 @@ def test_over_window_request_commits_the_deterministic_fallback_on_the_first_sta
         out, _ = agent._compress_context(live, "sys", approx_tokens=70_000)
 
     assert calls == ["primary"], "the deterministic rung makes no second summary LLM call"
-    assert out is not live and len(out) < len(live)
-    assert len(_summary_rows(out)) == 1, "the over-window request got a committed deterministic handoff"
-    assert getattr(agent, "_last_compression_timed_out", None) is not True
+    # Fork full-input compaction fails closed: no static handoff replaces unsummarized rows.
+    assert out is live
+    assert not _summary_rows(out)
+    assert getattr(agent, "_last_compression_timed_out", None) is True

@@ -299,7 +299,10 @@ def test_in_place_compress_never_clones_a_row_a_merge_already_carried(session_db
     assert _compress(agent, held, raw).status == "compressed"
 
     contents = [m["content"] for m in session_db.get_messages_as_conversation("sid")]
-    assert sum("second half 9931" in c for c in contents) == 1
+    # Fork full-input compaction grounds the handoff's task snapshot in the newest user turn, so the
+    # summary may quote it; a clone is a second LIVE row, i.e. text after the summary boundary.
+    from agent.context_compressor import _SUMMARY_END_MARKER
+    assert sum("second half 9931" in c.rsplit(_SUMMARY_END_MARKER, 1)[-1] for c in contents) == 1
 
 
 def test_in_place_compress_keeps_a_gap_below_the_newest_held_row(session_db):

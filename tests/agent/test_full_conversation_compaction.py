@@ -187,3 +187,36 @@ def test_unvalidated_compaction_is_immutable_and_staging_never_leaks(tmp_path, m
     direct_prompt = direct.call_args.kwargs["messages"][0]["content"]
     assert "DIRECT-SCOPE-ONLY" in direct_prompt and "BODY-MIDDLE" not in direct_prompt
     db.close()
+
+
+def test_clarify_answers_reach_full_input_whole_and_runtime_notices_never_do():
+    """Raw tool bodies are the full-input rule; clarify is the one filtered shape. Headless runs
+    persisted a runtime notice in the answer slot, which must not reach the summarizer as a user
+    decision, while a real answer must arrive whole (prune stubs cap it far shorter)."""
+    import json
+
+    answer = "Deploy to production after 18:00 UTC. " + "Keep the canary at five percent. " * 40 + "ANSWER-END"
+    notice = "[oneshot mode: no user available. Make the most reasonable assumption you can and continue.]"
+    engine = _engine("lean")
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "Ship it."}]
+    for index, response in enumerate((answer, notice)):
+        call_id = f"clarify-{index}"
+        messages += [
+            {"role": "assistant", "content": "", "tool_calls": [{
+                "id": call_id, "type": "function", "function": {"name": "clarify", "arguments": "{}"},
+            }]},
+            {"role": "tool", "tool_call_id": call_id, "content": json.dumps(
+                {"question": "Where?", "choices_offered": ["staging", "production"], "user_response": response},
+            )},
+        ]
+    for index in range(1, 24):
+        messages += _round(index, RECENT)
+    messages.append({"role": "user", "content": "Continue."})
+
+    with patch("agent.context_compressor.call_llm", return_value=_response()) as transport:
+        engine.compress(messages, force=True)
+
+    prompt = transport.call_args.kwargs["messages"][0]["content"]
+    assert "[clarify] user responded: " + json.dumps(answer) in prompt
+    assert "[clarify] asked user a question" in prompt
+    assert "most reasonable assumption" not in prompt

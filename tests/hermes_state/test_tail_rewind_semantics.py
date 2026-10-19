@@ -268,7 +268,14 @@ class TestCompressTagsCarriedTail:
             {"role": "user" if i % 2 == 0 else "assistant", "content": f"filler turn {i} " + "x" * 400}
             for i in range(12)
         ]
+        # Fork full-conversation compaction fails closed: a provider failure commits nothing, so
+        # tail tagging is exercised through a validated summary instead.
         with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
+            failed = compressor.compress(list(history))
+        assert failed == history
+        assert not any(m.get(_COMPACTION_TAIL_MARKER) for m in failed)
+
+        with patch.object(compressor, "_generate_summary", return_value="Earlier filler turns summarized."):
             out = compressor.compress(list(history))
 
         assert len(out) < len(history)

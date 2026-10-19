@@ -63,6 +63,7 @@ gateway:
     current_label: "目前：`{model}`（{provider}）"
     current_tag: "（目前）"
     more_models_suffix: "（還有 {count} 個）"
+    usage_open_picker: "`/model` — 開啟選擇器（顯示目前模型）"
     usage_switch_model: "`/model <name>` — 切換模型"
     usage_switch_provider: "`/model <name> --provider <slug>` — 切換提供方"
     usage_persist: "`/model <name> --global` — 永久儲存"
@@ -3318,6 +3319,7 @@ display:
     clarify: "詢問中"
     memory: "更新記憶中"
     todo_list: "更新任務中"
+    memory_search: "搜尋記憶中"
   verb_connector:
     search: "："
     default: " "

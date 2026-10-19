@@ -63,6 +63,7 @@ gateway:
     current_label: "현재: `{model}` ({provider})"
     current_tag: " (현재)"
     more_models_suffix: " (+{count}개 더 있음)"
+    usage_open_picker: "`/model` — 선택기 열기 (현재 모델 표시)"
     usage_switch_model: "`/model <name>` — 모델 전환"
     usage_switch_provider: "`/model <name> --provider <slug>` — 제공자 전환"
     usage_persist: "`/model <name> --global` — 영구 저장"
@@ -3318,6 +3319,7 @@ display:
     clarify: "질문 중"
     memory: "메모리 업데이트 중"
     todo_list: "작업 업데이트 중"
+    memory_search: "메모리 검색 중"
   verb_connector:
     search: " — "
     default: " "

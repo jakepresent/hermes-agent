@@ -63,6 +63,7 @@ gateway:
     current_label: "Geçerli: `{model}` ({provider})"
     current_tag: " (geçerli)"
     more_models_suffix: " (+{count} tane daha)"
+    usage_open_picker: "`/model` — seçiciyi aç (geçerli olanı gösterir)"
     usage_switch_model: "`/model <name>` — modeli değiştir"
     usage_switch_provider: "`/model <name> --provider <slug>` — sağlayıcıyı değiştir"
     usage_persist: "`/model <name> --global` — kalıcı kaydet"
@@ -3318,6 +3319,7 @@ display:
     clarify: "Soruyor"
     memory: "Belleği güncelliyor"
     todo_list: "Görevleri güncelliyor"
+    memory_search: "Bellekte arıyor"
   verb_connector:
     search: " — "
     default: " "

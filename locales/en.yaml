@@ -3424,7 +3424,6 @@ display:
     memory: "Updating memory"
     todo_list: "Updating tasks"
     memory_search: "Searching memory"
-    todo: "Updating tasks"
   verb_connector:
     search: " for "
     default: " "

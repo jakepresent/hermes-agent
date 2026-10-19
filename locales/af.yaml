@@ -63,6 +63,7 @@ gateway:
     current_label: "Huidig: `{model}` op {provider}"
     current_tag: " (huidig)"
     more_models_suffix: " (+{count} meer)"
+    usage_open_picker: "`/model` — maak kieser oop (wys huidige)"
     usage_switch_model: "`/model <name>` — verander model"
     usage_switch_provider: "`/model <name> --provider <slug>` — verander verskaffer"
     usage_persist: "`/model <name> --global` — stoor permanent"
@@ -3318,6 +3319,7 @@ display:
     clarify: "Vra"
     memory: "Werk geheue by"
     todo_list: "Werk take by"
+    memory_search: "Deursoek geheue"
   verb_connector:
     search: " na "
     default: " "

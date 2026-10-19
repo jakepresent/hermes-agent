@@ -63,6 +63,7 @@ gateway:
     current_label: "الحالي: `{model}` على {provider}"
     current_tag: " (الحالي)"
     more_models_suffix: " (+{count} آخر)"
+    usage_open_picker: "`/model` — فتح أداة الاختيار (تعرض الحالي)"
     usage_switch_model: "`/model <name>` — تبديل النموذج"
     usage_switch_provider: "`/model <name> --provider <slug>` — تبديل المزوّد"
     usage_persist: "`/model <name> --global` — حفظ دائم"
@@ -3318,6 +3319,7 @@ display:
     clarify: "يسأل"
     memory: "يحدّث الذاكرة"
     todo_list: "يحدّث المهام"
+    memory_search: "يبحث في الذاكرة"
   verb_connector:
     search: " عن "
     default: " "

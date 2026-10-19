@@ -63,6 +63,7 @@ gateway:
     current_label: "Reatha: `{model}` ar {provider}"
     current_tag: " (reatha)"
     more_models_suffix: " (+{count} eile)"
+    usage_open_picker: "`/model` — oscail an roghnóir (taispeánann sé an ceann reatha)"
     usage_switch_model: "`/model <name>` — athraigh an tsamhail"
     usage_switch_provider: "`/model <name> --provider <slug>` — athraigh an soláthraí"
     usage_persist: "`/model <name> --global` — coinnigh"
@@ -3318,6 +3319,7 @@ display:
     clarify: "ag fiafraí"
     memory: "ag nuashonrú cuimhne"
     todo_list: "ag nuashonrú tascanna"
+    memory_search: "ag cuardach cuimhne"
   verb_connector:
     search: " le haghaidh "
     default: " "

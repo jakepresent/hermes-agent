@@ -63,6 +63,7 @@ gateway:
     current_label: "Aktuális: `{model}` ezen: {provider}"
     current_tag: " (aktuális)"
     more_models_suffix: " (+{count} további)"
+    usage_open_picker: "`/model` — választó megnyitása (mutatja a jelenlegit)"
     usage_switch_model: "`/model <name>` — modell váltása"
     usage_switch_provider: "`/model <name> --provider <slug>` — szolgáltató váltása"
     usage_persist: "`/model <name> --global` — megőrzés"
@@ -3335,6 +3336,7 @@ display:
     clarify: "Kérdezés"
     memory: "Memória frissítése"
     todo_list: "Feladatok frissítése"
+    memory_search: "Memória keresése"
   verb_connector:
     search: " erre: "
     default: " "

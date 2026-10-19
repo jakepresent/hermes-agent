@@ -63,6 +63,7 @@ gateway:
     current_label: "Поточна: `{model}` на {provider}"
     current_tag: " (поточна)"
     more_models_suffix: " (+{count} ще)"
+    usage_open_picker: "`/model` — відкрити вибір (показує поточну)"
     usage_switch_model: "`/model <name>` — змінити модель"
     usage_switch_provider: "`/model <name> --provider <slug>` — змінити провайдера"
     usage_persist: "`/model <name> --global` — зберегти назавжди"
@@ -3318,6 +3319,7 @@ display:
     clarify: "Запитує"
     memory: "Оновлює пам'ять"
     todo_list: "Оновлює завдання"
+    memory_search: "Шукає в пам'яті"
   verb_connector:
     search: " за запитом "
     default: " "

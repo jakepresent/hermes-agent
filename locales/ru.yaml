@@ -63,6 +63,7 @@ gateway:
     current_label: "Текущая: `{model}` на {provider}"
     current_tag: " (текущая)"
     more_models_suffix: " (+ещё {count})"
+    usage_open_picker: "`/model` — открыть выбор (показывает текущую)"
     usage_switch_model: "`/model <name>` — сменить модель"
     usage_switch_provider: "`/model <name> --provider <slug>` — сменить провайдера"
     usage_persist: "`/model <name> --global` — сохранить навсегда"
@@ -3318,6 +3319,7 @@ display:
     clarify: "Спрашиваю"
     memory: "Обновляю память"
     todo_list: "Обновляю задачи"
+    memory_search: "Ищу в памяти"
   verb_connector:
     search: " по запросу "
     default: " "

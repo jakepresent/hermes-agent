@@ -63,6 +63,7 @@ gateway:
     current_label: "現在: `{model}` ({provider})"
     current_tag: " (現在)"
     more_models_suffix: " (他 {count} 件)"
+    usage_open_picker: "`/model` — 選択画面を開く（現在のモデルを表示）"
     usage_switch_model: "`/model <name>` — モデルを切り替え"
     usage_switch_provider: "`/model <name> --provider <slug>` — プロバイダーを切り替え"
     usage_persist: "`/model <name> --global` — 永続化"
@@ -3318,6 +3319,7 @@ display:
     clarify: "質問中"
     memory: "メモリを更新中"
     todo_list: "タスクを更新中"
+    memory_search: "メモリを検索中"
   verb_connector:
     search: " — "
     default: " "

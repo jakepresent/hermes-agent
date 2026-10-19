@@ -63,6 +63,7 @@ gateway:
     current_label: "当前：`{model}`（{provider}）"
     current_tag: "（当前）"
     more_models_suffix: "（还有 {count} 个）"
+    usage_open_picker: "`/model` — 打开选择器（显示当前模型）"
     usage_switch_model: "`/model <name>` — 切换模型"
     usage_switch_provider: "`/model <name> --provider <slug>` — 切换提供方"
     usage_persist: "`/model <name> --global` — 永久保存"
@@ -3318,6 +3319,7 @@ display:
     clarify: "提问"
     memory: "更新记忆"
     todo_list: "更新任务"
+    memory_search: "搜索记忆"
   verb_connector:
     search: " · "
     default: " "

@@ -527,8 +527,14 @@ _TOOL_VERB_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# Fork: "todo" is the pre-rename alias of todo_list and reuses its verb (no separate catalog key).
+_TOOL_VERB_ALIASES: dict[str, str] = {"todo": "todo_list"}
+
+
 def _tool_verb(tool_name: str) -> str | None:
-    return t(f"display.verb.{tool_name}") if tool_name in _TOOL_VERB_TOOLS else None
+    if tool_name not in _TOOL_VERB_TOOLS:
+        return None
+    return t(f"display.verb.{_TOOL_VERB_ALIASES.get(tool_name, tool_name)}")
 
 
 # Verbs that read better without the argument preview appended.

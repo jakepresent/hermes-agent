@@ -63,6 +63,7 @@ gateway:
     current_label: "Actuel : `{model}` chez {provider}"
     current_tag: " (actuel)"
     more_models_suffix: " (+{count} autres)"
+    usage_open_picker: "`/model` — ouvrir le sélecteur (affiche le modèle actuel)"
     usage_switch_model: "`/model <name>` — changer de modèle"
     usage_switch_provider: "`/model <name> --provider <slug>` — changer de fournisseur"
     usage_persist: "`/model <name> --global` — conserver"
@@ -3635,6 +3636,7 @@ display:
     clarify: "Question"
     memory: "Mise à jour de la mémoire"
     todo_list: "Mise à jour des tâches"
+    memory_search: "Recherche dans la mémoire"
   verb_connector:
     search: " : "
     default: " "

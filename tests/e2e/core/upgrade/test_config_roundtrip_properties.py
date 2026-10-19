@@ -437,7 +437,9 @@ def test_p1_noop_save_is_byte_identical(seed, home, monkeypatch):
     _noop_save_roundtrip(gen_case(seed, null_leaves=False), monkeypatch)
 
 
-@pytest.mark.parametrize("seed", [101, 102])
+# Fork: seeds draw from DEFAULT_CONFIG, which carries fork keys; 102 no longer yields a null leaf there,
+# so the fork pins the next seed that does (103). Two seeds still exercise the property.
+@pytest.mark.parametrize("seed", [101, 103])
 def test_p1_explicit_null_leaves_survive_a_noop_save(seed, home, monkeypatch):
     case = gen_case(seed)
     assert any(v is None for v in _leaves(case.tree).values()), f"seed {seed} generated no null leaf"

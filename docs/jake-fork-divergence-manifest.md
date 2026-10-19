@@ -32,6 +32,7 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 - Chunk and observation granularity, source/path filters, and TOON rendering
 - Persisted sqlite-vec vectors, coverage status, bounded preindex, and provenance
 - Tool exposure in the appropriate agent toolsets
+- Kept out of upstream's shared-metrics name sets (`toolsets._FORK_ONLY_NAMES`): the fork tool/toolset reports as `custom`, so the v4 telemetry schema stays upstream's
 - Explicit dependencies for sqlite-vec, NumPy, scikit-learn, google-genai, and CairoSVG
 
 **Replay commits:**
@@ -246,7 +247,7 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Behavior to preserve:** `discord.max_split_messages` and `discord.chunk_indicators` bridge into the Discord platform's extra config. Defaults remain upstream-compatible at 8 messages and indicators enabled. Jake's local config uses 16 messages and disables indicators. Normal sends, forum posts, streaming previews, and edit-overflow continuations share the same behavior.
 
-**Replay commit:** `374c8d5c64`
+**Replay commit:** `374c8d5c64`. On v0.22.2 only an explicit `discord.max_split_messages` is snapshotted at init; unset keeps reading upstream's `MAX_SPLIT_MESSAGES` at send time (red/green `tests/gateway/test_native_warning_coverage.py::test_discord_truncation_warning_covers_send_and_final_edit`).
 
 **Primary paths:** `plugins/platforms/discord/adapter.py`, `gateway/config_loader.py`, and `tests/gateway/test_discord_split_cap.py`.
 

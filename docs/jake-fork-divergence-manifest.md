@@ -68,6 +68,16 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Primary gate:** `tests/fork_preservation/test_notification_silence_marker.py`
 
+### 2c. Background-review fallback chain
+
+**Purpose:** The background review runs on Jake's subscription model (luna) with a paid DeepSeek backup for when the subscription hits its usage limit.
+
+**Behavior to preserve:** a routed review fork passes `auxiliary.background_review.fallback_chain` (entries with provider + model) as the forked AIAgent's `fallback_model`. Without it the forked agent has no fallback and an over-limit review fails. Compression uses upstream `auxiliary.compression.fallback_chain` and needs no fork code.
+
+**Key file:** `agent/background_review.py` (`_fork_init_kwargs`, `_review_fallback_chain`)
+
+**Primary gate:** `tests/fork_preservation/test_background_review_fallback_chain.py`
+
 ### 2a. Delegation budget visibility
 
 **Purpose:** Put the active child iteration limit, child wall-clock limit, and late-result parent continuation limit directly in the model-facing `delegate_task` description so task sizing happens before a child is spawned and a parent does not confuse its own continuation warning with the child’s allowance.

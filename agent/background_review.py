@@ -947,9 +947,23 @@ def _fork_init_kwargs(agent: Any, rt: dict[str, Any], routed: bool, max_iteratio
         kwargs.update(acp_command=rt["command"], acp_args=rt.get("args") or [])
     if not routed:
         kwargs.update(_same_model_parity_kwargs(agent))
-    elif (routed_cfg := _routed_reasoning_config(task_cfg)) is not None:
-        kwargs["reasoning_config"] = routed_cfg
+    else:
+        if (routed_cfg := _routed_reasoning_config(task_cfg)) is not None:
+            kwargs["reasoning_config"] = routed_cfg
+        # Fork: auxiliary.background_review.fallback_chain backs a routed review model the same
+        # way auxiliary.<task>.fallback_chain backs other aux tasks (e.g. a subscription model over
+        # its usage limit falls over to a paid API model instead of failing the review).
+        if (chain := _review_fallback_chain(task_cfg)):
+            kwargs["fallback_model"] = chain
     return kwargs
+
+
+def _review_fallback_chain(task_cfg: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
+    """``auxiliary.background_review.fallback_chain`` entries that name a provider and model."""
+    chain = _background_review_task_config(task_cfg).get("fallback_chain")
+    if not isinstance(chain, list):
+        return []
+    return [dict(e) for e in chain if isinstance(e, dict) and e.get("provider") and e.get("model")]
 
 
 # Above any live registry generation: _publish_tool_snapshot refuses an older-generation rebuild,

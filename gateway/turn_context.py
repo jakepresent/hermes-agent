@@ -8,6 +8,7 @@ single-element lists so mutation stays visible to the outer body.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any, Callable, List, Optional
 
 
@@ -73,6 +74,9 @@ class TurnContext:
     turn_disable_delegation: bool = False
     user_config: Any = None
     mute_notification_reply: bool = False
+    # Fork: when the turn started, so a final delivered on the queued-follow-up path can apply the
+    # same display.long_turn_mention elapsed gate as the normal completion path.
+    started_monotonic: float = field(default_factory=time.monotonic)
     voice_turn: bool = False  # a voice-note turn: runs on auxiliary.voice_chat
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None

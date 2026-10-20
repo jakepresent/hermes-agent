@@ -126,7 +126,7 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Purpose:** Notify Jake when a long response finishes or when a clarification blocks progress.
 
-**Behavior to preserve:** configurable elapsed-time rules for finals and immediate mentions for blocking clarification prompts. Approval mentions remain upstream-owned through `discord.approval_mentions`.
+**Behavior to preserve:** configurable elapsed-time rules for finals and immediate mentions for blocking clarification prompts. Approval mentions remain upstream-owned through `discord.approval_mentions`. Both final-delivery paths apply the elapsed gate: the normal completion path and the queued-follow-up "deliver first response before continuing" path (`_run_agent_deliver_first_response`, timed from `TurnContext.started_monotonic`), which a long turn takes whenever Jake messages into it mid-run.
 
 **Replay commit:** `62a6d18927`
 

@@ -3820,6 +3820,25 @@ class GatewayTurnMixin:
                 _already_streamed = False
         # Failed turns deliver their text but never their attachments (completed-turn parity).
         _deliver_media = not _delivery_result.get("failed")
+        # Fork: this branch delivers the final before a queued follow-up runs, so it must apply the
+        # same long-turn mention as the normal completion path; otherwise a long turn that the user
+        # messaged into mid-run finishes without the ping (observed: a 13-min turn, no mention).
+        if first_response and not _already_streamed:
+            try:
+                from gateway.run import (
+                    _apply_long_turn_mention_to_response, _load_gateway_config,
+                    _long_turn_mention_text_for_source, _platform_config_key,
+                )
+                first_response = _apply_long_turn_mention_to_response(
+                    first_response,
+                    _long_turn_mention_text_for_source(
+                        turn_ctx.source, _load_gateway_config(),
+                        _platform_config_key(turn_ctx.source.platform),
+                        elapsed_seconds=time.monotonic() - turn_ctx.started_monotonic, surface="final",
+                    ),
+                )
+            except Exception as _mention_err:
+                logger.debug("queued-first long-turn mention resolution failed: %s", _mention_err)
         if first_response:
             logger.info(
                 "Queued follow-up for session %s: final text delivery confirmed; delivering explicit media before continuing."

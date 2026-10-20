@@ -109,3 +109,41 @@ def test_empty_mention_leaves_response_untouched():
 def test_metadata_only_gains_a_key_when_mentioning():
     assert _metadata_with_long_turn_mention({"a": 1}, "") == {"a": 1}
     assert _metadata_with_long_turn_mention({"a": 1}, "<@1>")["mention_text"] == "<@1>"
+
+
+# ---------------------------------------------------------------------------
+# The queued-follow-up path delivers the first final itself; it must ping too.
+# ---------------------------------------------------------------------------
+
+def _queued_first_delivery(monkeypatch, *, elapsed, streamed=False):
+    import asyncio
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+
+    from gateway.run import GatewayRunner
+
+    monkeypatch.setattr("gateway.run._load_gateway_config", lambda: _cfg(elapsed_seconds=90))
+    monkeypatch.setattr("gateway.run._platform_config_key", lambda _p: "discord")
+    runner = MagicMock()
+    runner._run_agent_stream_confirmed_final_delivery = MagicMock(return_value=streamed)
+    runner._is_intentional_silence = MagicMock(return_value=False)
+    runner._deliver_queued_first_response = AsyncMock(return_value=True)
+    turn_ctx = SimpleNamespace(
+        mute_notification_reply=False, session_key="k", stream_consumer_holder=[None],
+        source=SRC, persist_user_display_kind=None, reply_expected=None,
+        _status_thread_metadata=None, event_message_id=None, inbound_message_id="m1",
+        started_monotonic=time.monotonic() - elapsed, run_generation=1,
+    )
+    asyncio.run(GatewayRunner._run_agent_deliver_first_response(
+        runner, turn_ctx, adapter=object(), response={"final_response": "Shipped."},
+        result={"final_response": "Shipped."}, stream_task=None,
+    ))
+    return runner._deliver_queued_first_response.await_args.args[0]
+
+
+def test_queued_first_final_after_a_long_turn_gets_the_mention(monkeypatch):
+    assert _queued_first_delivery(monkeypatch, elapsed=800) == f"{MENTION} Shipped."
+
+
+def test_queued_first_final_after_a_short_turn_stays_unmentioned(monkeypatch):
+    assert _queued_first_delivery(monkeypatch, elapsed=20) == "Shipped."

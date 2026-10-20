@@ -95,8 +95,14 @@ INTERNAL_NOTIFICATION_FOOTER = (
     "Do not treat it as user input, and do not reply to any earlier chat message because of it.]"
 )
 
+# Fork: chat-platform notices name the exact silence marker. "Absorb it silently" alone left the
+# model inventing its own "nothing new" replies (or another marker), which were posted as replies.
+SILENT_REPLY_HINT = (
+    "If this tells the user nothing new, reply with exactly [SILENT] and nothing will be posted."
+)
 
-def _mark_internal_notification(text: str) -> str:
+
+def _mark_internal_notification(text: str, *, silent_hint: bool = False) -> str:
     """Append unambiguous machine provenance to model-facing notification text (#52694).
 
     A process notification re-enters the conversation as a role=user turn on every wake path
@@ -104,11 +110,14 @@ def _mark_internal_notification(text: str) -> str:
     has read it as something the human said — including "replying" to the message the watch
     was armed from. Appended, not prepended, so start-anchored consumers (session timeline,
     memory gating, desktop notification detection, the SYSTEM prefix) keep matching.
-    Idempotent so a retried delivery never stacks footers.
+    Idempotent so a retried delivery never stacks footers. ``silent_hint`` (chat-platform push
+    path only) names the exact silence marker just above the footer.
     """
     text = text.rstrip()
     if text.endswith(INTERNAL_NOTIFICATION_FOOTER):
         return text
+    if silent_hint and SILENT_REPLY_HINT not in text:
+        text = text + "\n\n" + SILENT_REPLY_HINT
     return text + "\n\n" + INTERNAL_NOTIFICATION_FOOTER
 
 
@@ -1155,7 +1164,7 @@ class GatewayNotificationsMixin(GatewayNotificationOwnershipMixin):
             return await self._self_post_api_server(adapter, synth_text, raw_sid, evt)
         try:
             metadata: dict[str, Any] = {"notification_origin": "process_registry_synthetic"}
-            synth_text = _mark_internal_notification(synth_text)
+            synth_text = _mark_internal_notification(synth_text, silent_hint=True)
             session_key = str(evt.get("session_key") or "").strip()
             from agent.notification_presentation import diagnostic_process_event
             if diagnostic_process_event(evt):

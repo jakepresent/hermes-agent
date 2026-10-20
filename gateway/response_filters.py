@@ -19,6 +19,10 @@ from typing import Any, Optional
 LIVE_GATEWAY_SILENT_MARKERS = frozenset({
     "[SILENT]", "SILENT", "NO_REPLY", "NO REPLY",
     "[静默]", "静默", "[沉默]", "沉默",
+    # Fork: the bounded late-delegation sentinel. Models reuse it on other
+    # internal notices, where it used to be posted verbatim; it is silence on
+    # exactly the same terms as [SILENT] (machinery turns only).
+    "[NO_USER_VISIBLE_UPDATE]",
 })
 
 # Bracketed markers drive the autonomous lane's prefix rule ("[SILENT] nothing

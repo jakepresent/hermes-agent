@@ -1015,7 +1015,7 @@ def test_bounded_completion_event_carries_turn_policy(monkeypatch):
     assert "BOUNDED BACKGROUND DELEGATION CONTINUATION" in delivered.text
     assert delivered.metadata["delegation_completion_max_turns"] == 5
     # The payload is upstream's model-facing notification text (provenance footer included, #52694).
-    assert delivered.metadata["delegation_completion_payload"] == _mark_internal_notification("review result")
+    assert delivered.metadata["delegation_completion_payload"] == _mark_internal_notification("review result", silent_hint=True)
     assert delivered.metadata["disable_delegation_for_turn"] is True
     # Wrapping keeps the footer appended exactly once, at the end.
     assert delivered.text.endswith(INTERNAL_NOTIFICATION_FOOTER)
@@ -1034,7 +1034,7 @@ def test_unbounded_completion_is_not_stamped(monkeypatch):
     from gateway.run_notifications import _mark_internal_notification
 
     delivered = adapter.handle_message.await_args.args[0]
-    assert delivered.text == _mark_internal_notification("review result")
+    assert delivered.text == _mark_internal_notification("review result", silent_hint=True)
     assert "delegation_completion_max_turns" not in delivered.metadata
 
 

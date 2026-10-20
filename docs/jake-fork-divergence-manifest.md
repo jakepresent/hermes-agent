@@ -54,6 +54,20 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Primary gates:** `tests/fork_preservation/test_async_delegation_v019.py` and `tests/gateway/test_subagent_protection.py`.
 
+### 2b. Silent replies to internal notices
+
+**Purpose:** A background-process or delegation notice that changes nothing must not post a "nothing new" reply (or a raw marker) to the chat.
+
+**Behavior to preserve:**
+
+- Chat-platform push notices carry `SILENT_REPLY_HINT` ("reply with exactly [SILENT]…") just above the internal-notification footer; api_server wakes do not.
+- `[NO_USER_VISIBLE_UPDATE]` (the bounded-continuation sentinel) is in `LIVE_GATEWAY_SILENT_MARKERS`, so it is silence on exactly `[SILENT]`'s terms: machinery turns only, a human turn still gets the visible fallback.
+- The bounded continuation's sentinel reaches the normal silence check instead of being blanked into an empty response (which the normalizer turned into a visible "no response was generated" warning).
+
+**Key files:** `gateway/run_notifications.py`, `gateway/response_filters.py`, `gateway/run_turn.py`
+
+**Primary gate:** `tests/fork_preservation/test_notification_silence_marker.py`
+
 ### 2a. Delegation budget visibility
 
 **Purpose:** Put the active child iteration limit, child wall-clock limit, and late-result parent continuation limit directly in the model-facing `delegate_task` description so task sizing happens before a child is spawned and a parent does not confuse its own continuation warning with the child’s allowance.

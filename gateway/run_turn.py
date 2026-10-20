@@ -1510,7 +1510,6 @@ class GatewayTurnMixin:
         post-compression session_id propagation. Returns
         ``(response, _intentional_silence, agent_messages)``."""
         from gateway.run import (
-            _is_bounded_delegation_silence,
             _is_gateway_hidden_reasoning_incomplete_turn, _normalize_empty_agent_response,
             _sanitize_gateway_final_response, _should_clear_resume_pending_after_turn,
         )
@@ -1520,10 +1519,10 @@ class GatewayTurnMixin:
         if _is_gateway_hidden_reasoning_incomplete_turn(agent_result):
             response = ""
         # Fork: a bounded delegation continuation may legitimately have nothing to
-        # add. It answers with the silence sentinel, which is suppressed here so
-        # the late completion stays invisible instead of posting filler.
-        if _is_bounded_delegation_silence(response, bounded=bounded_delegation_completion):
-            response = ""
+        # add. Its sentinel is a shared silence marker, so it flows into the normal
+        # intentional-silence check below. (Blanking it here used to turn the
+        # silence into an empty response, which the normalizer replaced with a
+        # visible "no response was generated" warning.)
         _intentional_silence = self._is_intentional_silence(agent_result, response)
         # A queued (/queue) chain's TERMINAL turn owns the silence verdict, not the event that
         # opened the chain: an internal follow-up, or a message not addressed to the bot, may go

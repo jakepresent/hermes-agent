@@ -313,6 +313,18 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Primary gates:** `tests/fork_preservation/test_voice_transcript_persistence.py` (drives the real config loader and the real transcription loop, including the busy-steer path, so a rebuild that keeps the helper but drops the call site or config wiring fails).
 
+### 21. Reasoning effort in gateway status
+
+**Purpose:** Show the current session's reasoning effort below its model in `/status`.
+
+**Behavior to preserve:** During a turn, use the running agent's reasoning config and transport. While idle, resolve session override > per-model override > global config, not the stale cached agent's effort. Preserve disabled and unset/default labels and the canonical route-clamping annotation (for example `ultra (sends max on this route)`). Reading status must not change reasoning settings.
+
+**Commit ledger:** `feat(gateway): show session reasoning effort in status` on `jake/v0.22.2-clean`.
+
+**Primary paths:** `gateway/slash_commands_status.py` and `locales/en.yaml`.
+
+**Preservation gates:** `tests/gateway/test_status_reasoning.py` (global/model/session precedence, stale-cache handling, unset/disabled, and live transport labels; proven failing before the source change) and `tests/gateway/test_status_command.py` (existing status/context behavior).
+
 ## Intentionally absent
 
 Do not revive these from the old fork unless Jake makes a new product decision:

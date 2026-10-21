@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from gateway.run import GatewayRunner
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.event import MessageEvent
 from gateway.session import (
@@ -39,8 +40,6 @@ def _make_event(text: str, *, platform: Platform = Platform.TELEGRAM) -> Message
 
 
 def _make_runner(session_entry: SessionEntry, *, platform: Platform = Platform.TELEGRAM):
-    from gateway.run import GatewayRunner
-
     runner = object.__new__(GatewayRunner)
     runner.config = GatewayConfig(
         platforms={platform: PlatformConfig(enabled=True, token="***")}

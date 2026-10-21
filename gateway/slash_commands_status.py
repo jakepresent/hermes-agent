@@ -239,6 +239,31 @@ def _capped_rows(items: list, render) -> list[str]:
 class GatewayStatusCommandsMixin:
     """Read-only gateway introspection commands: /status, /context, /usage, /agents, /insights, /topup."""
 
+    def _status_reasoning_label(self, source, session_key, model, provider, running_agent, status_agent):
+        """Live effort during a turn; next-turn session resolution while idle.
+
+        A cached agent may predate /reasoning, so it supplies only the transport while idle.
+        Unset effort stays provider-default rather than inventing a medium wire setting.
+        """
+        from agent.reasoning_effort import effort_display_label
+        from hermes_cli.codex_runtime_switch import get_current_runtime
+        from gateway.run import _load_gateway_config
+
+        if running_agent is not None and hasattr(running_agent, "reasoning_config"):
+            rc = running_agent.reasoning_config
+        else:
+            rc = self._resolve_session_reasoning_config(
+                source=source, session_key=session_key, model=model,
+            )
+        if rc is None:
+            return t("gateway.status.reasoning_default")
+        if rc.get("enabled") is False:
+            return t("gateway.reasoning.level_disabled")
+        api_mode = _clean_str(getattr(status_agent, "api_mode", ""))
+        if not api_mode and provider == "openai-codex":
+            api_mode = get_current_runtime(_load_gateway_config())
+        return effort_display_label(rc.get("effort", "medium"), provider, model, api_mode)
+
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         from gateway.run import _AGENT_PENDING_SENTINEL
@@ -287,6 +312,9 @@ class GatewayStatusCommandsMixin:
             lines.append(t("gateway.status.model_provider", model=fields["model"], provider=fields["provider"]))
         elif fields["model"]:
             lines.append(t("gateway.status.model", model=fields["model"]))
+        lines.append(t("gateway.status.reasoning", level=self._status_reasoning_label(
+            source, session_key, model_name, provider_name, agent if is_running else None, status_agent,
+        )))
         from agent.context_breakdown import context_display_source
         mark = "~" if context_display_source(getattr(status_agent, "context_compressor", None)) != "provider_usage" else ""
         if context_total:

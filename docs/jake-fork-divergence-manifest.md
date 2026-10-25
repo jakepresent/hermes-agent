@@ -140,7 +140,9 @@ This file lists only behavior intentionally retained beyond upstream. It is not 
 
 **Replay commit:** `62a6d18927`
 
-**Primary paths:** `plugins/platforms/discord/adapter.py`, gateway display/config plumbing, and `tests/gateway/test_long_turn_mention.py`.
+The clarify ping has two halves, and both must survive a replay: the gateway resolves the requester's mention into `metadata["mention_text"]` (`gateway/run_turn_runner.py`), and the Discord adapter's `send_clarify` must read it, accept only a bare `<@digits>`/`<@!digits>`, reserve its length before truncation, prepend it to the same content-first prompt, and set users-only `allowed_mentions`. The v2026.9.7 port (and the v0.22.2 replay after it) dropped the adapter half, so clarify prompts silently stopped pinging until it was restored. `tests/gateway/test_discord_clarify_mention.py` guards that half.
+
+**Primary paths:** `plugins/platforms/discord/adapter.py`, gateway display/config plumbing, `tests/gateway/test_long_turn_mention.py`, and `tests/gateway/test_discord_clarify_mention.py`.
 
 ### 8. Read-only `/model` status
 

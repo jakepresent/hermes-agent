@@ -230,7 +230,7 @@ The clarify ping has two halves, and both must survive a replay: the gateway res
 
 **Purpose:** Prevent routine conversations from creating noisy durable memories or unnecessary skill edits.
 
-**Behavior to preserve:** save only genuinely new durable facts, route detail to canonical files, and update skills only when there is reusable procedural learning.
+**Behavior to preserve:** save only genuinely new durable facts, route detail to canonical files, and update skills only when there is reusable procedural learning. Skill edits merge into the existing rule instead of appending clauses, and a candidate rule must pass a generalization test (would it change behavior on a different task of the same class?) or be restated as its principle.
 
 **Replay commits:**
 

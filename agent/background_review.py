@@ -415,7 +415,15 @@ _LESSON_LAYER_BLOCK = (
     "'<date>-<incident>.md'. Prefer extending an existing references/ file over creating one; "
     "a skill with dozens of one-off references is the failure shape, not the goal.\n"
     "  • Fix the skill in place when it is wrong: edit the sentence that misled, do not append "
-    "'UPDATE: actually...' underneath it.\n\n"
+    "'UPDATE: actually...' underneath it.\n"
+    "  • Merge, don't accrete. When the lesson refines a rule the skill already states, rewrite "
+    "that rule so it covers the new case; the result should read as one rule, not the old one "
+    "plus a new clause. Growing a paragraph with another 'also' or 'in particular' sentence each "
+    "session is the failure shape. A good edit often leaves the text the same length or shorter.\n"
+    "  • Test the generalization before writing. Ask whether the rule would change what a future "
+    "session does on a DIFFERENT task of the same class. If it only describes this session's "
+    "situation (a named feature, stakeholder, file, or request), it is an example, not a rule: "
+    "state the underlying principle instead, or save nothing.\n\n"
 )
 
 # Shared tail of the skill and combined prompts: what NOT to persist as a skill.

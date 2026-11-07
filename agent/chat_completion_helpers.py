@@ -1421,6 +1421,12 @@ def _build_codex_kwargs(agent, api_messages, tools_for_api, reasoning_config, re
         except Exception as exc:
             logger.warning("%s⚠️ Failed to sanitize tool schemas for xAI: %s", getattr(agent, "log_prefix", ""), exc)
     ephemeral_out = _consume_ephemeral_max_output(agent)
+    # A ChatGPT Codex bare-400 recovery (turn_recovery_codex) moved this session to a fresh
+    # prompt-cache key: fold its salt into the scope the key and x-client-request-id derive from.
+    # Official Codex route only, so a later /model to another Responses provider keeps its own key.
+    _scope_salt = getattr(agent, "_codex_cache_scope_salt", None)
+    if isinstance(_scope_salt, str) and _scope_salt and agent._is_codex_backend():
+        cache_scope_id = f"{cache_scope_id or getattr(agent, 'session_id', None) or ''}#{_scope_salt}"
     return agent._get_transport().build_kwargs(model=agent.model,
         messages=agent._prepare_messages_for_non_vision_model(api_messages), tools=tools_for_api,
         reasoning_config=reasoning_config, session_id=getattr(agent, "session_id", None),

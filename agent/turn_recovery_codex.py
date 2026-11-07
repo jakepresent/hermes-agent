@@ -1,7 +1,9 @@
-"""Codex Responses recovery rungs: stale encrypted-reasoning strip and the replay verdict reset."""
+"""Codex Responses recovery rungs: stale encrypted-reasoning strip, the replay verdict reset, and the
+ChatGPT Codex bare-400 resend ladder."""
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from agent.turn_retry_state import TurnRetryState
@@ -74,3 +76,67 @@ def _recover_stale_codex_reasoning(
         agent.log_prefix, action, replay_stats["items"], replay_stats["messages"],
     )
     return True
+
+
+def recover_codex_opaque_bad_request(agent: Any, _retry: TurnRetryState, api_messages: Any) -> bool:
+    """ChatGPT Codex bare ``{"detail": "Bad Request"}`` (``error_classifier.is_codex_opaque_bad_request``).
+
+    The rejection names no field. Reconstructed replays of failed requests were accepted later, yet
+    one session failed six times in a row before recovering after a same-model ``/model`` and a
+    resend (mechanism unconfirmed). So: two one-shot hypothesis rungs per API call, cheapest first,
+    then False so fallback or the terminal copy takes over:
+
+    1. Move the session to a fresh prompt-cache key (``_build_codex_kwargs`` folds the salt into the
+       cache scope; it also rides the ``x-client-request-id`` header) and rebuild the client. The
+       new key sticks for the session, costing one cold prompt cache.
+    2. Resend without replayed provider state (encrypted reasoning, server item ids), from this
+       request copy only, so a failed attempt never edits the stored history. Skipped when the
+       request carries none.
+    """
+    from agent.turn_recovery import _vlines  # facade owns the verbose printer; late import breaks the cycle
+
+    if agent.api_mode != "codex_responses":
+        return False
+    if not _retry.codex_opaque_400_routing_reset_attempted:
+        _retry.codex_opaque_400_routing_reset_attempted = True
+        agent._codex_cache_scope_salt = uuid.uuid4().hex[:12]
+        replace = getattr(agent, "_replace_primary_openai_client", None)
+        if callable(replace):
+            try:
+                replace(reason="codex_opaque_bad_request")
+            except Exception:
+                logger.debug("Codex bare-400 recovery: client rebuild failed", exc_info=True)
+        _vlines(agent, "⚠️  Codex returned a bare 400 \"Bad Request\" — retrying with a new cache key...")
+        logger.warning(
+            "%sCodex bare 400 recovery: new prompt-cache scope salt and client rebuild, retrying",
+            agent.log_prefix,
+        )
+        return True
+    if not _retry.codex_opaque_400_replay_strip_attempted:
+        _retry.codex_opaque_400_replay_strip_attempted = True
+        stripped = 0
+        for message in api_messages if isinstance(api_messages, list) else []:
+            if not isinstance(message, dict):
+                continue
+            items = message.get("codex_reasoning_items")
+            if isinstance(items, list) and items:
+                # Native compaction checkpoints share this field and stand in for pruned history:
+                # keep them, or the resend would carry a different (longer) conversation.
+                kept = [i for i in items if isinstance(i, dict) and i.get("type") == "compaction"]
+                if len(kept) != len(items):
+                    stripped += len(items) - len(kept)
+                    if kept:
+                        message["codex_reasoning_items"] = kept
+                    else:
+                        message.pop("codex_reasoning_items")
+            if message.pop("codex_message_items", None):  # server item ids; content replays from the message
+                stripped += 1
+        if not stripped:
+            return False
+        _vlines(agent, "⚠️  Codex rejected the retry too — resending once without replayed reasoning...")
+        logger.warning(
+            "%sCodex bare 400 recovery: resending without replayed state (%d field(s) dropped from the request copy)",
+            agent.log_prefix, stripped,
+        )
+        return True
+    return False

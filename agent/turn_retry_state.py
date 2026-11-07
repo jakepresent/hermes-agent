@@ -38,6 +38,10 @@ class TurnRetryState:
     reasoning_mandatory_retry_attempted: bool = False
     oauth_1m_beta_retry_attempted: bool = False
     llama_cpp_grammar_retry_attempted: bool = False
+    # ChatGPT Codex bare ``{"detail": "Bad Request"}`` rungs (turn_recovery_codex): a fresh
+    # prompt-cache key + client first, then one resend without replayed opaque items.
+    codex_opaque_400_routing_reset_attempted: bool = False
+    codex_opaque_400_replay_strip_attempted: bool = False
 
     # Transport / rate-limit recovery
     primary_recovery_attempted: bool = False

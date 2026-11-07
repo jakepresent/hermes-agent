@@ -12,7 +12,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, NamedTuple, Optional, Tuple
 
-from agent.error_classifier import FailoverReason
+from agent.error_classifier import FailoverReason, is_codex_opaque_bad_request
 from hermes_constants import display_hermes_home
 
 # Failure codes minted by loop sites that are not provider verdicts (see module docstring).
@@ -218,6 +218,13 @@ _NONRETRYABLE_COPY: dict[str, str] = {
 _NONRETRYABLE_DEFAULT_COPY = (
     "{label} rejected the request and retrying won't help. Pick another model with /model, "
     "or check the details in `{home}/logs/agent.log`."
+)
+# The turn is persisted on this path (turn_recovery skips the #1630 overflow guard for it), so
+# "continue" resends the same request rather than losing the user's message.
+_CODEX_OPAQUE_BAD_REQUEST_COPY = (
+    "{label} rejected this request with a bare \"Bad Request\" that gives no reason, and Hermes's "
+    "automatic retries (a new cache key, then a resend without replayed reasoning) were rejected too. "
+    "Your message was kept: say \"continue\" to try again, or switch models with /model."
 )
 _AUTH_COPY: dict[str, str] = {
     "oauth": "{label} rejected your sign-in, so the model can't be reached. Sign in again: `{relogin}`.",
@@ -431,6 +438,8 @@ def nonretryable_copy(
         from agent.error_surface import auth_kind
 
         template = _AUTH_COPY[auth_kind(str(provider or ""))]
+    elif is_codex_opaque_bad_request(classified):
+        template = _CODEX_OPAQUE_BAD_REQUEST_COPY
     else:
         template = _NONRETRYABLE_COPY.get(classified.reason.value, _NONRETRYABLE_DEFAULT_COPY)
     prefix_hint = (

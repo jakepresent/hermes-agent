@@ -106,7 +106,13 @@ def is_context_overflow_failure_result(agent_result: dict, history_len: int) -> 
     if agent_result.get("compression_exhausted"):
         return True
     err = str(agent_result.get("error") or "").lower()
-    return any(p in err for p in _CONTEXT_OVERFLOW_ERROR_PHRASES) or ("400" in err and history_len > 50)
+    if any(p in err for p in _CONTEXT_OVERFLOW_ERROR_PHRASES):
+        return True
+    # The agent already named this a server-side failure (5xx, or ChatGPT Codex's bare 400): the
+    # bare-400 heuristic must not relabel it an overflow and drop the user's turn.
+    if agent_result.get("failure_reason") == "server_error":
+        return False
+    return "400" in err and history_len > 50
 
 
 # Setup/prefix rows rather than conversation: the agent rebuilds its own system prompt, and a

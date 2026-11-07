@@ -327,6 +327,18 @@ The clarify ping has two halves, and both must survive a replay: the gateway res
 
 **Preservation gates:** `tests/gateway/test_status_reasoning.py` (global/model/session precedence, stale-cache handling, unset/disabled, and live transport labels; proven failing before the source change) and `tests/gateway/test_status_command.py` (existing status/context behavior).
 
+### 22. ChatGPT Codex bare-400 recovery
+
+**Purpose:** Stop ChatGPT Codex's bare HTTP 400 `{"detail":"Bad Request"}` from killing subagents on the first hit and from dropping a long Discord session's user turn as a fake context overflow. The body names no field; reconstructed replays of failed requests were accepted later, and upstream reports the same error (openai/codex#57874, #59621). Cause unconfirmed.
+
+**Behavior to preserve:** Only `openai-codex` on `chatgpt.com/backend-api/codex` with that exact body (or the SDK's string form when no body parsed) classifies as `server_error` with an `error_context["codex_opaque_bad_request"]` marker; other providers, `openai-codex` on another host, and detailed Codex 400s (model entitlement, unsupported content, invalid encrypted content) keep their own rules. Per API call, recovery runs two one-shot rungs before credential-pool rotation: (1) a new prompt-cache scope salt (sticks for the session, Codex route only) plus client rebuild; (2) a resend from the request copy without replayed reasoning and message items, keeping native compaction checkpoints, skipped when nothing was replayed. Then fallback or the terminal copy. The failed turn is persisted (exempt from the #1630 large-400 skip), and the gateway's bare-`400` + long-history overflow heuristic ignores `failure_reason == "server_error"` while explicit overflow phrases still win. No new `FailoverReason` value, so the shared-metrics vocabulary is unchanged.
+
+**Commit ledger:** `fix(codex): recover from ChatGPT Codex bare 400 Bad Request` on `jake/v0.22.2-clean` (developed on `jake/codex-bare-400`).
+
+**Primary paths:** `agent/error_classifier.py`, `agent/turn_recovery_codex.py`, `agent/turn_recovery.py`, `agent/turn_retry_state.py`, `agent/chat_completion_helpers.py`, `agent/turn_failure_copy.py`, and `gateway/run_turn.py`.
+
+**Preservation gate:** `tests/agent/test_codex_opaque_bad_request.py` (classification and off-route negatives, real-loop retries with a new cache key, replay strip with stored history intact, bounded failure that persists the turn, compaction checkpoints kept, salt scoped to the Codex route, gateway persistence decision and reply). The 10 behavior tests fail on `43036da45c`; the 9 preservation tests pass on both.
+
 ## Intentionally absent
 
 Do not revive these from the old fork unless Jake makes a new product decision:

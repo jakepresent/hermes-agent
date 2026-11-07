@@ -852,6 +852,13 @@ def _provider_special_cases(c: _Ctx) -> Optional[Verdict]:
     # ``codex_reasoning_items`` — a genuine block with nothing to strip behaves as before.
     if _is_codex_masked_replay_rejection(c):
         return _v(_R.invalid_encrypted_content, **_ABORT_FALLBACK)
+    # ChatGPT Codex's bare ``{"detail": "Bad Request"}`` names no field, and later resends of the
+    # failed requests were accepted (cause unconfirmed; openai/codex#57874, #59621). The generic
+    # verdicts (malformed request; overflow on a long session) aborted subagents and dropped the
+    # user's turn. Marked server-side failure: turn_recovery retries with a fresh cache key, then
+    # without replayed items, before fallback / terminal copy. Abort hints skip the blind backoff.
+    if _is_codex_opaque_bad_request(c):
+        return _v(_R.server_error, **_ABORT_FALLBACK, error_context={CODEX_OPAQUE_BAD_REQUEST: True})
     # OpenAI Responses rejects a stale encrypted-reasoning replay with this code (#70595). It contains
     # both "thinking" and "signature", so it must beat the Anthropic heuristic below: that recovery
     # strips Anthropic thinking blocks and resends the same encrypted item forever.
@@ -1320,6 +1327,38 @@ def _is_codex_masked_replay_rejection(c: _Ctx) -> bool:
     return (c.code == "invalid_prompt" and body_msg == _CODEX_MASKED_REPLAY_MESSAGE) or (
         c.msg.strip() == f"invalid_prompt: {_CODEX_MASKED_REPLAY_MESSAGE}"
     )
+
+
+CODEX_OPAQUE_BAD_REQUEST = "codex_opaque_bad_request"
+# Every whitespace/quote form of the SDK's ``Error code: 400 - {'detail': 'Bad Request'}``.
+_CODEX_OPAQUE_BAD_REQUEST_MSG_RE = re.compile(
+    r"(?:error code: 400 - )?\{\s*['\"]detail['\"]\s*:\s*['\"]bad request['\"]\s*\}"
+)
+
+
+def _is_codex_opaque_bad_request(c: _Ctx) -> bool:
+    """HTTP 400 from the ChatGPT Codex backend whose entire body is ``{"detail": "Bad Request"}``.
+
+    Exact envelope, provider- and route-gated: a Codex 400 with any other ``detail`` (model
+    entitlement, ``Unsupported content type``) or any ``error`` object keeps its own rule, and the
+    same bare body from another provider, or ``openai-codex`` pointed at another host, keeps the
+    generic 400 handling."""
+    if c.provider_slug != "openai-codex" or c.status_code != 400:
+        return False
+    if c.base_url:  # the turn loop always passes the route; display-only callers may not
+        from utils import base_url_hostname
+        if base_url_hostname(c.base_url) != "chatgpt.com" or "/backend-api/codex" not in c.base_url.lower():
+            return False
+    body = c.body if isinstance(c.body, dict) else {}
+    if body:
+        return set(body) == {"detail"} and str(body.get("detail") or "").strip().lower() == "bad request"
+    return bool(_CODEX_OPAQUE_BAD_REQUEST_MSG_RE.fullmatch(c.msg.strip()))
+
+
+def is_codex_opaque_bad_request(classified: Any) -> bool:
+    """True for a ``ClassifiedError`` produced by the Codex bare-400 rule above."""
+    context = getattr(classified, "error_context", None)
+    return isinstance(context, dict) and bool(context.get(CODEX_OPAQUE_BAD_REQUEST))
 
 
 def _error_obj(body: Any) -> dict:

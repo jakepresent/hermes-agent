@@ -50,6 +50,10 @@ def worker_bootstrap() -> None:
     """Run PM's dependency boot in the marked external worker (again after a relaunch)."""
     if not os.environ.get(WORKER_MARKER):
         return
+    # First thing in the worker: record who sends SIGTERM before the job is adopted.
+    from cron.worker_signal_trace import arm
+
+    arm()
     from pm.environments import activate_dependencies
 
     activate_dependencies(Path(__file__).resolve().parent.parent)

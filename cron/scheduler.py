@@ -3623,6 +3623,11 @@ def _wait_for_external_cron_worker(
                 pass
 
 
+# A worker killed by a signal before it adopts its claim provably ran nothing, so the
+# dispatcher relaunches it this many times before reporting the fire as failed.
+_PRE_ACK_SIGNAL_RETRIES = 1
+
+
 def _launch_external_cron_worker(job: dict) -> bool:
     """Launch *job* outside the managed gateway process when required.
 
@@ -3693,22 +3698,25 @@ def _launch_external_cron_worker(job: dict) -> bool:
         handoff_dir.chmod(0o700)
     except OSError:
         pass
-    fd = os.open(payload_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as payload_file:
-            json.dump(
-                {
-                    "job": job,
-                    "profile_home": str(_get_hermes_home().resolve()),
-                    "multiplex_active": multiplex_active,
-                },
-                payload_file,
-            )
-            payload_file.flush()
-            os.fsync(payload_file.fileno())
-    except BaseException:
-        payload_path.unlink(missing_ok=True)
-        raise
+    def _write_payload() -> None:
+        fd = os.open(payload_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as payload_file:
+                json.dump(
+                    {
+                        "job": job,
+                        "profile_home": str(_get_hermes_home().resolve()),
+                        "multiplex_active": multiplex_active,
+                    },
+                    payload_file,
+                )
+                payload_file.flush()
+                os.fsync(payload_file.fileno())
+        except BaseException:
+            payload_path.unlink(missing_ok=True)
+            raise
+
+    _write_payload()
 
     profile_home = _get_hermes_home().resolve()
     # Same hydrate -> scope -> (routed) multiplex-context install the in-process fire uses, for exactly
@@ -3740,25 +3748,30 @@ def _launch_external_cron_worker(job: dict) -> bool:
     repo_root = Path(__file__).resolve().parent.parent
     worker_env = pin_hermes_tree_on_pythonpath(worker_env, repo_root)
     worker_env[WORKER_MARKER] = "1"
-    try:
-        stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+    def _spawn(argv: list[str]) -> subprocess.Popen:
         try:
-            process = subprocess.Popen(
-                dispatch.argv,
-                cwd=str(repo_root),
-                env=worker_env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=stderr_fd,
-                start_new_session=True,
-                creationflags=windows_hide_flags(),
-            )
-        finally:
-            os.close(stderr_fd)
-    except BaseException:
-        payload_path.unlink(missing_ok=True)
-        stderr_path.unlink(missing_ok=True)
-        raise
+            stderr_fd = os.open(stderr_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            try:
+                return subprocess.Popen(
+                    argv,
+                    cwd=str(repo_root),
+                    env=worker_env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_fd,
+                    start_new_session=True,
+                    creationflags=windows_hide_flags(),
+                )
+            finally:
+                os.close(stderr_fd)
+        except BaseException:
+            payload_path.unlink(missing_ok=True)
+            stderr_path.unlink(missing_ok=True)
+            raise
+
+    process = _spawn(dispatch.argv)
+    signal_retries_left = _PRE_ACK_SIGNAL_RETRIES
 
     with _running_lock:
         _restart_safe_waiter_job_ids.add(_inflight_key(job_id))
@@ -3823,6 +3836,33 @@ def _launch_external_cron_worker(job: dict) -> bool:
                 stderr_path=stderr_path,
             )
         returncode = process.poll()
+        if returncode is not None and returncode < 0 and signal_retries_left > 0:
+            # Killed by a signal before adopting the claim. Adoption is the only
+            # claimed -> running gate and no side effect runs before it, so if the
+            # row is still claimed by this process nothing ran and relaunching
+            # cannot duplicate work. Re-fencing the row both proves that and
+            # re-arms the handoff for the replacement worker.
+            from cron.scheduler_diagnostics import external_worker_stderr_tail
+            first_tail = external_worker_stderr_tail(stderr_path)
+            payload_path.unlink(missing_ok=True)
+            if mark_execution_handoff_pending(execution_id) is not None:
+                signal_retries_left -= 1
+                logger.warning(
+                    "Cron external worker for job '%s' was killed by signal %s before "
+                    "adopting execution %s; relaunching once (nothing ran)%s",
+                    job_id, -returncode, execution_id, first_tail,
+                )
+                retry_dispatch = restart_safe_gateway_child_argv(
+                    command,
+                    unit_suffix=f"cron-{job_id}-exec-{execution_id}-retry",
+                    require_restart_safe_scope=require_restart_safe_scope,
+                )
+                if retry_dispatch.mode != "in_process":
+                    dispatch = retry_dispatch
+                    _write_payload()
+                    process = _spawn(dispatch.argv)
+                    deadline = time.monotonic() + HANDOFF_ADOPTION_GRACE_SECONDS
+                    continue
         if returncode is not None:
             with _running_lock:
                 _restart_safe_waiter_job_ids.discard(_inflight_key(job_id))
@@ -3838,6 +3878,19 @@ def _launch_external_cron_worker(job: dict) -> bool:
                     f"/run/user/{os.getuid()}/bus disappeared after the gateway started. On a "  # windows-footgun: ok — scoped dispatch exists only on Linux
                     "system-level service install, run `sudo loginctl enable-linger <gateway-user>`; "
                     "the next fire dispatches without scope isolation."
+                )
+            if returncode < 0:
+                import signal as _signal
+
+                attempts = _PRE_ACK_SIGNAL_RETRIES - signal_retries_left + 1
+                try:
+                    signame = _signal.Signals(-returncode).name
+                except ValueError:
+                    signame = f"signal {-returncode}"
+                raise RuntimeError(
+                    f"the job did not run: its worker process was killed by {signame} while "
+                    f"starting up, before it began the job (exit {returncode}, "
+                    f"{attempts} attempt{'s' if attempts != 1 else ''}){stderr_tail}"
                 )
             raise RuntimeError(
                 f"cron external worker exited before ownership acknowledgement "
@@ -3955,6 +4008,11 @@ def _run_external_worker_payload(payload_path: Path, ack_path: Path) -> bool:
                     execution_id,
                 )
                 return False
+            # The startup window is over: restore normal SIGTERM handling before any job
+            # code (or job subprocess) runs. See cron/worker_signal_trace.py.
+            from cron.worker_signal_trace import disarm
+
+            disarm()
             old_external_execution = os.environ.get("_HERMES_CRON_EXTERNAL_WORKER")
             os.environ["_HERMES_CRON_EXTERNAL_WORKER"] = execution_id
             try:

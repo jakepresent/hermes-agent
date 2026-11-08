@@ -339,6 +339,18 @@ The clarify ping has two halves, and both must survive a replay: the gateway res
 
 **Preservation gate:** `tests/agent/test_codex_opaque_bad_request.py` (classification and off-route negatives, real-loop retries with a new cache key, replay strip with stored history intact, bounded failure that persists the turn, compaction checkpoints kept, salt scoped to the Codex route, gateway persistence decision and reply). The 10 behavior tests fail on `43036da45c`; the 9 preservation tests pass on both.
 
+### 23. Cron worker startup-kill retry and sender trace
+
+**Purpose:** A restart-safe cron worker is occasionally killed by SIGTERM a second or two after it starts, before it adopts its claim (seen on the 15-minute `ballpark-gateway-health-ping`: Oct 19 twice, Oct 28, Nov 8, 2026). systemd, the OOM killer and the process sweeps leave no trace of it, and the alert read like a Ballpark outage. Cause still unknown.
+
+**Behavior to preserve:** When the worker dies by a signal before acknowledging, the dispatcher re-fences the execution row with `mark_execution_handoff_pending`. If the row is still claimed by the dispatcher (proof that nothing adopted it, so nothing ran), it relaunches once under the unit suffix `...-retry`. If the row was adopted, or the retry also dies, the fire fails with "the job did not run: its worker process was killed by SIGTERM while starting up ... (N attempts)". Ordinary nonzero exits are never retried. In the worker, `cron/worker_signal_trace.py` blocks SIGTERM from package init until the ownership acknowledgement. A watcher thread takes it with `sigtimedwait`, writes the sender's pid, uid, command line and parent chain to `$HERMES_HOME/logs/cron-worker-signals.log` and stderr, then re-sends the signal so the worker dies exactly as before (exit -15). `disarm()` runs right after the acknowledgement and before any job code, because a blocked mask is inherited by child processes.
+
+**Commit ledger:** `fix(cron): retry workers killed before adoption and trace the sender` on `jake/v0.22.2-clean` (developed on `jake/cron-preack-retry`).
+
+**Primary paths:** `cron/scheduler.py` (`_launch_external_cron_worker`, `_run_external_worker_payload`), `cron/worker_bootstrap.py` and `cron/worker_signal_trace.py`.
+
+**Preservation gate:** `tests/cron/test_worker_pre_ack_signal.py` (relaunch with the row re-fenced under a new unit, a second kill fails plainly with handoff files cleaned up, no relaunch once the row was adopted, a real process records its sender and still exits -15, and children spawned after disarm have SIGTERM unblocked). The 5 behavior tests fail on `0698e05399`. The ordinary-exit preservation test passes on both.
+
 ## Intentionally absent
 
 Do not revive these from the old fork unless Jake makes a new product decision:

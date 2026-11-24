@@ -1,7 +1,6 @@
 """Batch ``compress()`` tags its carried-forward tail dicts (#86366), so the caller can count them for the commit and the
 store keeps their originals out of recall."""
 
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.context_compressor import _COMPACTION_TAIL_MARKER, ContextCompressor
@@ -27,8 +26,7 @@ def test_compress_marks_carried_forward_tail_dicts():
         failed = compressor.compress(list(history))
     assert failed == history
     assert not any(m.get(_COMPACTION_TAIL_MARKER) for m in failed)
-    ok = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="## Goal\nfiller"))])
-    with patch("agent.context_compressor.call_llm", return_value=ok):
+    with patch.object(compressor, "_generate_summary", return_value="Earlier filler turns summarized."):
         out = compressor.compress(list(history))
 
     assert len(out) < len(history)

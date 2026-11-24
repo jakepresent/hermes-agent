@@ -62,6 +62,7 @@ gateway:
     session_only_hint: "_(このセッションのみ — 永続化するには `--global` を追加)_"
     current_label: "現在: `{model}` ({provider})"
     current_tag: " (現在)"
+    usage_open_picker: "`/model` — 選択画面を開く（現在のモデルを表示）"
     more_models_suffix: " (他 {count} 件)"
     usage_switch_model: "`/model <name>` — モデルを切り替え"
     usage_switch_provider: "`/model <name> --provider <slug>` — プロバイダーを切り替え"

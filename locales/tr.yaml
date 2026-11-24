@@ -62,6 +62,7 @@ gateway:
     session_only_hint: "_(yalnızca bu oturum — kalıcı yapmak için `--global` ekleyin)_"
     current_label: "Geçerli: `{model}` ({provider})"
     current_tag: " (geçerli)"
+    usage_open_picker: "`/model` — seçiciyi aç (geçerli olanı gösterir)"
     more_models_suffix: " (+{count} tane daha)"
     usage_switch_model: "`/model <name>` — modeli değiştir"
     usage_switch_provider: "`/model <name> --provider <slug>` — sağlayıcıyı değiştir"

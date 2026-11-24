@@ -62,6 +62,7 @@ gateway:
     session_only_hint: "_（僅本次工作階段有效 — 加上 `--global` 可永久儲存）_"
     current_label: "目前：`{model}`（{provider}）"
     current_tag: "（目前）"
+    usage_open_picker: "`/model` — 開啟選擇器（顯示目前模型）"
     more_models_suffix: "（還有 {count} 個）"
     usage_switch_model: "`/model <name>` — 切換模型"
     usage_switch_provider: "`/model <name> --provider <slug>` — 切換提供方"

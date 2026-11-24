@@ -144,7 +144,7 @@ dependencies = [
   # --- Jake fork dependencies (memory_search + SVG vision). Fork-only. ---
   # Local vector search for Gemini-backed durable memory retrieval
   # (tools/memory_search_tool.py).
-  "sqlite-vec==0.1.9; python_version >= '3.14'",
+  "sqlite-vec==0.1.9; sys_platform != 'android' and python_version >= '3.14'",  # no Android wheel
   # Local vector scoring for the Gemini semantic path
   # (_normalize_dense_matrix). Upstream only declares numpy under voice/wake
   # extras; memory_search is a core fork tool, so it is declared here.
@@ -152,7 +152,7 @@ dependencies = [
   # Required by the fork's Gemini-backed memory_search query path. Omitting it
   # makes a fully populated semantic cache fall back to keyword after a venv
   # rebuild.
-  "google-genai==2.12.1; python_version >= '3.14'",
+  "google-genai==2.34.0; python_version >= '3.14'",
   # Offline/local semantic fallback for memory_search (TF-IDF + truncated SVD
   # LSA) when the Gemini backend is unavailable.
   "scikit-learn==1.9.0; python_version >= '3.14'",

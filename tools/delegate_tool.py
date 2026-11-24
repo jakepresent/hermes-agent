@@ -758,7 +758,23 @@ def _build_top_level_description(*, independent_completions=None) -> str:
     if independent_completions is None:
         independent_completions = _get_independent_completions()
     delivery = _DELIVERY_INDEPENDENT if independent_completions else _DELIVERY_JOINED
-    return _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + _DESCRIPTION_TAIL
+    return _DESCRIPTION_HEAD.format(delivery=delivery) + restrictions_rule + _child_budget_rule() + _DESCRIPTION_TAIL
+
+
+def _child_budget_rule() -> str:
+    """Fork: state each child's iteration cap and inactivity timeout from live config, so the parent
+    sizes tasks before spawning instead of children dying at max_iterations with no summary."""
+    try:
+        max_iterations = int(delegate_tool_config._load_config().get("max_iterations", DEFAULT_MAX_ITERATIONS))
+    except Exception:
+        max_iterations = DEFAULT_MAX_ITERATIONS
+    try:
+        child_timeout = delegate_tool_config._get_child_timeout()
+    except Exception:
+        child_timeout = None
+    # child_timeout_seconds is an INACTIVITY cap (resets on progress), not wall-clock.
+    timeout_text = "no inactivity cap" if child_timeout is None else f"{child_timeout:g}s without progress"
+    return f"- Limits per child: {max_iterations} iterations / {timeout_text}. Reserve room to summarize.\n"
 
 # The independent variant states the dispatch-time choice and its cost: a parent that meant to answer once but left
 # tasks ungrouped is woken per result and spends a filler turn on each.

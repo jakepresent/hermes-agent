@@ -611,6 +611,19 @@ def check_discord_requirements() -> bool:
     return True
 
 
+_CLARIFY_MENTION_RE = re.compile(r"^<@!?\d+>$")
+
+
+def _clarify_metadata_mention(metadata: Optional[dict]) -> str:
+    """Fork (area 9): a safe requester mention from clarify send metadata, or ''.
+
+    Only a lone ``<@digits>`` / ``<@!digits>`` token is accepted, so @everyone,
+    roles, or arbitrary text in metadata can never become a ping."""
+    raw = (metadata or {}).get("mention_text") if isinstance(metadata, dict) else None
+    mention = str(raw or "").strip()
+    return mention if _CLARIFY_MENTION_RE.match(mention) else ""
+
+
 def _build_allowed_mentions(extra: Optional[dict] = None):
     """Build Discord ``AllowedMentions`` denying @everyone/@here/roles by default (any LLM output
     with ``@everyone`` would otherwise ping the server); user / replied-user pings stay on.
@@ -5381,7 +5394,8 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             return None
 
     def _self_contained_prompt_content(
-        self, header: str, body: str, *, code_block: bool = False, tail: str = ""
+        self, header: str, body: str, *, code_block: bool = False, tail: str = "",
+        reserve: int = 0,
     ) -> str:
         """Plain content mirroring an embed's payload.
         Embeds can be invisible/detached on web/mobile, so ``content`` carries the payload."""
@@ -5393,12 +5407,14 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             prefix = f"{header}\n\n"
             suffix = tail
         truncated_suffix = "\n" + t("platform.discord.prompt.truncated_marker")
-        budget = max(0, self.MAX_MESSAGE_LENGTH - len(prefix) - len(suffix))
+        budget = max(0, self.MAX_MESSAGE_LENGTH - reserve - len(prefix) - len(suffix))
         if len(body) > budget:
             body = body[: max(0, budget - len(truncated_suffix))] + truncated_suffix
         return f"{prefix}{body}{suffix}"
 
-    def _clarify_prompt_content(self, question: str, choices: list, hint: str) -> str:
+    def _clarify_prompt_content(
+        self, question: str, choices: list, hint: str, *, reserve: int = 0,
+    ) -> str:
         """Fork: plain-content clarify payload carrying the NUMBERED choices.
 
         Buttons and embeds can both fail to render (mobile web, accessibility
@@ -5427,8 +5443,9 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
 
         kept = list(rendered)
         while True:
-            content = self._self_contained_prompt_content(header, safe_question, tail=_tail(kept))
-            if len(content) <= self.MAX_MESSAGE_LENGTH or not kept:
+            content = self._self_contained_prompt_content(
+                header, safe_question, tail=_tail(kept), reserve=reserve)
+            if utf16_len(content) <= self.MAX_MESSAGE_LENGTH - reserve or not kept:
                 return content
             kept.pop()
 
@@ -5626,10 +5643,24 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             # only when a label is too long for a button; then the hint already
             # carries the list and the fork adds none. Invisible codepoints are
             # escaped so a prompt can't hide part of itself.
+            # Fork (area 9): the gateway resolves the requester's mention for blocking
+            # clarify prompts into metadata["mention_text"]; prepend it to the SAME
+            # content-first message so the ping carries the question. Only a bare numeric
+            # user mention is accepted, its length is reserved before truncation, and
+            # allowed_mentions is pinned to users only.
+            mention = _clarify_metadata_mention(metadata)
+            reserve = (utf16_len(mention) + 1) if mention else 0
             content = self._clarify_prompt_content(
-                str(question or "").strip(), [] if numbered else clean_choices, hint,
+                str(question or "").strip(), [] if numbered else clean_choices, hint, reserve=reserve,
             )
             send_kwargs = {"content": content, "embed": embed}
+            if mention:
+                send_kwargs["content"] = f"{mention}\n{content}"
+                allowed_mentions_cls = getattr(discord, "AllowedMentions", None)
+                if allowed_mentions_cls is not None:
+                    send_kwargs["allowed_mentions"] = allowed_mentions_cls(
+                        users=True, roles=False, everyone=False, replied_user=False,
+                    )
             if view:
                 send_kwargs["view"] = view
             return send_kwargs, view

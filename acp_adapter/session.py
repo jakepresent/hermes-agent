@@ -101,9 +101,30 @@ def _register_task_cwd(task_id: str, cwd: str) -> None:
         return
     try:
         from tools.terminal_tool import register_task_env_overrides
-        register_task_env_overrides(task_id, {"cwd": _translate_acp_cwd(cwd)})
+        register_task_env_overrides(task_id, {"cwd": _tool_cwd_for_this_host(cwd)})
     except Exception:
         logger.debug("Failed to register ACP task cwd override", exc_info=True)
+
+
+def _tool_cwd_for_this_host(cwd: str) -> str:
+    """Fork: an execution cwd that exists on THIS host.
+
+    Remote ACP clients (Aside over SSH from macOS) send POSIX paths from their own host, e.g.
+    ``/Users/jpresent``, that never exist in WSL: the gateway refuses ``session.create`` for a missing
+    cwd, and a bound tool cwd there breaks every cwd-dependent tool. A path ``_translate_acp_cwd``
+    rewrote (Windows drive / ``wsl.localhost``) is trusted unchecked, so an unmounted drive still maps
+    to ``/mnt/<x>/...``. Only an untranslated, missing path falls back to ``~``; history and
+    ``list_sessions`` comparisons keep using ``_translate_acp_cwd``.
+    """
+    raw = str(cwd or "").strip()
+    translated = _translate_acp_cwd(raw)
+    if translated != raw:
+        return translated
+    if raw and not os.path.isdir(raw):
+        fallback = os.path.expanduser("~")
+        logger.info("ACP cwd %s not present on this host; using %s for execution", raw, fallback)
+        return fallback
+    return translated
 
 
 def _expand_acp_enabled_toolsets(toolsets: list[str] | None = None,

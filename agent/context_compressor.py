@@ -1695,10 +1695,14 @@ def _filter_legacy_clarify_answers(values):
 
 
 def _sum_clarify(name, args, content, content_len, line_count):
-    response_prefix = "[clarify] user responded: "
     # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune passes via the
     # min_prune_chars guard and skips the >=200-char dedup.
-    max_summary_chars = _PRUNE_MIN_CHARS - 1
+    return elide(clarify_result_text(content), _PRUNE_MIN_CHARS - 1)
+
+
+def clarify_result_text(content: str) -> str:
+    """Real clarify answers (runtime notices dropped), uncapped; fork full-compaction input uses it whole."""
+    response_prefix = "[clarify] user responded: "
     payload = _json_dict(content)
     responses = payload.get("responses")
     if not isinstance(responses, list) and "user_response" in payload:
@@ -1727,7 +1731,7 @@ def _sum_clarify(name, args, content, content_len, line_count):
     # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
     serialized = json.dumps(answers[0] if len(answers) == 1 else answers,
                             ensure_ascii=False).encode("utf-8", errors="backslashreplace")
-    return elide(response_prefix + serialized.decode("utf-8"), max_summary_chars)
+    return response_prefix + serialized.decode("utf-8")
 
 
 def _sum_skill_manage(name, args, content, content_len, line_count):
@@ -3631,8 +3635,13 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         _pruned_skill_names = list(dict.fromkeys(
             _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
         ))[:_MAX_PRUNED_SKILL_MARKERS]
+        full_input = getattr(self, "_full_summary_input", None)
+        if full_input is not None:
+            # Fork (§10b): the whole unshortened conversation in one request; no sampling or cap.
+            typed_turns = []
+            content_to_summarize = full_input.render(self)
         # Lean mode even-samples oversized input (one bounded request, never a second).
-        if getattr(self, "tail_mode", "lean") == "lean":
+        elif getattr(self, "tail_mode", "lean") == "lean":
             records = self._serialize_records_for_summary(turns_to_summarize)
             slices: list = []
             content_to_summarize, coverage = self._sample_summary_records(records, slices)
@@ -3663,7 +3672,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
             # See #32106.
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
-            summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
+            summary = (full_input.ground_summary(self, summary) if full_input is not None
+                       else self._ground_historical_task_snapshot(summary, turns_to_summarize))
             summary = self._augment_summary_lean(summary, turns_to_summarize)
             self._validate_summary_user_provenance(summary, has_user_turn)
             # A detached stale attempt must not publish its late summary onto shared compressor state:
@@ -3720,7 +3730,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # Lean mode folds the session log into this SAME single request (one aux call).
         _session_log_section = _LEAN_SESSION_LOG_SECTION if getattr(self, "tail_mode", "lean") == "lean" else ""
         _template_sections = self._summary_template_sections(_section, summary_budget, _session_log_section)
-        if self._previous_summary:
+        # Fork: full input already carries the prior checkpoint (in-transcript or PRIOR CHECKPOINT).
+        if self._previous_summary and getattr(self, "_full_summary_input", None) is None:
             # Iterative update. Bound the previous summary too: a rehydrated handoff can be huge.
             _bounded_previous_summary = self._bound_summary_input(self._previous_summary)
             instructions = f"""{_summarizer_preamble}
@@ -3878,7 +3889,14 @@ Write only the summary body. Do not include any preamble or prefix."""
         _route_model = str(
             self.summary_model or getattr(self, "_last_aux_resolved_model", "") or ""
         ).strip()
-        if _route_model and _route_model != self.model and not getattr(self, "_summary_model_fallen_back", False):
+        # Fork (§10b): full compaction is one request and fails closed; it records the selected route's
+        # failure without retrying on the main model or changing future route selection.
+        _full = getattr(self, "_full_summary_input", None) is not None
+        if _full and _route_model:
+            self._last_aux_model_failure_error = _short_error_text(e)
+            self._last_aux_model_failure_model = _route_model
+        if (_route_model and _route_model != self.model and not getattr(self, "_summary_model_fallen_back", False)
+                and not _full):
             self._fallback_to_main_for_compression(e, kind.fallback_reason(), failed_model=_route_model)
             # Retry immediately on the main model.
             return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, memory_context=memory_context)
@@ -4833,6 +4851,7 @@ Write only the summary body. Do not include any preamble or prefix."""
 
     def _abort_on_summary_failure(
         self, telemetry: dict[str, Any], n_skipped: int, previous_summary_before_scan: Optional[str],
+        require_valid_summary: bool = False,
     ) -> bool:
         """Abort (messages unchanged) on a terminal failure or when configured to; True when aborted.
         Access/quota, network, truncated and empty-content failures ALWAYS abort (#29559); an overload
@@ -4842,14 +4861,14 @@ Write only the summary body. Do not include any preamble or prefix."""
             ((failure_class, message) for flag, failure_class, message in _TERMINAL_SUMMARY_FAILURES if getattr(self, flag)),
             None,
         )
-        if terminal_failure is None and not self.abort_on_summary_failure:
+        if terminal_failure is None and not self.abort_on_summary_failure and not require_valid_summary:
             return False
         self._last_summary_dropped_count = 0  # nothing actually dropped
         self._last_summary_fallback_used = False
         self._last_compress_aborted = True
         failure_class, message = terminal_failure or (
             "summary_generation_aborted",
-            "Summary generation failed — aborting compression (compression.abort_on_summary_failure=true). "
+            "Summary generation failed — aborting compression without a validated summary. "
             "%d message(s) preserved unchanged. Conversation is frozen until the next /compress or /new.",
         )
         telemetry["failure_class"] = failure_class
@@ -5059,11 +5078,37 @@ Write only the summary body. Do not include any preamble or prefix."""
         WITHOUT clearing it (#100661). Set by provider-proven overflow recovery, which is already bounded by
         the caller's attempt budget.
         """
+        # Fork (§10b): one full-conversation, fail-closed summary request. Every no-op, skip and failure
+        # returns the exact input list and restores the pre-attempt checkpoint state.
+        previous, provenance = self._previous_summary, getattr(self, "_summary_has_user_turn", None)
+        accepted = False
+        try:
+            result = self._compress_full_conversation(
+                messages, current_tokens, focus_topic, force, memory_context, bypass_cooldown)
+            accepted = result is not messages
+            return result
+        finally:
+            self._full_summary_input = None
+            if not accepted:
+                from agent.conversation_compression import _caller_attempt_is_current
+
+                if _caller_attempt_is_current(self):
+                    self._previous_summary, self._summary_has_user_turn = previous, provenance
+
+    _full_summary_input = None
+
+    def _compress_full_conversation(
+        self, messages: list[dict[str, Any]], current_tokens: Optional[int], focus_topic: Optional[str],
+        force: bool, memory_context: str, bypass_cooldown: bool,
+    ) -> list[dict[str, Any]]:
+        """Upstream compress() body with the fork's full-input and fail-closed hooks."""
         # A detached stale attempt must not even reset per-call state the fallback owns. Staleness that
         # arises mid-compress is caught by the write-point gates below; this covers stale-at-entry.
+        from agent.context_compressor_input import FullSummaryInput
         from agent.conversation_compression import _raise_if_stale_attempt
 
         _raise_if_stale_attempt(self)
+        source = messages
         telemetry = self._begin_compress_attempt(current_tokens, force)
         telemetry["has_focus_topic"] = bool(focus_topic)
         n_messages = len(messages)
@@ -5095,7 +5140,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 f"compress_start ({compress_start}) >= compress_end ({compress_end}) - transcript fits within tail budget",
                 n_messages,
             )
-            return canonical_messages
+            return source
         prepared = self._take_prepared_summary(
             messages, compress_start, fresh=bool(force or focus_topic or bypass_cooldown),
             provider_context=bool(memory_context.strip()),
@@ -5118,7 +5163,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 f"window {compress_start}-{compress_end} holds only already-summarized handoffs",
                 n_messages,
             )
-            return canonical_messages
+            return source
         if not self.quiet_mode:
             self._log_compression_start(
                 display_tokens, compress_start, compress_end, len(turns_to_summarize), n_messages - scan.tail_start,
@@ -5140,17 +5185,25 @@ Write only the summary body. Do not include any preamble or prefix."""
             # The pass ran this window through _generate_summary; adopt its result as an inline call would.
             summary = self._adopt_prepared_summary(prepared)
         elif not feasibility_skip:
-            summary = self._summarize_window(
-                messages, turns_to_summarize, scan, focus_topic, memory_context, bypass_cooldown,
-            )
-            if not summary and self._abort_on_summary_failure(
-                telemetry, compress_end - compress_start, scan.previous_summary_before,
-            ):
-                return canonical_messages
+            # Fork: unshortened rows (head, window and retained tail) for the one summary request.
+            full_source = canonical_messages if len(canonical_messages) == len(plan) else messages
+            self._full_summary_input = FullSummaryInput(full_source, compress_start, compress_end)
+            try:
+                summary = self._summarize_window(
+                    messages, turns_to_summarize, scan, focus_topic, memory_context, bypass_cooldown,
+                )
+            finally:
+                # A later micro/direct call must never consume this attempt's source.
+                self._full_summary_input = None
+            if not summary:
+                # Fork: fail closed; no deterministic fallback summary is published.
+                self._abort_on_summary_failure(
+                    telemetry, compress_end - compress_start, scan.previous_summary_before, require_valid_summary=True,
+                )
+                return source
         if not summary:
-            summary = self._fallback_summary_for_window(
-                telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
-            )
+            # Fork: a pre-LLM feasibility/streak skip preserves the transcript instead of a static fallback.
+            return source
         # Phase 4: the summary exists, so archive what the compaction drops or shortens, then assemble.
         messages, pruned_count = self._commit_window(canonical_messages, plan, pruned_count, compress_start, compress_end)
         compressed = self._assemble_with_archive_list(messages, compress_start, compress_end, scan, summary)

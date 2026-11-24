@@ -45,7 +45,7 @@ class TestSustainedOverloadEscalation:
         return c
 
     @pytest.mark.parametrize("access_error", [False, True], ids=["overload", "403_overloaded"])
-    def test_first_overloads_still_abort_then_third_commits_fallback(self, access_error):
+    def test_sustained_overload_never_commits_a_fallback(self, access_error):
         c = self._compressor(abort_on_summary_failure=False)
         # A stale terminal flag from one earlier network failure (only a success clears it) must
         # not pin the long-lived compressor in abort mode: the latest failure class decides.
@@ -68,12 +68,12 @@ class TestSustainedOverloadEscalation:
             # ...and never bumps the overload budget, so the next real 503 keeps its grace (#115906).
             assert c._consecutive_overload_aborts == 0
             return
-        # Third: sustained overload escalates — bounded fallback beats a deferred total wipe.
-        assert third != msgs
-        assert c._last_compress_aborted is False
-        assert c._last_summary_fallback_used is True
-        assert c._last_summary_dropped_count > 0
-        assert c._last_compression_telemetry["failure_class"] == "summary_overload_degraded"
+        # Fork full-input compaction (§10b): the overload stops counting as terminal, but there is no
+        # validated summary, so the third attempt still fails closed instead of a static fallback.
+        assert third == msgs
+        assert c._last_compress_aborted is True
+        assert c._last_summary_fallback_used is False
+        assert c._last_summary_dropped_count == 0
 
     def test_a_healthy_summary_restarts_the_overload_budget(self):
         """A summary that lands resets the strikes even when its compaction is later refused, so one
@@ -120,13 +120,13 @@ class TestSustainedOverloadEscalation:
         # Third consecutive abort IN THE SESSION escalates even though this object saw one.
         # A fresh object's first overload burns the aux→main one-shot retry, which labels the
         # attempt aux_model_fallback first; the escalated commit must still say what happened.
-        assert third != msgs
-        assert second._last_summary_fallback_used is True
-        assert second._last_summary_overload_degraded is True
-        assert second._last_compression_telemetry["failure_class"] == "summary_overload_degraded"
+        # Fork full-input compaction (§10b): the escalation point is reached but fails closed.
+        assert third == msgs
+        assert second._last_summary_fallback_used is False
+        assert second._last_compress_aborted is True
         # The committed degraded fallback settles the budget so recovery gets a fresh run
         # (the boundary caller records the completed compaction, as compress_context does).
-        second.record_completed_compaction(used_fallback=True)
+        second.record_completed_compaction(used_fallback=False)
         assert db.lineage.compression_overload_streak(session_id) == 0
 
     def _msgs(self, n=10):

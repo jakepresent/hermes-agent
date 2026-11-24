@@ -173,9 +173,9 @@ def _compaction_marks(events):
     return [e for e in events if e.get("kind") == "mark" and str(e.get("name", "")).startswith("compaction")]
 
 
-@pytest.mark.parametrize(
-    ("summary", "method"), [("SANITIZED SUMMARY", "llm_summary"), (None, "deterministic_fallback")],
-)
+# Fork full-input compaction: a failed summary never commits a deterministic fallback, so only
+# the LLM-summary commit exists (the abort path is covered by the attempt-mark test below).
+@pytest.mark.parametrize(("summary", "method"), [("SANITIZED SUMMARY", "llm_summary")])
 def test_committed_compaction_mark_resets_freshness_for_the_next_llm_start(tmp_path, monkeypatch, summary, method):
     events, last_request_len = _run_turn_with_compaction(tmp_path, monkeypatch, summary)
 

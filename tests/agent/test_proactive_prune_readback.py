@@ -6,6 +6,12 @@ import pytest
 
 from tests.agent.test_proactive_prune_archive import _archive_path, _compressor, _round
 
+# Fork (manifest §10b): proactive maintenance (warm, cold-cache and idle offload) retires only stale
+# tool images; text shortening happens only inside a validated full-conversation compaction. These
+# upstream tests exercise the text prune itself. Revisit if the L3 DECISION on cold-cache text prune lands.
+FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
+
+
 
 def _readback_messages(arguments):
     messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "read"}]
@@ -24,6 +30,7 @@ def _own_archive(home):
 
 
 @pytest.mark.parametrize("path_style", ["absolute", "tilde"])
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_archive_readback_reuses_the_original_pointer(tmp_path, monkeypatch, path_style):
     """A read-back of a file in this home's cache/pruned points at that file again: no second copy."""
     home = tmp_path / "home" / "hermes"
@@ -40,6 +47,7 @@ def test_archive_readback_reuses_the_original_pointer(tmp_path, monkeypatch, pat
     assert archive.read_text() == '{"output": "original"}'
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_a_reused_call_id_keeps_the_older_results_own_original(tmp_path, monkeypatch):
     """A resumed history repeats call_0: the older terminal result is archived itself, not pointed at the later read-back."""
     home = tmp_path / "home" / "hermes"
@@ -62,6 +70,7 @@ def test_a_reused_call_id_keeps_the_older_results_own_original(tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("case", ["lookalike_elsewhere", "missing_in_archive_dir", "relative", "nul"])
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_a_path_that_is_not_an_existing_archive_is_archived_normally(tmp_path, monkeypatch, case):
     """Only an existing file in this home's cache/pruned counts; anything else keeps its own archive."""
     home = tmp_path / "home" / "hermes"

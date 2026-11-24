@@ -13,6 +13,12 @@ import pytest
 
 from agent.context_compressor import ContextCompressor
 
+# Fork (manifest §10b): proactive maintenance (warm, cold-cache and idle offload) retires only stale
+# tool images; text shortening happens only inside a validated full-conversation compaction. These
+# upstream tests exercise the text prune itself. Revisit if the L3 DECISION on cold-cache text prune lands.
+FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
+
+
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -52,6 +58,7 @@ def test_a_turn_index_that_names_no_user_row_skips_the_round(home, turn_start):
     assert not (home / "cache" / "pruned").exists()
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_parallel_results_of_one_step_are_pruned_all_or_none(home):
     """8 steps x 7 parallel calls: a count-only tail cut step 7 into 2 stubbed / 5 whole."""
     msgs = _earlier_turn(8, 7)

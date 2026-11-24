@@ -8,7 +8,9 @@ from __future__ import annotations
 
 from typing import Optional, Sequence
 
+from agent.compaction_steering import steering_preserving_slices
 from agent.compression_marker import _elision_marker, elide_middle
+from agent.prompt_builder import STEER_MARKER_OPEN
 
 
 class SummaryInputSamplingMixin:
@@ -30,22 +32,35 @@ class SummaryInputSamplingMixin:
             head_chars = int(remaining * 0.45)
             tail_chars = remaining - head_chars
             omitted = max(len(content) - head_chars - tail_chars, 0)
-        tail = content[-tail_chars:].lstrip() if tail_chars else ""
-        return content[:head_chars].rstrip() + marker + tail
+        return steering_preserving_slices(
+            content, [(0, head_chars), (len(content) - tail_chars, len(content))], marker,
+        )
 
     # Lean-mode sampling slice count: 8 keeps slices ~20K chars at the 160K cap.
     _SAMPLED_INPUT_SLICES = 8
 
     @classmethod
     def _bound_oversized_record(cls, record: str, limit: int) -> str:
-        """Bound an oversized record with an explicit intra-record truncation marker."""
+        """Bound an oversized record with an explicit intra-record truncation marker.
+
+        Fork: complete canonical steering blocks (and their tool label) survive the cut; that
+        retained user text may exceed ``limit`` (a deliberate soft overrun).
+        """
         if len(record) <= limit:
             return record
         marker_reserve = len(_elision_marker(omitted=len(record), total=len(record)))
         if limit <= marker_reserve:
+            if STEER_MARKER_OPEN in record:
+                return steering_preserving_slices(record, [(0, limit)], _elision_marker(omitted=len(record) - limit, total=len(record)))
             return record[:limit]
         head_len = (limit - marker_reserve) // 2
-        return elide_middle(record, head_len, limit - marker_reserve - head_len)
+        tail_len = limit - marker_reserve - head_len
+        if STEER_MARKER_OPEN in record:
+            return steering_preserving_slices(
+                record, [(0, head_len), (len(record) - tail_len, len(record))],
+                _elision_marker(omitted=len(record) - head_len - tail_len, total=len(record)),
+            )
+        return elide_middle(record, head_len, tail_len)
 
     @classmethod
     def _sample_summary_records(
@@ -130,6 +145,11 @@ class SummaryInputSamplingMixin:
                     sep_count = (s - cursor) if cursor == 0 else (s - cursor + 1)
                     elided = sum(len(records[i]) for i in range(cursor, s)) + len(separator) * sep_count
                     parts.append(marker_template.format(first=cursor + 1, last=s, elided=elided))
+                    # Fork: user steering carried by an elided tool record is never sampled away.
+                    parts.extend(
+                        steering_preserving_slices(records[i], [], "") + separator
+                        for i in range(cursor, s) if STEER_MARKER_OPEN in records[i]
+                    )
                 parts.append(separator.join(display_records[s:e]))
                 cursor = e
             return "".join(parts)

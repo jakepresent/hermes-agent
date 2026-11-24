@@ -94,18 +94,21 @@ def demote_stale_tail_tools(
     result = list(messages)
     demoted = 0
     skills: dict[str, str] | None = None
+    from agent.compaction_steering import split_steering_suffix, tool_text
+
     for i in range(tail_start, len(messages)):
         msg = messages[i]
-        content = msg.get("content")
-        if msg.get("role") != "tool" or i in protected or not isinstance(content, str):
+        if msg.get("role") != "tool" or i in protected:
             continue
+        # Fork (§10a): runtime steering appended to the tool row survives the stub, string or native parts.
+        content, steering = split_steering_suffix(tool_text(msg.get("content")))
         if len(content) < _LEAN_TAIL_DEMOTE_MIN_CHARS or SKILL_PRUNED_MARKER_PREFIX in content or _is_summary_stub(content):
             continue
         stub = _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id)
         skills = skill_view_names_by_call_id(messages) if skills is None else skills
         if (skill := skills.get(str(msg.get("tool_call_id") or ""))) and not _result_failure_suffix(content):
             stub += " " + _skill_pruned_marker(skill)
-        result[i] = _rewritten(msg, stub)
+        result[i] = _rewritten(msg, stub + steering)
         demoted += 1
     if demoted:  # the demoted originals are saved and named like the window's prune stubs
         from tools.tool_result_storage import archive_compaction_drops

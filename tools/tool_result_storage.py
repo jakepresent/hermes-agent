@@ -377,10 +377,13 @@ def _with_pointer(content: Any, display_path: str) -> Any:
     pointer = f"{ARCHIVE_POINTER_SEP}{display_path}"
     if isinstance(content, list):
         return [*content, {"type": "text", "text": pointer.strip(" —")}]
+    from agent.compaction_steering import split_steering_suffix
     from agent.context_compressor_tail import _SKILL_SAFETY_SUFFIX
 
-    head, sep, rule = str(content).partition(_SKILL_SAFETY_SUFFIX)
-    return f"{head}{pointer}{sep}{rule}"
+    # Fork (§10a): runtime steering appended to the stub stays last, after the pointer.
+    body, steering = split_steering_suffix(str(content))
+    head, sep, rule = body.partition(_SKILL_SAFETY_SUFFIX)
+    return f"{head}{pointer}{sep}{rule}{steering}"
 
 
 def _readback_archive_path(tool_name: str, tool_args: str) -> str | None:

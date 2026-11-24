@@ -464,6 +464,8 @@ gateway:
     last_activity: "**Gníomhaíocht is déanaí:** {timestamp}"
     model: "**Samhail:** `{model}`"
     model_provider: "**Samhail:** `{model}` ({provider})"
+    reasoning: "**Réasúnaíocht:** {level}"
+    reasoning_default: "réamhshocrú"
     context: "**Comhthéacs:** {used} / {total} ({pct}%)"
     context_used: "**Comhthéacs:** ~{used} comhartha"
     tokens: "**Comharthaí billeáilte ar feadh an tsaoil:** {tokens} _(ní méid do chomhthéacs reatha; úsáid `/context`)_"

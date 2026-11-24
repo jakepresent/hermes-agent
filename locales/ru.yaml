@@ -464,6 +464,8 @@ gateway:
     last_activity: "**Последняя активность:** {timestamp}"
     model: "**Модель:** `{model}`"
     model_provider: "**Модель:** `{model}` ({provider})"
+    reasoning: "**Рассуждение:** {level}"
+    reasoning_default: "по умолчанию"
     context: "**Контекст:** {used} / {total} ({pct}%)"
     context_used: "**Контекст:** ~{used} токенов"
     tokens: "**Всего токенов списано за всё время:** {tokens} _(это не размер текущего контекста; используйте `/context`)_"

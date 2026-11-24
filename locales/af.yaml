@@ -464,6 +464,8 @@ gateway:
     last_activity: "**Laaste aktiwiteit:** {timestamp}"
     model: "**Model:** `{model}`"
     model_provider: "**Model:** `{model}` ({provider})"
+    reasoning: "**Redenering:** {level}"
+    reasoning_default: "verstek"
     context: "**Konteks:** {used} / {total} ({pct}%)"
     context_used: "**Konteks:** ~{used} tokens"
     tokens: "**Lewenslange tokens gefaktureer:** {tokens} _(nie jou huidige konteksgrootte nie; gebruik `/context`)_"

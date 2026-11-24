@@ -464,6 +464,8 @@ gateway:
     last_activity: "**最終アクティビティ:** {timestamp}"
     model: "**モデル:** `{model}`"
     model_provider: "**モデル:** `{model}` ({provider})"
+    reasoning: "**推論:** {level}"
+    reasoning_default: "デフォルト"
     context: "**コンテキスト:** {used} / {total} ({pct}%)"
     context_used: "**コンテキスト:** ~{used} トークン"
     tokens: "**累計請求トークン:** {tokens} _(現在のコンテキストサイズではありません。`/context` を使用してください)_"

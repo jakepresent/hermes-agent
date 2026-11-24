@@ -464,6 +464,8 @@ gateway:
     last_activity: "**Letzte Aktivität:** {timestamp}"
     model: "**Modell:** `{model}`"
     model_provider: "**Modell:** `{model}` ({provider})"
+    reasoning: "**Reasoning:** {level}"
+    reasoning_default: "Standard"
     context: "**Kontext:** {used} / {total} ({pct}%)"
     context_used: "**Kontext:** ~{used} Tokens"
     tokens: "**Insgesamt abgerechnete Tokens:** {tokens} _(nicht Ihre aktuelle Kontextgröße; verwenden Sie `/context`)_"

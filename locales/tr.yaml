@@ -464,6 +464,8 @@ gateway:
     last_activity: "**Son etkinlik:** {timestamp}"
     model: "**Model:** `{model}`"
     model_provider: "**Model:** `{model}` ({provider})"
+    reasoning: "**Akıl yürütme:** {level}"
+    reasoning_default: "varsayılan"
     context: "**Bağlam:** {used} / {total} ({pct}%)"
     context_used: "**Bağlam:** ~{used} token"
     tokens: "**Faturalandırılan toplam token:** {tokens} _(mevcut bağlam boyutunuz değil; `/context` kullanın)_"

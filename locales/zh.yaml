@@ -464,6 +464,8 @@ gateway:
     last_activity: "**最近活动：** {timestamp}"
     model: "**模型：** `{model}`"
     model_provider: "**模型：** `{model}`（{provider}）"
+    reasoning: "**推理：** {level}"
+    reasoning_default: "默认"
     context: "**上下文：** {used} / {total}（{pct}%）"
     context_used: "**上下文：** 约 {used} tokens"
     tokens: "**累计计费 tokens：** {tokens} _（并非当前上下文大小；请使用 `/context` 查看）_"

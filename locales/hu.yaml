@@ -467,6 +467,8 @@ gateway:
     last_activity: "**Utolsó tevékenység:** {timestamp}"
     model: "**Modell:** `{model}`"
     model_provider: "**Modell:** `{model}` ({provider})"
+    reasoning: "**Érvelés:** {level}"
+    reasoning_default: "alapértelmezett"
     context: "**Kontextus:** {used} / {total} ({pct}%)"
     context_used: "**Kontextus:** ~{used} token"
     tokens: "**Összes számlázott token:** {tokens} _(nem az aktuális kontextusméret; lásd `/context`)_"

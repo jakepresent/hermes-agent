@@ -464,6 +464,8 @@ gateway:
     last_activity: "**最近活動：** {timestamp}"
     model: "**模型：** `{model}`"
     model_provider: "**模型：** `{model}`（{provider}）"
+    reasoning: "**推理：** {level}"
+    reasoning_default: "預設"
     context: "**上下文：** {used} / {total}（{pct}%）"
     context_used: "**上下文：** ~{used} tokens"
     tokens: "**累計計費 token：** {tokens} _(非目前上下文大小；請使用 `/context`)_"

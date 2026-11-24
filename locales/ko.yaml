@@ -464,6 +464,8 @@ gateway:
     last_activity: "**최종 활동:** {timestamp}"
     model: "**모델:** `{model}`"
     model_provider: "**모델:** `{model}` ({provider})"
+    reasoning: "**추론:** {level}"
+    reasoning_default: "기본값"
     context: "**컨텍스트:** {used} / {total} ({pct}%)"
     context_used: "**컨텍스트:** ~{used} 토큰"
     tokens: "**누적 청구 토큰:** {tokens} _(현재 컨텍스트 크기가 아닙니다. `/context`를 사용하세요)_"

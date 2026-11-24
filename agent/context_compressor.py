@@ -43,9 +43,12 @@ from agent.context_compressor_tail import (
     elide_keeping_skill_safety_rule, with_skill_safety_rule, without_skill_safety_rule, tail_cut_progress_floor,
 )
 from agent.context_compressor_telemetry import CompressionTelemetryMixin
+from agent.compaction_steering import (
+    historical_steering_section, join_steering, split_steering_suffix, steering_preserving_slices, tool_text,
+)
 from agent.error_classifier import ClassifiedError, FailoverReason, classify_api_error
 from agent.micro_compaction import MicroCompactionMixin
-from agent.prompt_builder import STEER_DISPLAY_KIND
+from agent.prompt_builder import STEER_DISPLAY_KIND, STEER_MARKER_OPEN
 from agent.model_metadata import (
     CHARS_PER_TOKEN, MINIMUM_CONTEXT_LENGTH, get_model_context_length, estimate_messages_tokens_rough, estimate_tokens_rough,
 )
@@ -1352,7 +1355,9 @@ def _strip_images_from_tool_msg(msg: dict[str, Any]) -> Optional[dict[str, Any]]
     content = msg.get("content")
     if isinstance(content, dict) and content.get("_multimodal"):
         summary = content.get("text_summary") or "[screenshot removed to save context]"
-        return _rewritten(msg, f"[screenshot removed] {str(summary)[:200]}")
+        body, _ = split_steering_suffix(str(summary))
+        _, steering = split_steering_suffix(tool_text(content))
+        return _rewritten(msg, join_steering(f"[screenshot removed] {body[:200]}", steering))
     stripped = _replace_image_parts(content, "[screenshot removed to save context]")
     return None if stripped is None else _rewritten(msg, stripped)
 
@@ -1555,12 +1560,13 @@ def _str_arg(args: dict, key: str, default: str = "") -> str:
 
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """1-line summary of a tool call + result. Never raises: a malformed historical call must not crash-loop compression."""
+    body, steering = split_steering_suffix(tool_content) if isinstance(tool_content, str) else (tool_content, "")
     try:
-        return _summarize_tool_result_unguarded(tool_name, tool_args, tool_content)
+        return join_steering(_summarize_tool_result_unguarded(tool_name, tool_args, body), steering)
     except Exception as exc:
         logger.debug("Tool-result summary failed for %s: %s", tool_name, exc)
-        _len = len(tool_content) if isinstance(tool_content, str) else 0
-        return f"[{tool_name}] ({_len:,} chars result)"
+        _len = len(body) if isinstance(body, str) else 0
+        return join_steering(f"[{tool_name}] ({_len:,} chars result)", steering)
 
 
 def _sum_terminal(name, args, content, content_len, line_count):
@@ -1689,10 +1695,14 @@ def _filter_legacy_clarify_answers(values):
 
 
 def _sum_clarify(name, args, content, content_len, line_count):
-    response_prefix = "[clarify] user responded: "
     # Strictly below _PRUNE_MIN_CHARS so the summary survives later prune passes via the
     # min_prune_chars guard and skips the >=200-char dedup.
-    max_summary_chars = _PRUNE_MIN_CHARS - 1
+    return elide(clarify_result_text(content), _PRUNE_MIN_CHARS - 1)
+
+
+def clarify_result_text(content: str) -> str:
+    """Real clarify answers (runtime notices dropped), uncapped; fork full-compaction input uses it whole."""
+    response_prefix = "[clarify] user responded: "
     payload = _json_dict(content)
     responses = payload.get("responses")
     if not isinstance(responses, list) and "user_response" in payload:
@@ -1721,7 +1731,7 @@ def _sum_clarify(name, args, content, content_len, line_count):
     # Escape lone UTF-16 surrogates so the message stays UTF-8/SQLite safe.
     serialized = json.dumps(answers[0] if len(answers) == 1 else answers,
                             ensure_ascii=False).encode("utf-8", errors="backslashreplace")
-    return elide(response_prefix + serialized.decode("utf-8"), max_summary_chars)
+    return response_prefix + serialized.decode("utf-8")
 
 
 def _sum_skill_manage(name, args, content, content_len, line_count):
@@ -3024,12 +3034,15 @@ class ContextCompressor(
         for i in range(len(result) - 1, -1, -1):
             msg = result[i]
             content = msg.get("content") or ""
-            # Non-string/multimodal-envelope shapes can't be hashed by text.
-            if msg.get("role") != "tool" or not isinstance(content, str) or len(content) < _PRUNE_MIN_CHARS:
+            # Do not dedupe structured/image payloads by text alone.
+            if msg.get("role") != "tool" or not isinstance(content, str):
                 continue
-            h = hashlib.md5(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+            body, steering = split_steering_suffix(content)
+            if len(body) < _PRUNE_MIN_CHARS:
+                continue
+            h = hashlib.md5(body.encode("utf-8", errors="replace")).hexdigest()[:12]
             if h in content_hashes:
-                result[i] = {**msg, "content": "[Duplicate tool output — same content as a more recent call]"}
+                result[i] = _rewritten(msg, "[Duplicate tool output — same content as a more recent call]" + steering)
                 pruned += 1
             content_hashes.add(h)
         return pruned
@@ -3050,11 +3063,13 @@ class ContextCompressor(
             new_msg = _strip_images_from_tool_msg(msg)
             if new_msg is not None:
                 result[idx] = new_msg
-            return new_msg is not None
+                return True
+            content = tool_text(content)
+        body, _ = split_steering_suffix(content) if isinstance(content, str) else ("", "")
         if (
             not isinstance(content, str) or not content or content == _PRUNED_TOOL_PLACEHOLDER
             or content.startswith(("[Duplicate tool output", "[screenshot removed"))
-            or _is_summary_stub(content) or len(content) <= min_prune_chars
+            or _is_summary_stub(content) or len(body) <= min_prune_chars
         ):
             return False
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
@@ -3062,7 +3077,7 @@ class ContextCompressor(
             _skill = _json_dict(tool_args).get("name", "")
             if isinstance(_skill, str) and _skill.lower() in protected_skills:
                 return False
-        result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
+        result[idx] = _rewritten(msg, _summarize_tool_result(tool_name, tool_args, content))
         return True
 
     def _tail_soft_ceiling(self, token_budget: int) -> int:
@@ -3284,15 +3299,25 @@ class ContextCompressor(
         for msg in turns:
             role = msg.get("role", "unknown")
             content = msg.get("content")
+            if role == "tool" and isinstance(content, dict) and content.get("_multimodal"):
+                content = tool_text(content)
             if isinstance(content, list):
                 content = "\n".join(_summary_part_text(part) for part in content if isinstance(part, (dict, str)))
             content = _redact_compaction_text(content or "")
-            content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", content)
+            body, steering = split_steering_suffix(content) if role == "tool" else (content, "")
+            content = _MEDIA_DIRECTIVE_RE.sub("[media attachment]", body) + steering
             # Strip inline <think>-style blocks: scratch work wastes summarizer context and risks being kept as fact.
             if role == "assistant" and content:
                 content = strip_think_blocks(None, content)
             if len(content) > self._CONTENT_MAX:
-                content = elide_middle(content, self._CONTENT_HEAD, self._CONTENT_TAIL)
+                if STEER_MARKER_OPEN in content:
+                    # Fork: keep complete canonical steering blocks through per-record clipping.
+                    content = steering_preserving_slices(
+                        content, [(0, self._CONTENT_HEAD), (len(content) - self._CONTENT_TAIL, len(content))],
+                        _elision_marker(omitted=len(content) - self._CONTENT_HEAD - self._CONTENT_TAIL, total=len(content)),
+                    )
+                else:
+                    content = elide_middle(content, self._CONTENT_HEAD, self._CONTENT_TAIL)
             if role == "tool":
                 parts.append(f"[TOOL RESULT {msg.get('tool_call_id', '')}]: {content}")
                 continue
@@ -3442,7 +3467,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         return result
 
     def _augment_summary_lean(self, summary: str, turns_to_summarize: list[dict[str, Any]]) -> str:
-        """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
+        """Retain historical steering in every mode, then append lean-only sections."""
+        summary += _redact_compaction_text(historical_steering_section(turns_to_summarize))
         if getattr(self, "tail_mode", "lean") != "lean":
             return summary
         for heading, build in (
@@ -3609,8 +3635,13 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         _pruned_skill_names = list(dict.fromkeys(
             _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
         ))[:_MAX_PRUNED_SKILL_MARKERS]
+        full_input = getattr(self, "_full_summary_input", None)
+        if full_input is not None:
+            # Fork (§10b): the whole unshortened conversation in one request; no sampling or cap.
+            typed_turns = []
+            content_to_summarize = full_input.render(self)
         # Lean mode even-samples oversized input (one bounded request, never a second).
-        if getattr(self, "tail_mode", "lean") == "lean":
+        elif getattr(self, "tail_mode", "lean") == "lean":
             records = self._serialize_records_for_summary(turns_to_summarize)
             slices: list = []
             content_to_summarize, coverage = self._sample_summary_records(records, slices)
@@ -3641,7 +3672,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
             # See #32106.
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
-            summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
+            summary = (full_input.ground_summary(self, summary) if full_input is not None
+                       else self._ground_historical_task_snapshot(summary, turns_to_summarize))
             summary = self._augment_summary_lean(summary, turns_to_summarize)
             self._validate_summary_user_provenance(summary, has_user_turn)
             # A detached stale attempt must not publish its late summary onto shared compressor state:
@@ -3698,7 +3730,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # Lean mode folds the session log into this SAME single request (one aux call).
         _session_log_section = _LEAN_SESSION_LOG_SECTION if getattr(self, "tail_mode", "lean") == "lean" else ""
         _template_sections = self._summary_template_sections(_section, summary_budget, _session_log_section)
-        if self._previous_summary:
+        # Fork: full input already carries the prior checkpoint (in-transcript or PRIOR CHECKPOINT).
+        if self._previous_summary and getattr(self, "_full_summary_input", None) is None:
             # Iterative update. Bound the previous summary too: a rehydrated handoff can be huge.
             _bounded_previous_summary = self._bound_summary_input(self._previous_summary)
             instructions = f"""{_summarizer_preamble}
@@ -3856,7 +3889,14 @@ Write only the summary body. Do not include any preamble or prefix."""
         _route_model = str(
             self.summary_model or getattr(self, "_last_aux_resolved_model", "") or ""
         ).strip()
-        if _route_model and _route_model != self.model and not getattr(self, "_summary_model_fallen_back", False):
+        # Fork (§10b): full compaction is one request and fails closed; it records the selected route's
+        # failure without retrying on the main model or changing future route selection.
+        _full = getattr(self, "_full_summary_input", None) is not None
+        if _full and _route_model:
+            self._last_aux_model_failure_error = _short_error_text(e)
+            self._last_aux_model_failure_model = _route_model
+        if (_route_model and _route_model != self.model and not getattr(self, "_summary_model_fallen_back", False)
+                and not _full):
             self._fallback_to_main_for_compression(e, kind.fallback_reason(), failed_model=_route_model)
             # Retry immediately on the main model.
             return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, memory_context=memory_context)
@@ -4811,6 +4851,7 @@ Write only the summary body. Do not include any preamble or prefix."""
 
     def _abort_on_summary_failure(
         self, telemetry: dict[str, Any], n_skipped: int, previous_summary_before_scan: Optional[str],
+        require_valid_summary: bool = False,
     ) -> bool:
         """Abort (messages unchanged) on a terminal failure or when configured to; True when aborted.
         Access/quota, network, truncated and empty-content failures ALWAYS abort (#29559); an overload
@@ -4820,14 +4861,14 @@ Write only the summary body. Do not include any preamble or prefix."""
             ((failure_class, message) for flag, failure_class, message in _TERMINAL_SUMMARY_FAILURES if getattr(self, flag)),
             None,
         )
-        if terminal_failure is None and not self.abort_on_summary_failure:
+        if terminal_failure is None and not self.abort_on_summary_failure and not require_valid_summary:
             return False
         self._last_summary_dropped_count = 0  # nothing actually dropped
         self._last_summary_fallback_used = False
         self._last_compress_aborted = True
         failure_class, message = terminal_failure or (
             "summary_generation_aborted",
-            "Summary generation failed — aborting compression (compression.abort_on_summary_failure=true). "
+            "Summary generation failed — aborting compression without a validated summary. "
             "%d message(s) preserved unchanged. Conversation is frozen until the next /compress or /new.",
         )
         telemetry["failure_class"] = failure_class
@@ -5037,11 +5078,37 @@ Write only the summary body. Do not include any preamble or prefix."""
         WITHOUT clearing it (#100661). Set by provider-proven overflow recovery, which is already bounded by
         the caller's attempt budget.
         """
+        # Fork (§10b): one full-conversation, fail-closed summary request. Every no-op, skip and failure
+        # returns the exact input list and restores the pre-attempt checkpoint state.
+        previous, provenance = self._previous_summary, getattr(self, "_summary_has_user_turn", None)
+        accepted = False
+        try:
+            result = self._compress_full_conversation(
+                messages, current_tokens, focus_topic, force, memory_context, bypass_cooldown)
+            accepted = result is not messages
+            return result
+        finally:
+            self._full_summary_input = None
+            if not accepted:
+                from agent.conversation_compression import _caller_attempt_is_current
+
+                if _caller_attempt_is_current(self):
+                    self._previous_summary, self._summary_has_user_turn = previous, provenance
+
+    _full_summary_input = None
+
+    def _compress_full_conversation(
+        self, messages: list[dict[str, Any]], current_tokens: Optional[int], focus_topic: Optional[str],
+        force: bool, memory_context: str, bypass_cooldown: bool,
+    ) -> list[dict[str, Any]]:
+        """Upstream compress() body with the fork's full-input and fail-closed hooks."""
         # A detached stale attempt must not even reset per-call state the fallback owns. Staleness that
         # arises mid-compress is caught by the write-point gates below; this covers stale-at-entry.
+        from agent.context_compressor_input import FullSummaryInput
         from agent.conversation_compression import _raise_if_stale_attempt
 
         _raise_if_stale_attempt(self)
+        source = messages
         telemetry = self._begin_compress_attempt(current_tokens, force)
         telemetry["has_focus_topic"] = bool(focus_topic)
         n_messages = len(messages)
@@ -5073,7 +5140,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 f"compress_start ({compress_start}) >= compress_end ({compress_end}) - transcript fits within tail budget",
                 n_messages,
             )
-            return canonical_messages
+            return source
         prepared = self._take_prepared_summary(
             messages, compress_start, fresh=bool(force or focus_topic or bypass_cooldown),
             provider_context=bool(memory_context.strip()),
@@ -5096,7 +5163,7 @@ Write only the summary body. Do not include any preamble or prefix."""
                 f"window {compress_start}-{compress_end} holds only already-summarized handoffs",
                 n_messages,
             )
-            return canonical_messages
+            return source
         if not self.quiet_mode:
             self._log_compression_start(
                 display_tokens, compress_start, compress_end, len(turns_to_summarize), n_messages - scan.tail_start,
@@ -5118,17 +5185,25 @@ Write only the summary body. Do not include any preamble or prefix."""
             # The pass ran this window through _generate_summary; adopt its result as an inline call would.
             summary = self._adopt_prepared_summary(prepared)
         elif not feasibility_skip:
-            summary = self._summarize_window(
-                messages, turns_to_summarize, scan, focus_topic, memory_context, bypass_cooldown,
-            )
-            if not summary and self._abort_on_summary_failure(
-                telemetry, compress_end - compress_start, scan.previous_summary_before,
-            ):
-                return canonical_messages
+            # Fork: unshortened rows (head, window and retained tail) for the one summary request.
+            full_source = canonical_messages if len(canonical_messages) == len(plan) else messages
+            self._full_summary_input = FullSummaryInput(full_source, compress_start, compress_end)
+            try:
+                summary = self._summarize_window(
+                    messages, turns_to_summarize, scan, focus_topic, memory_context, bypass_cooldown,
+                )
+            finally:
+                # A later micro/direct call must never consume this attempt's source.
+                self._full_summary_input = None
+            if not summary:
+                # Fork: fail closed; no deterministic fallback summary is published.
+                self._abort_on_summary_failure(
+                    telemetry, compress_end - compress_start, scan.previous_summary_before, require_valid_summary=True,
+                )
+                return source
         if not summary:
-            summary = self._fallback_summary_for_window(
-                telemetry, turns_to_summarize, compress_end - compress_start, feasibility_skip,
-            )
+            # Fork: a pre-LLM feasibility/streak skip preserves the transcript instead of a static fallback.
+            return source
         # Phase 4: the summary exists, so archive what the compaction drops or shortens, then assemble.
         messages, pruned_count = self._commit_window(canonical_messages, plan, pruned_count, compress_start, compress_end)
         compressed = self._assemble_with_archive_list(messages, compress_start, compress_end, scan, summary)

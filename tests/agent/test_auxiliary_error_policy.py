@@ -163,10 +163,11 @@ def test_behaviour(case, error, provider, expected):
 
 
 # (case id, summary request's error, compression aborts with the transcript intact): the ladder hands a safety
-# refusal back to the compressor; only Gemini's prompt block aborts, other refusals keep the fallback summary.
+# refusal back to the compressor. Fork (§10b): compaction fails closed without a validated summary, so every
+# refusal aborts with the transcript intact (upstream keeps a fallback summary for non-Gemini refusals).
 COMPRESSION_BEHAVIOUR = [
     ("gemini-prompt-blocked", _gemini_prompt_block(), True),
-    ("400-content-policy", sdk(400, "Your request was flagged by our safety system"), False),
+    ("400-content-policy", sdk(400, "Your request was flagged by our safety system"), True),
 ]
 
 

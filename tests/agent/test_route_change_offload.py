@@ -13,6 +13,12 @@ from agent.prompt_cache_clock import CacheEvent, _route_key
 from agent.prompt_cache_lifecycle import get_prompt_cache_warmer
 from run_agent import AIAgent
 
+import pytest
+
+# Fork (manifest §10b): proactive maintenance retires only stale tool images, so the route-change
+# offload runs but has no text to shorten. See the L3 DECISION on cold-cache text prune.
+FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
+
 _PRIMARY = ("openrouter", "https://openrouter.ai/api/v1", "test/primary")
 
 
@@ -63,6 +69,7 @@ def _agent():
     return a
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_fallback_first_request_offloads_old_tool_output():
     agent = _agent()
     history = _history(8, big=set(range(5)))

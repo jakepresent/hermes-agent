@@ -16,6 +16,12 @@ from persistence_assembly import open_persistence, profile_scope
 from tests.fixtures.storage_read import conversation
 from tests.fixtures.storage_seed import seed_messages, seed_session, seed_usage
 
+# Fork (manifest §10b): proactive maintenance (warm, cold-cache and idle offload) retires only stale
+# tool images; text shortening happens only inside a validated full-conversation compaction. These
+# upstream tests exercise the text prune itself. Revisit if the L3 DECISION on cold-cache text prune lands.
+FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
+
+
 _WITH_ROW_IDS = ConversationRequest(include_row_ids=True)
 
 
@@ -46,6 +52,7 @@ def _small_batch():
     return _history(10, big=set(range(5)))
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_shipped_defaults_prune_only_a_cold_cache():
     """Owner scope: warm pruning stays off by default; an already-expired cache prunes with no setting."""
     c = _shipped()
@@ -60,6 +67,7 @@ def test_shipped_defaults_prune_only_a_cold_cache():
     assert n_small == 0  # ~5K reclaimable: under the 16K cold gate (the 4096 warm default does not lower it)
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_cold_cache_commits_below_the_warm_gate():
     c = _warm_on()
     msgs = _small_batch()
@@ -76,6 +84,7 @@ def test_cold_cache_still_needs_the_cold_gate():
     assert n == 0 and out is msgs
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_cold_prune_leaves_runway_and_credits_the_next_warm_gate():
     """The two fixes that took the worst session from +19% to no session worse: a cold prune neither moves
     the regrowth runway nor resets the reclaim it already did; the next warm gate is 64K minus that credit."""
@@ -92,6 +101,7 @@ def test_cold_prune_leaves_runway_and_credits_the_next_warm_gate():
     assert c._proactive_prune_cold_credit == 0 and c._proactive_prune_rearm_tokens > 0
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_warm_runway_still_blocks_after_a_warm_prune_but_cold_ignores_it():
     c = _warm_on()
     big = _history(20, big=set(range(16)))
@@ -104,6 +114,7 @@ def test_warm_runway_still_blocks_after_a_warm_prune_but_cold_ignores_it():
     assert n3 and cold is not grown
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_cold_gate_never_exceeds_a_lower_configured_gate():
     c = _warm_on()
     c.proactive_prune_min_reclaim_tokens = 4_096
@@ -288,6 +299,7 @@ def test_engine_refuses_a_store_without_a_session_row():
     assert n == 0 and out is msgs
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_unflushed_tool_results_keep_their_original_on_disk(tmp_path, monkeypatch):
     """A result the store has not seen yet can still be shortened only because its original went to disk
     first: the stub names a file holding the exact body (kvnloo's #136488 finding: before, the next flush
@@ -312,6 +324,7 @@ def test_unflushed_tool_results_keep_their_original_on_disk(tmp_path, monkeypatc
             assert Path(path).read_text(encoding="utf-8") == old["content"]
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_cold_credit_survives_a_rebuilt_compressor(tmp_path):
     """api_server builds an agent per request and resumes rebuild the compressor: the credit is persisted with
     the runway in the same commit, and restored on bind."""

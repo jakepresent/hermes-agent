@@ -666,7 +666,10 @@ class TestMicroCompaction:
         assert cc._micro_compact_rolling_summary
         assert cc._micro_compact_cursor > 0
 
-        cc.compress(msgs, force=True)
+        # Exercise a validated full summary, not an unavailable provider's old
+        # deterministic fallback. Only successful replacement resets micro state.
+        with patch.object(cc, "_generate_summary", return_value="validated full summary"):
+            cc.compress(msgs, force=True)
 
         assert cc._micro_compact_rolling_summary == ""
         assert cc._micro_compact_cursor == 0
@@ -900,7 +903,12 @@ def _held_session(tmp_path, mode: str):
         for i in range(8):
             history.append({"role": "assistant", "content": "", "tool_calls": [{
                 "id": f"call_{i}", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]})
-            history.append({"role": "tool", "tool_call_id": f"call_{i}", "content": chr(65 + i) * 24_000 if i < 3 else "ok"})
+            # Fork full-input compaction: proactive maintenance retires stale screenshots only, never text.
+            body = chr(65 + i) * 24_000 if i < 3 else "ok"
+            history.append({"role": "tool", "tool_call_id": f"call_{i}", "content": [
+                {"type": "text", "text": body},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
+            ]})
     else:
         history = _conversation(exchanges=8)
     db.messages.append_batch("s", [NewMessage.from_live(m) for m in history])

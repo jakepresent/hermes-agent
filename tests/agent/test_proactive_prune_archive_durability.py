@@ -9,6 +9,12 @@ import pytest
 
 from agent.context_compressor import ContextCompressor
 
+# Fork (manifest §10b): proactive maintenance (warm, cold-cache and idle offload) retires only stale
+# tool images; text shortening happens only inside a validated full-conversation compaction. These
+# upstream tests exercise the text prune itself. Revisit if the L3 DECISION on cold-cache text prune lands.
+FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
+
+
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -17,6 +23,7 @@ def home(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_an_uncertain_commit_keeps_the_archives(home):
     """A worker may commit and then lose the reply: the files its stubs point at must survive."""
     from agent.context_compressor import _DB_PERSISTED_MARKER

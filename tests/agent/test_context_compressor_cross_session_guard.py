@@ -94,7 +94,7 @@ def test_stale_previous_summary_cleared_when_no_handoff():
 
     with patch.object(c, "_generate_summary",
                       return_value="[CONTEXT COMPACTION] Fresh summary."):
-        result = c.compress(messages)
+        result = c.compress(messages, force=True)
 
     assert c._previous_summary is None, (
         "compress() must clear stale _previous_summary when no handoff "
@@ -115,7 +115,7 @@ def test_previous_summary_preserved_when_handoff_found():
 
     with patch.object(c, "_generate_summary",
                       return_value="[CONTEXT COMPACTION] Updated summary."):
-        c.compress(messages)
+        c.compress(messages, force=True)
 
     # When a handoff IS found, the staleness guard must NOT fire.
     # _previous_summary should be updated, not cleared.

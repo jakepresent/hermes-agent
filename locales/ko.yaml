@@ -3455,6 +3455,7 @@ display:
     clarify: "질문 중"
     memory: "메모리 업데이트 중"
     todo_list: "작업 업데이트 중"
+    memory_search: "메모리 검색 중"
   verb_connector:
     search: " — "
     default: " "

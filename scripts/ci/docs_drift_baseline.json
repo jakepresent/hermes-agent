@@ -49,6 +49,7 @@
   "display.busy_steer_ack_enabled",
   "display.cli_refresh_interval",
   "display.ephemeral_system_ttl",
+  "display.expand_terminal_commands",
   "display.final_response_markdown",
   "display.friendly_tool_labels",
   "display.inline_diffs",

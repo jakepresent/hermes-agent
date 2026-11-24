@@ -3455,6 +3455,7 @@ display:
     clarify: "Vra"
     memory: "Werk geheue by"
     todo_list: "Werk take by"
+    memory_search: "Deursoek geheue"
   verb_connector:
     search: " na "
     default: " "

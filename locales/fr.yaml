@@ -3769,6 +3769,7 @@ display:
     clarify: "Question"
     memory: "Mise à jour de la mémoire"
     todo_list: "Mise à jour des tâches"
+    memory_search: "Recherche dans la mémoire"
   verb_connector:
     search: " : "
     default: " "

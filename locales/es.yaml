@@ -3455,6 +3455,7 @@ display:
     clarify: "Preguntando"
     memory: "Actualizando memoria"
     todo_list: "Actualizando tareas"
+    memory_search: "Buscando en la memoria"
   verb_connector:
     search: " por "
     default: " "

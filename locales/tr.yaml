@@ -3455,6 +3455,7 @@ display:
     clarify: "Soruyor"
     memory: "Belleği güncelliyor"
     todo_list: "Görevleri güncelliyor"
+    memory_search: "Bellekte arıyor"
   verb_connector:
     search: " — "
     default: " "

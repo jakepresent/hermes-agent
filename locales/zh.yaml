@@ -3455,6 +3455,7 @@ display:
     clarify: "提问"
     memory: "更新记忆"
     todo_list: "更新任务"
+    memory_search: "搜索记忆"
   verb_connector:
     search: " · "
     default: " "

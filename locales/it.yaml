@@ -3455,6 +3455,7 @@ display:
     clarify: "Domanda"
     memory: "Aggiornamento memoria"
     todo_list: "Aggiornamento attività"
+    memory_search: "Ricerca nella memoria"
   verb_connector:
     search: " di "
     default: " "

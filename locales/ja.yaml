@@ -3455,6 +3455,7 @@ display:
     clarify: "質問中"
     memory: "メモリを更新中"
     todo_list: "タスクを更新中"
+    memory_search: "メモリを検索中"
   verb_connector:
     search: " — "
     default: " "

@@ -3560,6 +3560,7 @@ display:
     clarify: "Asking"
     memory: "Updating memory"
     todo_list: "Updating tasks"
+    memory_search: "Searching memory"
   verb_connector:
     search: " for "
     default: " "

@@ -3455,6 +3455,7 @@ display:
     clarify: "Запитує"
     memory: "Оновлює пам'ять"
     todo_list: "Оновлює завдання"
+    memory_search: "Шукає в пам'яті"
   verb_connector:
     search: " за запитом "
     default: " "

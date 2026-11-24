@@ -3455,6 +3455,7 @@ display:
     clarify: "Frage nach"
     memory: "Aktualisiere Gedächtnis"
     todo_list: "Aktualisiere Aufgaben"
+    memory_search: "Durchsuche Gedächtnis"
   verb_connector:
     search: " nach "
     default: " "

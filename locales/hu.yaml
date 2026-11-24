@@ -3472,6 +3472,7 @@ display:
     clarify: "Kérdezés"
     memory: "Memória frissítése"
     todo_list: "Feladatok frissítése"
+    memory_search: "Memória keresése"
   verb_connector:
     search: " erre: "
     default: " "

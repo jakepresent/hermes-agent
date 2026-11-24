@@ -21,7 +21,7 @@ from agent.conversation_compression import COMPRESSION_RETRY_CONTEXT_REDUCED_STA
 from agent.fast_mode import fast_mode_unprovisioned, mark_fast_mode_unavailable
 from agent.model_metadata import is_output_cap_error, parse_available_output_tokens_from_error
 from agent.retry_utils import is_zai_coding_overload_error, zai_coding_overload_retry_ceiling
-from agent.error_classifier import FailoverReason, classify_api_error
+from agent.error_classifier import FailoverReason, classify_api_error, is_codex_opaque_bad_request
 from agent.message_sanitization import (
     _looks_like_corrupt_image_rejection, _looks_like_image_content_rejection, _messages_carry_images,
     _sanitize_messages_non_ascii,
@@ -36,7 +36,10 @@ from agent.turn_failure_copy import (
 )
 from agent.route_verdicts import route_visit
 from agent.turn_retry_state import TurnRetryState
-from agent.turn_recovery_codex import _codex_soft_failure_error, _is_codex_token_expired, _recover_stale_codex_reasoning
+from agent.turn_recovery_codex import (
+    _codex_soft_failure_error, _is_codex_token_expired, _recover_stale_codex_reasoning,
+    recover_codex_opaque_bad_request,
+)
 from hermes_constants import display_hermes_home
 from utils import base_url_host_matches
 
@@ -682,6 +685,11 @@ def recover_after_classification(
     ):
         return True, False
 
+    # ChatGPT Codex bare ``{"detail": "Bad Request"}``: nothing points at the credential, so this runs
+    # before pool rotation (fresh cache key + client, then a resend without replay).
+    if is_codex_opaque_bad_request(classified) and recover_codex_opaque_bad_request(agent, _retry, api_messages):
+        return True, False
+
     if (
         classified.reason == FailoverReason.billing
         # A usage-window 402 is the plan's own limit: refreshing credentials cannot lift it.
@@ -1063,7 +1071,12 @@ def nonretryable_client_error_result(
         # The summary keeps only error.message; the pattern names are what the user allowlists.
         _nonretryable_summary = f"{_nonretryable_summary} (matched patterns: {_matched})"
     _plabel = provider_label_for(provider)
-    _label = _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help")
+    _codex_opaque = is_codex_opaque_bad_request(classified)
+    _label = (
+        f"{_plabel} kept rejecting the request with a bare 400 after recovery retries"
+        if _codex_opaque
+        else _NONRETRYABLE_LABELS.get(classified.reason, f"{_plabel} rejected the request and retrying won't help")
+    )
     agent._emit_diagnostic_status(TerminalFailureText(f"❌ {_label}: {_nonretryable_summary}"))
     # The endpoint/status trace is developer detail: verbose only (the log has it always).
     if getattr(agent, "verbose_logging", False):
@@ -1153,8 +1166,8 @@ def nonretryable_client_error_result(
     # Skip persistence on likely context-overflow (400 + large session): persisting the
     # failed message grows the session and repeats the failure.
     # Persisting the failed user message would make the session even larger, causing the same failure on the
-    # next attempt. (#1630)
-    if status_code == 400 and (approx_tokens > 50000 or len(api_messages) > 80):
+    # next attempt. (#1630) A Codex bare 400 says nothing about size, so its turn is kept.
+    if status_code == 400 and not _codex_opaque and (approx_tokens > 50000 or len(api_messages) > 80):
         _vlines(agent, "⚠️  Skipping session persistence for large failed session to prevent growth loop.")
     else:
         agent._persist_session(messages, conversation_history)

@@ -848,7 +848,7 @@ def _semantic_candidate_rows(
 
 def _semantic_fingerprint(rows: Sequence[sqlite3.Row], *, granularity: str, backend: str) -> str:
     h = hashlib.sha256()
-    h.update(f"semantic-v1:{backend}:{granularity}\n".encode("utf-8"))
+    h.update(f"semantic-v1:{backend}:{granularity}\n".encode())
     for row in rows:
         h.update(_semantic_row_id(row, granularity).encode("utf-8", errors="replace"))
         h.update(b"\0")
@@ -948,14 +948,14 @@ _GEMINI_BATCH_SIZE = 100
 _GEMINI_DEFAULT_MAX_COLD_ROWS = 25000
 _SKLEARN_DEFAULT_MAX_COLD_ROWS = 5000
 _GEMINI_QUERY_CACHE_MAX = 256
-_GEMINI_QUERY_EMBEDDING_CACHE: "OrderedDict[tuple[str, str], list[float]]" = OrderedDict()
+_GEMINI_QUERY_EMBEDDING_CACHE: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
 _GEMINI_ROW_REF_CACHE_MAX = 8
-_GEMINI_ROW_REF_CACHE: "OrderedDict[tuple[str, str, str, str, str, str, str], tuple[str, list[dict[str, Any] | None], list[int]]]" = OrderedDict()
+_GEMINI_ROW_REF_CACHE: OrderedDict[tuple[str, str, str, str, str, str, str], tuple[str, list[dict[str, Any] | None], list[int]]] = OrderedDict()
 _SEMANTIC_CANDIDATE_ROWS_CACHE_MAX = 8
-_SEMANTIC_CANDIDATE_ROWS_CACHE: "OrderedDict[tuple[str, str, str, str], tuple[float, list[sqlite3.Row]]]" = OrderedDict()
+_SEMANTIC_CANDIDATE_ROWS_CACHE: OrderedDict[tuple[str, str, str, str], tuple[float, list[sqlite3.Row]]] = OrderedDict()
 _SQLITE_VEC_ID_CACHE_MAX = 8
-_SQLITE_VEC_ID_CACHE: "OrderedDict[tuple[str, str, str, str, str, str, str], tuple[str, list[int]]]" = OrderedDict()
-_SQLITE_VEC_READY_CACHE: "OrderedDict[tuple[str, str, str, str, str], tuple[float, dict[str, Any]]]" = OrderedDict()
+_SQLITE_VEC_ID_CACHE: OrderedDict[tuple[str, str, str, str, str, str, str], tuple[str, list[int]]] = OrderedDict()
+_SQLITE_VEC_READY_CACHE: OrderedDict[tuple[str, str, str, str, str], tuple[float, dict[str, Any]]] = OrderedDict()
 _SQLITE_VEC_READY_CACHE_MAX = 16
 
 
@@ -2341,7 +2341,7 @@ def search_index(
                 semantic_rebuild=semantic_rebuild,
                 live_rebuild=(mode == "semantic"),
             )
-        except Exception as exc:  # noqa: BLE001 - semantic backend is best-effort in hybrid mode
+        except Exception as exc:
             if mode == "semantic":
                 return {"success": False, "error": f"semantic search failed: {exc}"}
             if semantic_backend == "gemini":
@@ -2367,7 +2367,7 @@ def search_index(
                     semantic_meta["requested_model"] = semantic_model
                     semantic_meta["fallback"] = "sklearn"
                     semantic_meta["error"] = str(exc)
-                except Exception as fallback_exc:  # noqa: BLE001 - keep hybrid search usable
+                except Exception as fallback_exc:
                     semantic_rows = []
                     semantic_meta = {
                         "backend": None,
@@ -2975,7 +2975,7 @@ def preindex_semantic_embeddings(
                 path_filter=path_filter,
                 category=current_category,
             )
-            existing, missing = _load_persistent_embeddings(
+            _existing, missing = _load_persistent_embeddings(
                 con, rows, granularity=current_granularity, backend_id=backend_id, model_name=semantic_model
             )
             batch_size = max(1, min(int(os.getenv("HERMES_MEMORY_SEARCH_GEMINI_BATCH_SIZE", str(_GEMINI_BATCH_SIZE))), 100))
@@ -2993,7 +2993,7 @@ def preindex_semantic_embeddings(
                     new_vectors = _embed_gemini_texts_batched(
                         prepared, model=semantic_model, max_retries=(1 if retry_429 else 0)
                     )
-                except Exception as exc:  # noqa: BLE001 - return progress + blocker
+                except Exception as exc:
                     item_errors.append(str(exc))
                     break
                 _store_persistent_embeddings(
@@ -3147,7 +3147,7 @@ def memory_search_tool(
             ),
             ensure_ascii=False,
         )
-    except Exception as exc:  # noqa: BLE001 — tool boundary returns JSON errors
+    except Exception as exc:
         return tool_error(f"memory_search failed: {exc}", success=False)
 
 

@@ -40,3 +40,11 @@ def test_combined_review_carries_both_hygiene_policies():
     assert "genuinely new" in prompt
     assert "near-duplicate" in prompt
     assert "160 characters" in prompt
+
+
+def test_skill_prompts_require_merging_and_generalizing():
+    for prompt in (_SKILL_REVIEW_PROMPT.lower(), _COMBINED_REVIEW_PROMPT.lower()):
+        assert "merge, don't accrete" in prompt
+        assert "same length or shorter" in prompt
+        assert "different task of the same class" in prompt
+        assert "it is an example, not a rule" in prompt

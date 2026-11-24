@@ -7,6 +7,7 @@ Sibling of ``agent/conversation_compression.py``; reached through the agent's
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import tempfile
 from pathlib import Path
@@ -119,7 +120,76 @@ def _write_data_url_to_source(source: dict, data_url: str) -> dict:
     return {**source, "type": "base64", "media_type": _data_url_mime(header), "data": data}
 
 
-def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int = 8000) -> bool:
+# --- Fork: session-local 413 shrink cache ---------------------------------
+# Upstream shrinks once per turn (``image_shrink_retry_attempted``), so a later
+# model/tool round in the SAME session rebuilds the original oversized inline
+# image and pays for the identical rejection again. This bounded cache remembers
+# a provider-confirmed rewrite and replays it onto fresh request clones; durable
+# history is never mutated. Scoped per (provider, model) by the agent mixin.
+_IMAGE_SHRINK_CACHE_MAX_ENTRIES = 16
+_IMAGE_SHRINK_CACHE_MAX_BYTES = 16 * 1024 * 1024
+
+
+def _image_shrink_cache_key(data_url: str) -> str:
+    return hashlib.sha256(data_url.encode("utf-8")).hexdigest()
+
+
+def _remember_shrunk_image(shrink_cache: Optional[dict[str, str]], original_url: str, resized_url: str) -> None:
+    """Remember one provider-confirmed rewrite (keyed by hash, LRU-bounded by count and bytes)."""
+    if not isinstance(shrink_cache, dict) or not original_url or not resized_url:
+        return
+    if len(resized_url) > _IMAGE_SHRINK_CACHE_MAX_BYTES:
+        return
+    key = _image_shrink_cache_key(original_url)
+    shrink_cache.pop(key, None)
+    while shrink_cache and (
+        len(shrink_cache) >= _IMAGE_SHRINK_CACHE_MAX_ENTRIES
+        or sum(len(v) for v in shrink_cache.values()) + len(resized_url) > _IMAGE_SHRINK_CACHE_MAX_BYTES
+    ):
+        shrink_cache.pop(next(iter(shrink_cache)))
+    shrink_cache[key] = resized_url
+
+
+def apply_cached_image_shrinks(api_messages: list, *, shrink_cache: Optional[dict[str, str]]) -> int:
+    """Replay prior 413 rewrites onto a per-call request clone (copy-on-write). Returns the count."""
+    if not api_messages or not isinstance(shrink_cache, dict) or not shrink_cache:
+        return 0
+    changed = 0
+    for msg in api_messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        new_content: list | None = None
+        for idx, part in enumerate(content):
+            if not isinstance(part, dict):
+                continue
+            ptype, replacement = part.get("type"), None
+            if ptype == "image":
+                source = part.get("source")
+                cached = shrink_cache.get(_image_shrink_cache_key(_source_to_data_url(source) or ""))
+                if cached and isinstance(source, dict):
+                    replacement = {**part, "source": _write_data_url_to_source(source, cached)}
+            elif ptype in {"image_url", "input_image"}:
+                value = part.get("image_url")
+                url = value.get("url", "") if isinstance(value, dict) else value
+                if isinstance(url, str) and url.startswith("data:"):
+                    cached = shrink_cache.get(_image_shrink_cache_key(url))
+                    if cached:
+                        replacement = {**part, "image_url": {**value, "url": cached} if isinstance(value, dict) else cached}
+            if replacement is not None:
+                if new_content is None:
+                    new_content = list(content)
+                new_content[idx] = replacement
+                changed += 1
+        if new_content is not None:
+            msg["content"] = new_content
+    if changed:
+        logger.info("image-shrink recovery: reused %d session-local cached image rewrite(s)", changed)
+    return changed
+
+
+def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int = 8000,
+                                       shrink_cache: Optional[dict[str, str]] = None) -> bool:
     """Re-encode oversized native image parts to recover from image-too-large errors.
     Mutates ``api_messages`` in place. Returns True if any part was replaced, False if nothing to shrink or
     Pillow could not help. Targets data-URL parts over 4 MB or ``max_dimension`` (Anthropic's per-side pixel
@@ -155,15 +225,17 @@ def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int
             replacement = None
             if ptype == "image":
                 source = part.get("source")
-                resized, unshrinkable = _shrink(_source_to_data_url(source) or "")
+                original_url = _source_to_data_url(source) or ""
+                resized, unshrinkable = _shrink(original_url)
                 if resized and isinstance(source, dict):
                     replacement = {**part, "source": _write_data_url_to_source(source, resized)}
             elif ptype in {"image_url", "input_image"}:
                 image_value = part.get("image_url")
                 # OpenAI chat.completions: {"image_url": {"url": "data:..."}}
                 # OpenAI Responses: {"image_url": "data:..."}
+                original_url = image_value.get("url", "") if isinstance(image_value, dict) else image_value
                 if isinstance(image_value, dict):
-                    resized, unshrinkable = _shrink(image_value.get("url", ""))
+                    resized, unshrinkable = _shrink(original_url)
                     if resized:
                         replacement = {**part, "image_url": {**image_value, "url": resized}}
                 elif isinstance(image_value, str):
@@ -179,6 +251,8 @@ def try_shrink_image_parts_in_messages(api_messages: list, *, max_dimension: int
                     new_content = list(content)
                 new_content[part_idx] = replacement
                 changed_count += 1
+                # Fork: remember the rewrite so later rounds on this provider/model reuse it.
+                _remember_shrunk_image(shrink_cache, original_url, resized)
             elif unshrinkable:
                 unshrinkable_oversized += 1
         if new_content is not None:

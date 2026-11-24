@@ -14,7 +14,6 @@ import tempfile
 from pathlib import Path
 from typing import Any, List, Optional
 
-from agent.lazy_forward import forward_static as _forward_static
 from session_rules.turns import _is_multimodal_tool_result, _multimodal_text_summary
 from utils import base_url_host_matches, base_url_hostname
 
@@ -253,7 +252,32 @@ class VisionMessagePrepMixin:
         )
         return summary
 
-    _try_shrink_image_parts_in_messages = _forward_static("agent.conversation_compression_image_shrink", "try_shrink_image_parts_in_messages")
+    def _image_shrink_cache_for_active_model(self) -> dict:
+        """Fork: session-local 413 rewrite cache scoped to the active (provider, model).
+
+        A rewrite one provider accepted says nothing about another's limits; 4 scopes retained.
+        """
+        caches = getattr(self, "_image_shrink_request_caches", None)
+        if not isinstance(caches, dict):
+            caches = self._image_shrink_request_caches = {}
+        scope = ((getattr(self, "provider", "") or "").strip().lower(), (getattr(self, "model", "") or "").strip())
+        if scope not in caches:
+            while len(caches) >= 4:
+                caches.pop(next(iter(caches)))
+            caches[scope] = {}
+        return caches[scope]
+
+    def _try_shrink_image_parts_in_messages(self, api_messages: list, *, max_dimension: int = 8000) -> bool:
+        """Forwarder — see ``agent.conversation_compression_image_shrink``; fork: records into the session cache."""
+        from agent.conversation_compression_image_shrink import try_shrink_image_parts_in_messages
+        return try_shrink_image_parts_in_messages(
+            api_messages, max_dimension=max_dimension, shrink_cache=self._image_shrink_cache_for_active_model(),
+        )
+
+    def _apply_cached_image_shrinks(self, api_messages: list) -> int:
+        """Fork: replay prior 413 rewrites onto a fresh request clone."""
+        from agent.conversation_compression_image_shrink import apply_cached_image_shrinks
+        return apply_cached_image_shrinks(api_messages, shrink_cache=self._image_shrink_cache_for_active_model())
 
     def _try_strip_image_parts_from_tool_messages(
         self, api_messages: list, *, remember_model: bool = True

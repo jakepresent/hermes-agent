@@ -19,6 +19,7 @@ _HERMES_CORE_TOOLS = [
     "browser_vault",  # rides with the browser; deferred by default (tools.tool_search.defer)
     "text_to_speech",
     "todo_list", "memory",
+    "memory_search",
     "session_search",
     "clarify",
     "execute_code", "delegate_task",
@@ -124,6 +125,7 @@ TOOLSETS = {
     "todo": _ts("Task planning and tracking for multi-step work", ["todo_list"]),
     "memory": _ts("Persistent memory across sessions (personal notes + user profile)", ["memory"]),
     "context_engine": _ts("Runtime tools exposed by the active context engine"),
+    "memory_search": _ts("Search durable memory files (ChatWorkspace, Hermes memories) with semantic + keyword ranking", ["memory_search"]),
     "session_search": _ts("Search and recall past conversations with summarization", ["session_search"]),
     "connections": _ts("Remote connector discovery, execution, and account authorization", ["manage_connections"]),
     "project": _ts("Desktop Projects — create/switch named workspaces (GUI sessions only)", ["desktop_project"]),
@@ -237,8 +239,10 @@ TOOLSET_SESSION_PLATFORMS = {name: spec["platforms"] for name, spec in TOOLSETS.
 
 # Captured before create_custom_toolset() can add user-named tools: shared metrics may export only
 # these names, so a plugin, MCP server or custom toolset name never leaves the machine.
-BUILTIN_TOOL_NAMES = frozenset(tool for spec in TOOLSETS.values() for tool in spec["tools"])
-BUILTIN_TOOLSET_NAMES = frozenset(TOOLSETS)
+# Fork: fork-only tools/toolsets are not part of upstream's metrics schema; they report as custom.
+_FORK_ONLY_NAMES = frozenset({"memory_search"})
+BUILTIN_TOOL_NAMES = frozenset(tool for spec in TOOLSETS.values() for tool in spec["tools"]) - _FORK_ONLY_NAMES
+BUILTIN_TOOLSET_NAMES = frozenset(TOOLSETS) - _FORK_ONLY_NAMES
 
 
 def _registry():

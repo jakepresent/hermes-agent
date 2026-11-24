@@ -15,11 +15,6 @@ import pytest
 from agent.context_compressor import ContextCompressor
 from tui_gateway import server
 
-# Fork (manifest §10b): proactive maintenance retires only stale tool images; see the L3 DECISION on
-# cold-cache text prune. This upstream test exercises the text prune itself.
-FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
-
-
 
 def _session_with_compressor(**compression_ctor):
     compressor = ContextCompressor(
@@ -282,7 +277,6 @@ def test_live_prune_result_floor_matches_fresh_build(monkeypatch, raw):
 
 
 @pytest.mark.parametrize("write_fails", [True, False])
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_post_archive_noop_names_the_actual_reason(tmp_path, monkeypatch, write_fails):
     from agent.context_compressor import _estimate_msg_budget_tokens
     from tests.agent.test_proactive_prune_archive import _compressor, _round

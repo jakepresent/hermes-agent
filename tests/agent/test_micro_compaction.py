@@ -903,12 +903,7 @@ def _held_session(tmp_path, mode: str):
         for i in range(8):
             history.append({"role": "assistant", "content": "", "tool_calls": [{
                 "id": f"call_{i}", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]})
-            # Fork full-input compaction: proactive maintenance retires stale screenshots only, never text.
-            body = chr(65 + i) * 24_000 if i < 3 else "ok"
-            history.append({"role": "tool", "tool_call_id": f"call_{i}", "content": [
-                {"type": "text", "text": body},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
-            ]})
+            history.append({"role": "tool", "tool_call_id": f"call_{i}", "content": chr(65 + i) * 24_000 if i < 3 else "ok"})
     else:
         history = _conversation(exchanges=8)
     db.messages.append_batch("s", [NewMessage.from_live(m) for m in history])

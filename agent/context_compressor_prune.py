@@ -154,12 +154,15 @@ class ProactivePruneMixin:
                                                or callable(getattr(session_db, "archive_and_compact", None)))):
             self._warn_reclamation_no_op("prune:store_cannot_persist", current_tokens)
             return messages, 0
-        # Fork (§10b): unsummarized text and arguments must reach the full compaction summary before they
-        # become metadata or duplicate stubs, so this maintenance prune (warm, cold-cache and idle offload
-        # alike) retires only stale tool-image payloads. Rows are replaced, never mutated.
-        pruned_msgs = list(messages)
-        pruned_count = _cc()._retire_stale_tool_result_images(
-            pruned_msgs, spared=self._spared_pending_tool_round(messages))
+        # The tail never starts inside one step's parallel results (a count-only tail split the step).
+        # Only a boundary ON a tool row splits one; a group that ends right before it is already whole.
+        boundary = len(messages) - self.protect_last_n
+        if 0 < boundary < len(messages) and messages[boundary].get("role") == "tool":
+            boundary = self._align_boundary_backward(messages, boundary)
+        protect_tail = len(messages) - boundary
+        pruned_msgs, pruned_count = self._prune_old_tool_results(
+            messages, protect_tail_count=protect_tail, protect_tail_tokens=None, min_prune_chars=self.proactive_prune_min_result_chars,
+        )
         kept = _keep_running_turn(messages, pruned_msgs, turn_start)
         if kept is None:
             self._warn_reclamation_no_op("prune:running_turn_unknown", current_tokens)

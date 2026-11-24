@@ -54,10 +54,7 @@ def _history(n_pairs: int = 8, big: int = 9_000) -> list[dict[str, Any]]:
         msgs.append({
             "role": "tool",
             "tool_call_id": cid,
-            "content": [
-                {"type": "text", "text": chr(65 + i) * big if i < 3 else "ok"},
-                {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
-            ],
+            "content": chr(65 + i) * big if i < 3 else "ok",
         })
     return msgs
 
@@ -87,18 +84,22 @@ def test_billed_basis_over_threshold_defeats_message_only_rearm_lockout() -> Non
     billed = c.threshold_tokens + 1  # provider says: over threshold, now
 
     scans: list[int] = []
-    # Fork full-input compaction: proactive maintenance only retires stale images.
-    from agent.context_compressor import _retire_stale_tool_result_images
+    # Stand in for the real multi-pass scan: a NEW list whose old tool outputs
+    # are reclaimed, so the (untouched) reclaim gate can commit it.
+    reclaimed = [dict(m) for m in msgs]
+    for m in reclaimed[:-2]:
+        if m.get("role") == "tool":
+            m["content"] = "[pruned]"
 
-    def _scan(candidate, *args: Any, **kwargs: Any) -> int:
+    def _scan(*args: Any, **kwargs: Any) -> tuple[list[dict[str, Any]], int]:
         scans.append(1)
-        return _retire_stale_tool_result_images(candidate, *args, **kwargs)
+        return reclaimed, 3
 
-    with patch("agent.context_compressor._retire_stale_tool_result_images", _scan):
+    with patch.object(c, "_prune_old_tool_results", _scan):
         result, pruned = c.prune_tool_results_only(msgs, current_tokens=billed)
 
     assert scans, "rearm gate short-circuited on the message-only estimate"
-    assert pruned >= 1
+    assert pruned == 3
     assert result is not msgs
 
 def test_message_only_rearm_still_holds_below_threshold() -> None:
@@ -110,8 +111,9 @@ def test_message_only_rearm_still_holds_below_threshold() -> None:
     under = c.threshold_tokens - 1
     assert under >= c.proactive_prune_tokens  # above the prune trigger
 
-    with patch(
-        "agent.context_compressor._retire_stale_tool_result_images",
+    with patch.object(
+        c,
+        "_prune_old_tool_results",
         side_effect=AssertionError("scan must not run below threshold"),
     ):
         result, pruned = c.prune_tool_results_only(msgs, current_tokens=under)
@@ -126,8 +128,9 @@ def test_no_op_below_the_prune_trigger() -> None:
     msgs = _history()
     c.on_session_reset()  # fully rearmed; only the trigger gates
 
-    with patch(
-        "agent.context_compressor._retire_stale_tool_result_images",
+    with patch.object(
+        c,
+        "_prune_old_tool_results",
         side_effect=AssertionError("scan must not run below the trigger"),
     ):
         result, pruned = c.prune_tool_results_only(

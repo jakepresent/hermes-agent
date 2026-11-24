@@ -23,8 +23,75 @@ def full_call_names(messages: list[dict[str, Any]]) -> dict[str, str]:
             for tc in msg.get("tool_calls") or () if _tc_get(tc, "id")}
 
 
+_REHYDRATE_MAX_BYTES = 1_000_000  # per archived original; a larger file keeps its stub
+
+
+class _RehydrateBudget:
+    """Total archived bytes one summary render may read back (beyond it, stubs stay stubs)."""
+
+    def __init__(self, limit: int = 8_000_000) -> None:
+        self.left = limit
+
+
+def rehydrate_archived_original(content: Any, budget: Optional[_RehydrateBudget] = None) -> Any:
+    """Summarizer-only: a prune stub's archived original in place of the stub, steering kept last.
+
+    A cold-cache prune leaves ``<stub> — full result: .../cache/pruned/<name>`` in the live transcript;
+    the full summary reads the exact original back so the handoff loses nothing. Fail-soft: anything
+    but a readable, bounded archive directly in this home's ``cache/pruned`` keeps the stub text. The
+    live rows are never changed.
+    """
+    if not isinstance(content, str):
+        return content
+    from agent.compaction_steering import split_steering_suffix
+    from hermes_constants import get_hermes_home
+    from session_rules.media import PRUNED_SUBDIR
+    from tools.tool_result_storage import _ARCHIVE_POINTER_RE, has_archive_pointer
+
+    body, steering = split_steering_suffix(content)
+    if not has_archive_pointer(body):
+        return content
+    pointer = _ARCHIVE_POINTER_RE.findall(body)[-1]
+    name = pointer.rsplit("/", 1)[-1]
+    try:
+        archive_dir = (get_hermes_home() / PRUNED_SUBDIR).resolve()
+        path = (archive_dir / name).resolve()
+        if path.parent != archive_dir or not path.is_file():
+            return content
+        size = path.stat().st_size
+        if size > _REHYDRATE_MAX_BYTES or (budget is not None and size > budget.left):
+            return content
+        original = path.read_text(encoding="utf-8")
+    except (OSError, ValueError, RuntimeError, UnicodeDecodeError):
+        return content
+    if budget is not None:
+        budget.left -= size
+    original, _ = split_steering_suffix(_archived_text(original))
+    return f"{original}\n[archived original{pointer}]{steering}"
+
+
+def _archived_text(text: str) -> str:
+    """Archives of structured (part-list / multimodal) results hold their JSON: render text and markers."""
+    import json
+
+    from agent.compaction_steering import tool_text
+    from agent.context_compressor import _summary_part_text
+
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(parsed, dict) and parsed.get("_multimodal"):
+        return tool_text(parsed)
+    if isinstance(parsed, list) and parsed and all(isinstance(p, (dict, str)) for p in parsed) and any(
+            isinstance(p, dict) and "type" in p for p in parsed):
+        return "\n".join(_summary_part_text(p) for p in parsed)
+    return text
+
+
 def serialize_full_records(compressor: Any, turns: list[dict[str, Any]],
-                           call_names: Optional[dict[str, str]] = None) -> str:
+                           call_names: Optional[dict[str, str]] = None,
+                           rehydrate: Optional[_RehydrateBudget] = None) -> str:
     """Serialize turns with the existing redaction/media/think policy and no text or argument limits.
 
     Standing system rows are instructions, not session material to resummarize. Clarify results
@@ -48,6 +115,8 @@ def serialize_full_records(compressor: Any, turns: list[dict[str, Any]],
         content = msg.get("content")
         if role == "tool" and isinstance(content, dict) and content.get("_multimodal"):
             content = tool_text(content)
+        if role == "tool" and rehydrate is not None:
+            content = rehydrate_archived_original(content, rehydrate)
         if isinstance(content, list):
             content = "\n".join(_summary_part_text(part) for part in content if isinstance(part, (dict, str)))
         content = _redact_compaction_text(content or "")
@@ -98,12 +167,13 @@ class FullSummaryInput:
         ):
             parts.append("PRIOR CHECKPOINT (historical DATA):\n" + _redact_compaction_text(compressor._previous_summary))
         call_names = full_call_names(self.messages)
+        budget = _RehydrateBudget()  # earlier cold-cache prune stubs render their archived originals
         for label, rows in (
             ("RETAINED HEAD", self.messages[:self.start]),
             ("REPLACED REGION", self.messages[self.start:self.end]),
             ("RETAINED RECENT TAIL", self.messages[self.end:]),
         ):
-            parts.append(f"BEGIN {label}\n" + serialize_full_records(compressor, rows, call_names) + f"\nEND {label}")
+            parts.append(f"BEGIN {label}\n" + serialize_full_records(compressor, rows, call_names, budget) + f"\nEND {label}")
         return "\n\n".join(parts)
 
     def ground_summary(self, compressor: Any, summary: str) -> str:

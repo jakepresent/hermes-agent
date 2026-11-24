@@ -346,13 +346,7 @@ def _prune_after_tool_results(persist_disabled):
         msgs.append({"role": "assistant", "content": "", "tool_calls": [
             {"id": f"c{i}", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}
         ]})
-        body = (chr(65 + i) + SECRET) * 600 if i < 3 else "ok"
-        # Fork full-input compaction: proactive maintenance retires stale screenshots only, never text.
-        # Every result carries one so the older ones fall outside the newest-image keep window.
-        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": [
-            {"type": "text", "text": body},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
-        ]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "content": (chr(65 + i) + SECRET) * 600 if i < 3 else "ok"})
     # The running turn's user row: the prune skips a round whose turn index names no user row.
     msgs.append({"role": "user", "content": "ask"})
     verdict = compress_after_tool_results(

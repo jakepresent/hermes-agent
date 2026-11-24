@@ -82,12 +82,15 @@ def test_full_source_proactive_and_iterative_handoff_one_no_tools_call(tmp_path,
     engine = _engine(mode)
     engine.bind_session_state(db, "full-input", persistence=db)
     before = deepcopy(source)
-    durable_before = conversation(db, "full-input")
     proactive = source
     if proactive_first:
-        proactive, count = engine.prune_tool_results_only(source, current_tokens=900_000)
-        assert proactive is source and count == 0, "early text shortening erases unsummarized outcomes"
-    assert conversation(db, "full-input") == durable_before
+        # Cold-cache prune (allowed, manifest §10b): the live row becomes an archive-pointer stub with
+        # its steering kept last; the full summary input reads the archived original back.
+        proactive, count = engine.prune_tool_results_only(source, cold_cache=True)
+        assert proactive is not source and count > 0
+        stub = next(row for row in proactive if row.get("tool_call_id") == "round-0")["content"]
+        assert OLD not in stub and "cache/pruned/" in stub and stub.endswith(STEERING)
+    durable_before = conversation(db, "full-input")
 
     with patch("agent.context_compressor.call_llm", return_value=_response()) as transport:
         result = engine.compress(proactive, force=True)
@@ -228,3 +231,40 @@ def test_clarify_answers_reach_full_input_whole_and_runtime_notices_never_do():
     assert "[clarify] user responded: " + json.dumps(answer) in prompt
     assert "[clarify] asked user a question" in prompt
     assert "most reasonable assumption" not in prompt
+
+
+def test_summary_input_rehydrates_cold_pruned_originals_fail_soft(tmp_path, monkeypatch):
+    """A cold-cache prune stub renders its archived original in the full summary input (steering
+    kept last); the live rows keep the stub, and a missing archive leaves the stub text."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    db = open_persistence(profile_scope(home=tmp_path))
+    seed_session(db, "rehydrate", "cli")
+    source = _history()
+    seed_messages(db, "rehydrate", *source)
+    engine = _engine("lean")
+    engine.bind_session_state(db, "rehydrate", persistence=db)
+    pruned, count = engine.prune_tool_results_only(source, cold_cache=True)
+    assert count > 0
+    stub = next(row for row in pruned if row.get("tool_call_id") == "round-0")["content"]
+    assert OLD not in stub
+    live = deepcopy(pruned)
+
+    with patch("agent.context_compressor.call_llm", return_value=_response()) as transport:
+        engine.compress(pruned, force=True)
+    replaced = _prompt(transport.call_args).split("BEGIN REPLACED REGION", 1)[1].split("END REPLACED REGION", 1)[0]
+    record = replaced.split("[TOOL RESULT round-0]: ", 1)[1].split("\n\n[", 1)[0]
+    assert OLD in record, "summary input must carry the archived original, not the stub"
+    assert record.rstrip().endswith(STEERING.strip()) and record.count(STEER_MARKER_OPEN) == 1
+    assert "cache/pruned/" in record
+    assert pruned == live
+
+    # Fail-soft: an unreadable archive keeps the stub text in the summary input.
+    for path in (tmp_path / "cache" / "pruned").iterdir():
+        path.unlink()
+    engine2 = _engine("lean")
+    engine2.bind_session_state(db, "rehydrate", persistence=db)
+    with patch("agent.context_compressor.call_llm", return_value=_response()) as transport:
+        engine2.compress(deepcopy(live), force=True)
+    prompt = _prompt(transport.call_args)
+    assert OLD not in prompt and stub.split(" — full result: ", 1)[0] in prompt
+    db.close()

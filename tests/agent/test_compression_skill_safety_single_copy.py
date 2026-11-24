@@ -5,18 +5,10 @@ count; a later full compaction keeps the tail by token budget, so that ruled stu
 gets the rule too.
 """
 
-import pytest
-
 from unittest.mock import MagicMock, patch
 
 from agent.context_compressor import SKILL_PRUNED_MARKER_PREFIX, ContextCompressor
 from agent.context_compressor_tail import SKILL_SAFETY_RULE
-
-# Fork (manifest §10b): proactive maintenance (warm, cold-cache and idle offload) retires only stale
-# tool images; text shortening happens only inside a validated full-conversation compaction. These
-# upstream tests exercise the text prune itself. Revisit if the L3 DECISION on cold-cache text prune lands.
-FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
-
 
 
 def _texts(messages):
@@ -42,7 +34,6 @@ def _transcript():
     return messages
 
 
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_prune_only_then_full_compaction_keeps_one_skill_safety_rule():
     with patch("agent.context_compressor.get_model_context_length", return_value=1_000_000):
         comp = ContextCompressor(

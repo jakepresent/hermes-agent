@@ -1342,6 +1342,15 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         self._dedup = MessageDeduplicator()
         # Reply threading mode: "off", "first" (default; first chunk only), "all" (every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        # Fork: discord.max_split_messages sets this instance's per-reply message cap (past it the
+        # reply goes out as one .md file, #152012); clamped so a typo keeps a real flood guard.
+        # Unset or malformed keeps upstream's class cap. discord.chunk_indicators: false drops "(x/y)".
+        try:
+            self.MAX_SPLIT_MESSAGES = min(100, max(2, int(self.config.extra["max_split_messages"])))
+        except (KeyError, TypeError, ValueError):
+            pass
+        from utils.env import is_truthy_value
+        self._chunk_indicators = is_truthy_value(self.config.extra.get("chunk_indicators"), default=True)
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
         # Bot's last message ID per channel: lets history backfill skip the full channel.history() scan.
         self._last_self_message_id: dict[str, str] = {}
@@ -4285,6 +4294,17 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         if not content:
             return content
         return convert_table_to_bullets(content)
+
+    def truncate_message(self, content: str, max_length: int = 4096,
+                         len_fn: Optional[Callable[[str], int]] = None) -> list[str]:
+        """Fork: upstream's split, minus the shared ``(x/y)`` suffixes when
+        ``discord.chunk_indicators`` is false. Every Discord split path (send, forum,
+        stream preview, edit overflow, reply-count) goes through here."""
+        chunks = BasePlatformAdapter.truncate_message(content, max_length, len_fn)
+        if getattr(self, "_chunk_indicators", True) or len(chunks) <= 1:
+            return chunks
+        total = len(chunks)
+        return [chunk.removesuffix(f" ({index}/{total})") for index, chunk in enumerate(chunks, start=1)]
 
     async def _defer_unless_expired(self, interaction: discord.Interaction, warn_fmt: str, *warn_args) -> bool:
         """Ephemeral defer(); False (after a warning) when the interaction token already expired

@@ -15,7 +15,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from gateway.config import PlatformConfig
+from gateway.config import Platform, PlatformConfig
+from gateway.config_loader import _bridged_keys
 
 
 def _ensure_discord_mock():
@@ -140,3 +141,61 @@ class TestEditOverflowDeliversEveryChunk:
         chunks = adapter.truncate_message(adapter.format_message(content), MAX)
         assert edits == chunks[:1]
         assert sends == chunks[1:]
+
+
+# --- Fork: configurable long-response delivery (discord.max_split_messages / chunk_indicators) ---
+
+
+def _fork_adapter(extra=None):
+    from plugins.platforms.discord.adapter import DiscordAdapter
+    return DiscordAdapter(PlatformConfig(enabled=True, token="***", extra=extra or {}))
+
+
+class TestForkConfigurableDelivery:
+    def test_unset_cap_keeps_upstream_class_cap(self):
+        from plugins.platforms.discord.adapter import DiscordAdapter
+        adapter = _fork_adapter()
+        assert "MAX_SPLIT_MESSAGES" not in vars(adapter)
+        assert adapter.MAX_SPLIT_MESSAGES == DiscordAdapter.MAX_SPLIT_MESSAGES
+
+    def test_configured_cap_moves_the_file_handoff_point(self):
+        from gateway.platforms.helpers import reply_message_cap
+        assert reply_message_cap(_fork_adapter({"max_split_messages": 16})) == 16
+
+    @pytest.mark.parametrize("raw,expected", [(1, 2), (1000, 100), ("12", 12)])
+    def test_configured_cap_is_clamped(self, raw, expected):
+        assert _fork_adapter({"max_split_messages": raw}).MAX_SPLIT_MESSAGES == expected
+
+    def test_malformed_cap_keeps_upstream_cap(self):
+        from plugins.platforms.discord.adapter import DiscordAdapter
+        assert _fork_adapter({"max_split_messages": "lots"}).MAX_SPLIT_MESSAGES == DiscordAdapter.MAX_SPLIT_MESSAGES
+
+    def test_stock_default_keeps_chunk_indicators(self):
+        chunks = _fork_adapter().truncate_message("word " * 1000, 2000)
+        assert len(chunks) > 1
+        assert chunks[0].endswith(f" (1/{len(chunks)})")
+
+    def test_config_can_disable_chunk_indicators(self):
+        chunks = _fork_adapter({"chunk_indicators": False}).truncate_message("word " * 1000, 2000)
+        assert len(chunks) > 1
+        assert not chunks[0].endswith(f" (1/{len(chunks)})")
+        assert not chunks[-1].endswith(f" ({len(chunks)}/{len(chunks)})")
+
+    @pytest.mark.asyncio
+    async def test_send_without_indicators_delivers_bare_chunks(self):
+        adapter = _fork_adapter({"chunk_indicators": "false"})
+        channel = MagicMock()
+        channel.send = AsyncMock(side_effect=[SimpleNamespace(id=i) for i in range(1, 50)])
+        adapter._client = MagicMock()
+        adapter._resolve_channel = AsyncMock(return_value=channel)
+        adapter._is_forum_parent = lambda _c: False
+        result = await adapter.send("123", "word " * 1000)
+        assert result.success is True
+        sent = [c.kwargs["content"] for c in channel.send.await_args_list]
+        assert len(sent) > 1 and not any(s.endswith(f"/{len(sent)})") for s in sent)
+
+
+def test_top_level_discord_delivery_settings_bridge_into_platform_extra():
+    bridged = _bridged_keys(Platform.DISCORD, {"max_split_messages": 16, "chunk_indicators": False}, {})
+    assert bridged["max_split_messages"] == 16
+    assert bridged["chunk_indicators"] is False

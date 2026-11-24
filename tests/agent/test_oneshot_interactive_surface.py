@@ -12,6 +12,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Fork (manifest §10b): proactive maintenance retires only stale tool images; see the L3 DECISION on
+# cold-cache text prune. This upstream test exercises the text prune itself.
+FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
+
+
 LIVE_CONTROL = {"action", "subagent_id", "message"}
 
 
@@ -142,6 +147,7 @@ def test_skill_safety_rule_rides_the_compaction_handoff_not_the_system_prompt(pr
     assert summary.count("## Skill Safety Rule") == int(pruned)
 
 
+@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_skill_safety_rule_survives_prune_only_and_salvage_rewrites():
     from agent.context_compressor import (
         COMPRESSED_SUMMARY_METADATA_KEY, SKILL_PRUNED_MARKER_PREFIX, ContextCompressor, _SUMMARY_END_MARKER,

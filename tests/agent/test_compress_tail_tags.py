@@ -21,7 +21,12 @@ def test_compress_marks_carried_forward_tail_dicts():
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"filler turn {i} " + "x" * 400}
         for i in range(12)
     ]
-    # Fork (§10b): compaction fails closed without a validated summary, so commit one.
+    # Fork (§10b): compaction fails closed: a provider failure commits nothing, so tail tagging
+    # is exercised through a validated summary instead.
+    with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
+        failed = compressor.compress(list(history))
+    assert failed == history
+    assert not any(m.get(_COMPACTION_TAIL_MARKER) for m in failed)
     ok = SimpleNamespace(choices=[SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content="## Goal\nfiller"))])
     with patch("agent.context_compressor.call_llm", return_value=ok):
         out = compressor.compress(list(history))

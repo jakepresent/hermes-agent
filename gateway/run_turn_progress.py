@@ -154,6 +154,25 @@ def publish_worker_tool_event(authority, session_id, generation, frame) -> bool:
     return True
 
 
+# Fork: leading shell strict-mode boilerplate hidden from expanded terminal progress blocks.
+_SHELL_STRICT_MODE_LINE_RE = re.compile(r"^set\s+(?:(?:-[A-Za-z]+)(?:\s+pipefail)?|-o\s+pipefail)\s*;?$")
+_SHELL_STRICT_MODE_PREFIX_RE = re.compile(
+    r"^\s*set\s+(?:(?:-[A-Za-z]+)(?:\s+pipefail)?|-o\s+pipefail)\s*(?:;|&&)\s*")
+
+
+def _strip_shell_strict_mode(command: str) -> str:
+    """Remove leading shell-safety boilerplate (``set -euo pipefail``) from a displayed command."""
+    text = command.strip()
+    while match := _SHELL_STRICT_MODE_PREFIX_RE.match(text):
+        text = text[match.end():].lstrip()
+    lines = text.splitlines()
+    while lines and _SHELL_STRICT_MODE_LINE_RE.match(lines[0].strip()):
+        lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+    return "\n".join(lines).strip()
+
+
 class GatewayTurnProgressMixin:
     # ── shared thread→loop plumbing ─────────────────────────────────────────────────────────
 
@@ -318,7 +337,7 @@ class GatewayTurnProgressMixin:
         pl = get_tool_preview_max_len()
         return pl if pl > 0 else 40
 
-    def _progress_terminal_blocks(self, adapter, tool_name, args, emoji):
+    def _progress_terminal_blocks(self, adapter, tool_name, args, emoji, *, hide_strict_preamble=False):
         """(full, short) fenced blocks for a terminal command on markdown platforms, else (None, None).
 
         No language tag: Slack mrkdwn renders it as a literal first code line. Verbose shows the FULL
@@ -330,7 +349,8 @@ class GatewayTurnProgressMixin:
             and isinstance(args.get("command"), str) and args["command"].strip()
         ):
             return None, None
-        cmd_full = args["command"].rstrip()
+        raw_command = args["command"].rstrip()
+        cmd_full = (_strip_shell_strict_mode(raw_command) if hide_strict_preamble else raw_command) or raw_command
         header = "" if self._ctx.last_was_terminal_block[0] else t("gateway.progress.tool_head", emoji=emoji, tool=tool_name) + "\n"
         cap = self._preview_cap()
         lines = cmd_full.splitlines()
@@ -350,9 +370,13 @@ class GatewayTurnProgressMixin:
             adapter = self._runner._delivery_adapter_for(ctx.source)
         except Exception:
             adapter = None
-        code_full, code_short = self._progress_terminal_blocks(adapter, tool_name, args, emoji)
         verbose = ctx.progress_mode == "verbose"
-        code = code_full if verbose else code_short
+        # Fork: expand_terminal_commands picks the full command block without enabling verbose
+        # mode's args dump for every other tool.
+        expand_terminal = bool(getattr(ctx, "expand_terminal_commands", False)) and not verbose
+        code_full, code_short = self._progress_terminal_blocks(
+            adapter, tool_name, args, emoji, hide_strict_preamble=expand_terminal)
+        code = code_full if (verbose or expand_terminal) else code_short
         ctx.last_was_terminal_block[0] = code is not None
         if verbose:
             if code is None and args:
@@ -369,14 +393,14 @@ class GatewayTurnProgressMixin:
             return None
         if code is not None:
             return code
-        if not preview:
-            return t("gateway.progress.tool_pending", emoji=emoji, tool=tool_name)
         from agent.display import get_tool_verb, prepare_tool_preview, tool_verb_connector, verb_drops_preview
+        verb = get_tool_verb(tool_name)
+        if not preview:  # Fork: friendly verb even without an argument preview
+            return f"{emoji} {verb}" if verb else t("gateway.progress.tool_pending", emoji=emoji, tool=tool_name)
         prepared = prepare_tool_preview(tool_name, args, fallback=preview, max_len=self._preview_cap())
         preview = adapter.format_tool_preview(prepared) if adapter is not None else prepared.text
         # Friendly labels: human-phrased line for built-in tools ("🔍 Searching the web for ...")
         # by prefixing the verb onto the computed preview, so the command/url/query is kept.
-        verb = get_tool_verb(tool_name)
         if not verb:
             return t("gateway.progress.tool_preview", emoji=emoji, tool=tool_name, preview=preview)
         return f"{emoji} {verb}" if verb_drops_preview(tool_name) else f"{emoji} {verb}{tool_verb_connector(tool_name)}{preview}"

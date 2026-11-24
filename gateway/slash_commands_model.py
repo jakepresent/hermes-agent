@@ -45,6 +45,11 @@ def _fast_route_supports(model: str, runtime: dict, tier: Optional[str] = None) 
 # /reasoning display-toggle arguments -> show_reasoning value.
 _REASONING_DISPLAY_TOGGLES = {"show": True, "on": True, "hide": False, "off": False}
 
+# Fork: read-only aliases for ``/model``. Upstream's parser treats any bare word as a model
+# NAME, so ``/model status`` would try to switch to a model called "status" — and
+# ``/model status --global`` would PERSIST it to config.yaml.
+_MODEL_STATUS_ALIASES = frozenset({"status", "current", "show", "info"})
+
 
 def _model_switch_skew_guard() -> Optional[str]:
     """Refuse a model switch when the gateway is running stale code: a first-time lazy import on
@@ -513,6 +518,23 @@ class GatewayModelCommandsMixin:
             return await asyncio.to_thread(_detect)
         return ""
 
+    def _model_status_reply(self, ctx: "_ModelSwitchContext", session_key: str) -> str:
+        """Fork: ``/model status|current|show|info`` — report, never switch.
+
+        Flags are ignored by construction: this path returns text and touches nothing,
+        so ``--global`` cannot persist.
+        """
+        from hermes_cli.providers import get_label
+
+        lines = [t("gateway.model.current_label", model=ctx.current_model or t("gateway.shared.unknown_value"),
+                   provider=get_label(ctx.current_provider))]
+        if self._session_model_overrides.get(session_key):
+            lines.append(t("gateway.model.session_only_hint"))
+        lines.extend(["", t("gateway.model.usage_open_picker"), t("gateway.model.usage_switch_model"),
+                      t("gateway.model.usage_switch_provider"), t("gateway.model.usage_persist"),
+                      t("gateway.model.usage_reset")])
+        return "\n".join(lines)
+
     async def _model_listing_reply(
         self, event: MessageEvent, ctx: _ModelSwitchContext, profile_home
     ) -> Optional[str]:
@@ -661,6 +683,9 @@ class GatewayModelCommandsMixin:
         if _ch_model:
             ctx.apply_override({"model": _ch_model, **(_ch_route or ({"provider": _ch_forced} if _ch_forced else {}))})
         ctx.apply_override(self._session_model_overrides.get(session_key, {}))
+        # Fork: read-only status BEFORE any switch/persist path can run.
+        if str(request.target or "").strip().lower() in _MODEL_STATUS_ALIASES and not request.explicit_provider:
+            return self._model_status_reply(ctx, session_key)
         if not request.target and not request.explicit_provider:
             return await self._model_listing_reply(event, ctx, profile_home)
         result, error = await self._perform_model_switch(ctx, request.target, request.explicit_provider, source)

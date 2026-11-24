@@ -813,6 +813,10 @@ DEFAULT_CONFIG = {
             "elapsed_seconds": None,
             "rules": [],  # back-compat: first rule carrying an elapsed key wins
         },
+        # Fork: render the FULL terminal command in tool-progress bubbles while every other
+        # tool stays at its summary level (verbose would dump every tool's args).
+        # Per-platform override: display.platforms.<platform>.expand_terminal_commands
+        "expand_terminal_commands": False,
         "compact": False,
         "personality": "",
         "resume_display": "full",

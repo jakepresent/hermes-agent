@@ -3,9 +3,9 @@
     "prompt_tokens": {
       "context": 134,
       "stable": 1829,
-      "volatile": 1268
+      "volatile": 1344
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 10612,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -14,6 +14,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",
@@ -34,9 +35,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 1225,
-      "volatile": 1268
+      "volatile": 1344
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 10612,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -45,6 +46,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",
@@ -65,9 +67,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 1646,
-      "volatile": 1266
+      "volatile": 1343
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 10612,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -76,6 +78,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",
@@ -96,9 +99,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 2420,
-      "volatile": 1264
+      "volatile": 1340
     },
-    "tool_tokens": 9620,
+    "tool_tokens": 10768,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -107,6 +110,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",
@@ -127,9 +131,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 1225,
-      "volatile": 1268
+      "volatile": 1344
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 10612,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -138,6 +142,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",
@@ -158,9 +163,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 1211,
-      "volatile": 1268
+      "volatile": 1344
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 10612,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -169,6 +174,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",
@@ -189,9 +195,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 1495,
-      "volatile": 1269
+      "volatile": 1345
     },
-    "tool_tokens": 10120,
+    "tool_tokens": 11268,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -200,6 +206,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "react_to_message",
       "read_file",
@@ -221,9 +228,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 1244,
-      "volatile": 1269
+      "volatile": 1345
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 10612,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -232,6 +239,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",
@@ -252,9 +260,9 @@
     "prompt_tokens": {
       "context": 0,
       "stable": 1330,
-      "volatile": 1269
+      "volatile": 1345
     },
-    "tool_tokens": 9464,
+    "tool_tokens": 10612,
     "tools": [
       "browser_cdp",
       "browser_dialog",
@@ -263,6 +271,7 @@
       "delegate_task",
       "execute_code",
       "memory",
+      "memory_search",
       "patch",
       "read_file",
       "search_files",

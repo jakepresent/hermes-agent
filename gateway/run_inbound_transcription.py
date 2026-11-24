@@ -151,6 +151,39 @@ def transcript_note(transcript: str, path: str) -> str:
 class GatewayInboundTranscriptionMixin:
     """STT enrichment and the once-only echo of pending voice transcripts."""
 
+    async def _persist_voice_transcript(self, transcript: str, audio_path: str) -> None:
+        """Jake fork: append an inbound voice transcript to a daily markdown log
+        (``stt.persist_voice_transcripts``). Off by default. Never raises: a disk problem must not
+        cost the user their turn."""
+        if not getattr(self.config, "persist_voice_transcripts", False):
+            return
+        transcript = (transcript or "").strip()
+        if not transcript:
+            return
+        try:
+            from datetime import datetime
+            from pathlib import Path
+            from hermes_constants import get_hermes_home
+            configured = getattr(self.config, "voice_transcripts_dir", "") or ""
+            out_dir = (Path(configured).expanduser() if configured
+                       else get_hermes_home() / "memories" / "memory-media" / "transcripts")
+            now = datetime.now()
+            target = out_dir / f"{now:%Y-%m-%d}.md"
+            entry = (f"\n## {now:%Y-%m-%d %H:%M:%S}\n\n- Audio file: `{os.path.basename(audio_path or '')}`\n"
+                     f"- Transcript: {transcript}\n")
+
+            def _write() -> None:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                if not target.exists():
+                    target.write_text(f"# Voice transcripts - {now:%Y-%m-%d}\n", encoding="utf-8")
+                with target.open("a", encoding="utf-8") as fh:
+                    fh.write(entry)
+
+            await asyncio.to_thread(_write)
+            logger.info("Persisted voice transcript to %s", target)
+        except Exception as exc:
+            logger.warning("Failed to persist voice transcript: %s", exc)
+
     async def _enrich_message_with_transcription(
         self, user_text: str, audio_paths: list[str], clip_memo: Optional[dict] = None
     ) -> tuple[str, list[str]]:
@@ -181,7 +214,8 @@ class GatewayInboundTranscriptionMixin:
         successful_transcripts: list[str] = []
         for path in audio_paths:
             try:
-                if clip_memo is not None and path in clip_memo:
+                memo_hit = clip_memo is not None and path in clip_memo
+                if memo_hit:
                     transcript, note = clip_memo[path]
                 elif transcript := await asyncio.to_thread(_take_gate_transcript, path):
                     note = transcript_note(transcript, path)
@@ -195,6 +229,8 @@ class GatewayInboundTranscriptionMixin:
                     if clip_memo is not None:
                         clip_memo[path] = (transcript, note)
                 if transcript is not None:
+                    if not memo_hit:  # Jake fork: persist once per clip, not per memoized re-pass
+                        await self._persist_voice_transcript(transcript, path)
                     successful_transcripts.append(transcript)
                 enriched_parts.append(note)
             except Exception as e:

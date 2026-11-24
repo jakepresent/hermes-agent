@@ -18,12 +18,6 @@ from persistence.conversation.messages import ConversationRequest, NewMessage
 from persistence_assembly import open_persistence, profile_scope
 from tools.tool_result_storage import archive_compaction_drops, archive_pruned_originals, cleanup_spillover_cache
 
-# Fork (manifest §10b): proactive maintenance (warm, cold-cache and idle offload) retires only stale
-# tool images; text shortening happens only inside a validated full-conversation compaction. These
-# upstream tests exercise the text prune itself. Revisit if the L3 DECISION on cold-cache text prune lands.
-FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
-
-
 
 @pytest.fixture
 def home(tmp_path, monkeypatch):
@@ -60,7 +54,6 @@ def _archive_path(stub: str) -> Path:
     return Path(os.path.expanduser(stub.rsplit("full result: ", 1)[1]))
 
 
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_every_shortened_result_is_archived_byte_exact_and_named_by_its_stub(home):
     msgs = _transcript()
     pruned, count = _compressor().prune_tool_results_only(msgs, current_tokens=100_000)
@@ -76,7 +69,6 @@ def test_every_shortened_result_is_archived_byte_exact_and_named_by_its_stub(hom
         assert "_read_file_" in path.name
 
 
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_a_failed_archive_write_leaves_that_result_unpruned(home):
     msgs = _transcript()
     real = __import__("tools.tool_result_storage", fromlist=["x"])._write_to_spillover
@@ -100,7 +92,6 @@ def test_a_failed_archive_write_leaves_that_result_unpruned(home):
             assert _archive_path(stub["content"]).read_bytes() == original["content"].encode("utf-8")
 
 
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_the_running_turn_is_never_shortened(home):
     """Post-tool site in a long tool loop: everything from this turn's user row stays whole."""
     history = _transcript(6) + [{"role": "assistant", "content": "done"}]
@@ -127,7 +118,6 @@ def test_the_first_turn_is_never_shortened(home):
     assert (pruned, count) == (msgs, 0)
 
 
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_pruned_archive_follows_its_session(home):
     """Referenced archives survive the age sweep; deleting the session retires them."""
     from persistence.conversation.sessions import NewSession
@@ -159,7 +149,6 @@ def test_pruned_archive_follows_its_session(home):
         db.close()
 
 
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_read_file_pages_a_json_archive_by_the_text_it_wraps(home):
     """A JSON result is archived byte-exact (one long line); read_file must still reach every line of it,
     not cut it at the per-line cap."""

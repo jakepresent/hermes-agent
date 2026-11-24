@@ -13,11 +13,6 @@ from gateway.message_timestamps import (
 )
 from hermes_time import safe_strftime
 
-# Fork (manifest §10b): proactive maintenance retires only stale tool images; see the L3 DECISION on
-# cold-cache text prune. This upstream test exercises the text prune itself.
-FORK_TEXT_PRUNE_DISABLED = "fork §10b: proactive tool-result text pruning is disabled"
-
-
 
 BERLIN = ZoneInfo("Europe/Berlin")
 
@@ -289,7 +284,6 @@ def test_compactor_restatement_replays_unstamped_through_session_db(tmp_path):
         "content"] == render_user_content_with_timestamp(pasted, sent_at, tz=get_timezone())
 
 
-@pytest.mark.skip(reason=FORK_TEXT_PRUNE_DISABLED)
 def test_compaction_summary_stays_unstamped_across_real_prune(tmp_path):
     """A proactive prune re-persists the replayed view; the summary carrier must keep its flag through it."""
     from agent.context_compressor import ContextCompressor

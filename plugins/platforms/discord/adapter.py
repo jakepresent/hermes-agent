@@ -1361,8 +1361,10 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             self.MAX_SPLIT_MESSAGES = min(100, max(2, int(self.config.extra["max_split_messages"])))
         except (KeyError, TypeError, ValueError):
             pass
-        from utils.env import is_truthy_value
-        self._chunk_indicators = is_truthy_value(self.config.extra.get("chunk_indicators"), default=True)
+        # Parsed inline (same truthy set as utils.env) so the plugin adds no core import (boundary lint).
+        _indicators = self.config.extra.get("chunk_indicators")
+        self._chunk_indicators = True if _indicators is None else (
+            _indicators.strip().lower() in {"1", "true", "yes", "on"} if isinstance(_indicators, str) else bool(_indicators))
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
         # Bot's last message ID per channel: lets history backfill skip the full channel.history() scan.
         self._last_self_message_id: dict[str, str] = {}

@@ -8,6 +8,7 @@ single-element lists so mutation stays visible to the outer body.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any, Callable, List, Optional
 
 from agent.session_activity import AwakeIdleMeter
@@ -69,6 +70,9 @@ class TurnContext:
     persist_user_display_metadata: Optional[dict] = None
     user_config: Any = None
     mute_notification_reply: bool = False
+    # Fork: turn start, so a final delivered on the queued-follow-up path applies the same
+    # display.long_turn_mention elapsed gate as the normal completion path.
+    started_monotonic: float = field(default_factory=time.monotonic)
     voice_turn: bool = False  # a voice-note turn: runs on auxiliary.voice_chat
     enabled_toolsets: Any = None
     disabled_toolsets: Any = None

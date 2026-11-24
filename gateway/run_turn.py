@@ -262,6 +262,12 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             if _intentional_silence:
                 self._hmwa_pause_typing_after_silence(event, source)
             response = self._usage_window_chat_wording(agent_result, self._hmwa_prepend_reasoning(agent_result, response, source, _intentional_silence))
+            if not _intentional_silence:
+                # Fork: after a long turn the user has usually looked away — opt-in mention,
+                # time-gated by display.long_turn_mention.elapsed_seconds. Before the footer so
+                # the FooteredReply wrapper survives.
+                from gateway.long_turn_mention import final_response_mention
+                response = final_response_mention(response, source, _turn_seconds)
             _footer_line = self._hmwa_runtime_footer_line(agent_result, source, _turn_seconds)
             from gateway.runtime_footer import FooteredReply  # streamed: the footer goes out as a trailing send instead
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
@@ -1601,6 +1607,13 @@ class GatewayTurnMixin(GatewayBackgroundMixin, GatewayTurnPrepareMixin, GatewayT
             display_kind=turn_ctx.persist_user_display_kind, reply_expected=turn_ctx.reply_expected)
         # Failed turns deliver their text but never their attachments (completed-turn parity).
         _deliver_media = not _delivery_result.get("failed")
+        if first_response and not _already_streamed:
+            # Fork: this path delivers the final before a queued follow-up runs; apply the same
+            # long-turn mention as the normal completion path.
+            from gateway.long_turn_mention import final_response_mention
+            first_response = final_response_mention(
+                first_response, turn_ctx.source,
+                time.monotonic() - getattr(turn_ctx, "started_monotonic", time.monotonic()))
         if first_response:
             logger.info(
                 "Queued follow-up for session %s: final text delivery confirmed; delivering explicit media before continuing."

@@ -801,6 +801,18 @@ DEFAULT_CONFIG = {
     },
 
     "display": {
+        # Fork: opt-in Discord mention for long finals and blocking clarify
+        # prompts. Final responses mention only after `elapsed_seconds`;
+        # clarify prompts mention immediately (they block the run). Approval
+        # prompts are NOT handled here: upstream's `discord.approval_mentions`
+        # owns that path.
+        "long_turn_mention": {
+            "enabled": False,
+            "on_final": True,
+            "on_clarify": True,
+            "elapsed_seconds": None,
+            "rules": [],  # back-compat: first rule carrying an elapsed key wins
+        },
         "compact": False,
         "personality": "",
         "resume_display": "full",
@@ -1514,6 +1526,12 @@ DEFAULT_CONFIG = {
         # REST) as proof events still arrive. Any value 0 disables it.
         "websocket_liveness_interval_seconds": 15,
         "websocket_liveness_failure_threshold": 2,
+        # Fork: complementary REST probe. The websocket can stay healthy while the
+        # REST API is degraded or the token is revoked — connected but unable to
+        # act. Slower interval and higher threshold than the WS probe, since a REST
+        # blip is common and only a sustained failure means anything.
+        "rest_liveness_interval_seconds": 60,
+        "rest_liveness_failure_threshold": 3,
         "websocket_heartbeat_ack_max_age_seconds": 60,
         "websocket_max_latency_seconds": 30,
         # Dispatch-side dimension: a socket that ACKs heartbeats but delivers no events for this

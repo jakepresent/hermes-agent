@@ -62,6 +62,13 @@ def _image_ext_from_content_type(content_type: str) -> str:
     return "png"
 
 
+def _is_svg_attachment(att: Any) -> bool:
+    """Treat SVG uploads as readable documents, not native image payloads."""
+    content_type = str(getattr(att, "content_type", "") or "").split(";", 1)[0].strip().lower()
+    filename = str(getattr(att, "filename", "") or "")
+    return content_type == "image/svg+xml" or os.path.splitext(filename)[1].lower() == ".svg"
+
+
 def _format_discord_markdown_link(label: str, url: str) -> str:
     """Return a Discord Markdown link whose label is not itself a URL (URL-shaped labels can
     win as a broken link; the ``<url>`` angle brackets stop Discord unfurling an embed)."""
@@ -609,6 +616,19 @@ def check_discord_requirements() -> bool:
     DISCORD_AVAILABLE = True
     _define_discord_view_classes()
     return True
+
+
+_CLARIFY_MENTION_RE = re.compile(r"^<@!?\d+>$")
+
+
+def _clarify_metadata_mention(metadata: Optional[dict]) -> str:
+    """Fork (area 9): a safe requester mention from clarify send metadata, or ''.
+
+    Only a lone ``<@digits>`` / ``<@!digits>`` token is accepted, so @everyone,
+    roles, or arbitrary text in metadata can never become a ping."""
+    raw = (metadata or {}).get("mention_text") if isinstance(metadata, dict) else None
+    mention = str(raw or "").strip()
+    return mention if _CLARIFY_MENTION_RE.match(mention) else ""
 
 
 def _build_allowed_mentions(extra: Optional[dict] = None):
@@ -1182,6 +1202,32 @@ from plugins.platforms.discord.adapter_reactions import DiscordReactionsMixin
 from plugins.platforms.discord.adapter_vault_code import DiscordVaultCodeMixin, build_vault_code_view
 
 
+def _make_invisible_unicode_visible(text: str) -> str:
+    """Fork: render zero-width / bidi / invisible codepoints as \\uXXXX escapes.
+
+    A prompt is a security surface: an approval question or clarify choice
+    containing zero-width joiners, RTL overrides, or invisible separators can
+    read as something different from what it executes. Discord renders those as
+    nothing at all, so the user approves text they cannot actually see.
+    """
+    if not text:
+        return ""
+    out = []
+    for ch in str(text):
+        code = ord(ch)
+        invisible = (
+            code in (0x00AD, 0x061C, 0x180E, 0xFEFF)
+            or 0x200B <= code <= 0x200F
+            or 0x202A <= code <= 0x202E
+            or 0x2060 <= code <= 0x2064
+            or 0x2066 <= code <= 0x2069
+            or 0xFFF9 <= code <= 0xFFFB
+            or 0xE0000 <= code <= 0xE007F
+        )
+        out.append(f"\\u{code:04x}" if invisible else ch)
+    return "".join(out)
+
+
 class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuthorizationMixin, DiscordMediaMixin, DiscordThreadTitlesMixin, DiscordVoiceInfoMixin,
                      DiscordSlashAuthMixin, DiscordReactionsMixin, DiscordVaultCodeMixin, BasePlatformAdapter):
     """Discord bot adapter: guild/DM messages, threads, slash commands, button approvals, reactions."""
@@ -1282,6 +1328,18 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         )
         self._liveness_task: Optional[asyncio.Task] = None
         self._liveness_notification_task: Optional[asyncio.Task] = None
+        # Fork: complementary REST liveness probe. Upstream's WS probe samples the
+        # websocket, which stays "healthy" when Discord's REST API is degraded or
+        # the token is revoked — the gateway then sits connected but unable to act.
+        # Independent interval/threshold/task so neither probe can mask the other.
+        self._rest_liveness_interval_seconds = self._finite_positive_config_float(
+            "rest_liveness_interval_seconds", 60.0,
+        )
+        self._rest_liveness_failure_threshold = self._config_int(
+            "rest_liveness_failure_threshold", 3,
+        )
+        self._rest_liveness_task: Optional[asyncio.Task] = None
+        self._rest_liveness_notification_task: Optional[asyncio.Task] = None
         # True while disconnect() intentionally closes discord.py (done callback: shutdown vs crash).
         self._disconnecting = False
         # Last DISPATCH frame's monotonic stamp, ticked by ``on_socket_event_type`` (see its
@@ -1296,6 +1354,15 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         self._dedup = MessageDeduplicator()
         # Reply threading mode: "off", "first" (default; first chunk only), "all" (every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
+        # Fork: discord.max_split_messages sets this instance's per-reply message cap (past it the
+        # reply goes out as one .md file, #152012); clamped so a typo keeps a real flood guard.
+        # Unset or malformed keeps upstream's class cap. discord.chunk_indicators: false drops "(x/y)".
+        try:
+            self.MAX_SPLIT_MESSAGES = min(100, max(2, int(self.config.extra["max_split_messages"])))
+        except (KeyError, TypeError, ValueError):
+            pass
+        from utils.env import is_truthy_value
+        self._chunk_indicators = is_truthy_value(self.config.extra.get("chunk_indicators"), default=True)
         self._slash_commands: bool = self.config.extra.get("slash_commands", True)
         # Bot's last message ID per channel: lets history backfill skip the full channel.history() scan.
         self._last_self_message_id: dict[str, str] = {}
@@ -1569,6 +1636,7 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             # startup failure reported as ``fatal`` for the life of the process (#102554).
             self._mark_connected()
             self._start_liveness_probe()
+            self._start_rest_liveness_probe()
             # Plugin-registered native handlers (discord.py Bot — add_listener()/event hooks).
             self._wire_plugin_handlers(self._client)
             return True
@@ -2049,6 +2117,82 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         except Exception:
             logger.debug("[%s] Fatal-error handler raised", self.name, exc_info=True)
 
+    def _start_rest_liveness_probe(self) -> None:
+        """Fork: start the complementary periodic Discord REST health probe.
+
+        The websocket probe cannot detect REST-side failure (revoked token,
+        API outage, permission loss): the socket keeps receiving events while
+        every outbound action fails.
+        """
+        if (
+            self._rest_liveness_interval_seconds <= 0
+            or self._rest_liveness_failure_threshold <= 0
+        ):
+            return
+        if self._rest_liveness_task and not self._rest_liveness_task.done():
+            return
+        self._rest_liveness_task = asyncio.create_task(self._rest_liveness_loop())
+
+    async def _rest_liveness_loop(self) -> None:
+        """Fork: force a reconnect after repeated Discord REST failures."""
+        fails = 0
+        while self._running:
+            try:
+                await asyncio.sleep(self._rest_liveness_interval_seconds)
+            except asyncio.CancelledError:
+                return
+            client = self._client
+            if not self._running or client is None or self._disconnecting:
+                return
+            if hasattr(client, "is_closed") and client.is_closed():
+                return
+            user = getattr(client, "user", None)
+            if user is None:
+                continue
+            try:
+                await client.fetch_user(user.id)
+                fails = 0
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:
+                fails += 1
+                logger.warning(
+                    "[%s] Discord REST liveness probe failed (%d/%d): %s",
+                    self.name, fails, self._rest_liveness_failure_threshold, exc,
+                )
+                if fails < self._rest_liveness_failure_threshold:
+                    continue
+                self._disconnecting = True
+                self._set_fatal_error(
+                    "discord_rest_health_stale",
+                    f"Discord REST liveness probe failed {fails} times in a row",
+                    retryable=True,
+                )
+                self._rest_liveness_notification_task = asyncio.create_task(
+                    self._notify_liveness_fatal_error(client)
+                )
+                return
+
+    async def _cancel_rest_liveness_task(self) -> None:
+        """Fork: cancel and await the complementary REST liveness tasks."""
+        current = asyncio.current_task()
+        for task_name in ("_rest_liveness_task", "_rest_liveness_notification_task"):
+            task = getattr(self, task_name, None)
+            if task is None:
+                continue
+            if task is current:
+                setattr(self, task_name, None)
+                continue
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("[%s] REST liveness task shutdown failed", self.name, exc_info=True)
+            setattr(self, task_name, None)
+
     async def _cancel_liveness_task(self) -> None:
         """Cancel and await liveness tasks without awaiting the current task."""
         current = asyncio.current_task()
@@ -2116,6 +2260,7 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         self._disconnecting = True
         # Cancel the liveness probe first so it can't fire a spurious fatal/reconnect mid-teardown.
         await self._cancel_liveness_task()
+        await self._cancel_rest_liveness_task()
         # Leave voice *before* cancelling the bot task: VoiceClient.disconnect() needs the main
         # gateway WS (run by the bot task) or it blocks until the timeout.
         for guild_id in list(self._voice_clients.keys()):
@@ -4240,6 +4385,17 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             return content
         return convert_table_to_bullets(content)
 
+    def truncate_message(self, content: str, max_length: int = 4096,
+                         len_fn: Optional[Callable[[str], int]] = None) -> list[str]:
+        """Fork: upstream's split, minus the shared ``(x/y)`` suffixes when
+        ``discord.chunk_indicators`` is false. Every Discord split path (send, forum,
+        stream preview, edit overflow, reply-count) goes through here."""
+        chunks = BasePlatformAdapter.truncate_message(content, max_length, len_fn)
+        if getattr(self, "_chunk_indicators", True) or len(chunks) <= 1:
+            return chunks
+        total = len(chunks)
+        return [chunk.removesuffix(f" ({index}/{total})") for index, chunk in enumerate(chunks, start=1)]
+
     async def _defer_unless_expired(self, interaction: discord.Interaction, warn_fmt: str, *warn_args) -> bool:
         """Ephemeral defer(); False (after a warning) when the interaction token already expired
         so the caller still runs the command but skips followups. Other errors propagate."""
@@ -5355,7 +5511,8 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             return None
 
     def _self_contained_prompt_content(
-        self, header: str, body: str, *, code_block: bool = False, tail: str = ""
+        self, header: str, body: str, *, code_block: bool = False, tail: str = "",
+        reserve: int = 0,
     ) -> str:
         """Plain content mirroring an embed's payload.
         Embeds can be invisible/detached on web/mobile, so ``content`` carries the payload."""
@@ -5367,10 +5524,47 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             prefix = f"{header}\n\n"
             suffix = tail
         truncated_suffix = "\n" + t("platform.discord.prompt.truncated_marker")
-        budget = max(0, self.MAX_MESSAGE_LENGTH - len(prefix) - len(suffix))
+        budget = max(0, self.MAX_MESSAGE_LENGTH - reserve - len(prefix) - len(suffix))
         if len(body) > budget:
             body = body[: max(0, budget - len(truncated_suffix))] + truncated_suffix
         return f"{prefix}{body}{suffix}"
+
+    def _clarify_prompt_content(
+        self, question: str, choices: list, hint: str, *, reserve: int = 0,
+    ) -> str:
+        """Fork: plain-content clarify payload carrying the NUMBERED choices.
+
+        Buttons and embeds can both fail to render (mobile web, accessibility
+        clients, notification previews), so content must stand alone. Upstream
+        numbers the choices only when one is too long for a button label.
+
+        Choices are dropped from the TAIL when the message would exceed
+        ``MAX_MESSAGE_LENGTH`` — the tail is not budgeted by
+        ``_self_contained_prompt_content`` (which only truncates the body), so an
+        unbounded choice list would push the whole send over Discord's limit and
+        fail outright. Losing later choices from the text copy is recoverable:
+        the buttons still carry them.
+        """
+        header = f"❓ **{t('platform.discord.prompt.clarify_title')}**"
+        safe_question = _make_invisible_unicode_visible(question)
+        rendered = [_make_invisible_unicode_visible(c) for c in (choices or [])]
+
+        def _tail(items: list) -> str:
+            lines = [""]
+            if items:
+                # Same "N. choice" shape as upstream's numbered_clarify_choices.
+                lines.extend(f"{i}. {c}" for i, c in enumerate(items, start=1))
+                lines.append("")
+            lines.append(hint)
+            return "\n" + "\n".join(lines)
+
+        kept = list(rendered)
+        while True:
+            content = self._self_contained_prompt_content(
+                header, safe_question, tail=_tail(kept), reserve=reserve)
+            if utf16_len(content) <= self.MAX_MESSAGE_LENGTH - reserve or not kept:
+                return content
+            kept.pop()
 
     def _approval_mention_content(self) -> Optional[str]:
         """User mentions for approval prompts, gated on ``discord.approval_mentions``
@@ -5539,6 +5733,7 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
                 title=_truncate_discord_component_text(f"❓ {clarify_title}", _DISCORD_EMBED_TITLE_LIMIT), color=discord.Color.orange())
             # 5 buttons × 5 rows = 25; one slot is reserved for "Other".
             clean_choices = [s for s in (_flatten_choice(c) for c in (choices or [])) if s][:24]
+            numbered = None
             if clean_choices:
                 hint = t("platform.discord.prompt.clarify_hint_buttons")
                 # Button labels clip past ~40 columns on mobile with no tooltip (#78115): when
@@ -5546,7 +5741,8 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
                 # Capped at half the 2000-char content so the question keeps the rest; every
                 # option keeps its line (shortened) so each button still has one to match.
                 numbered = numbered_clarify_choices(clean_choices, max_label_cols=40, max_chars=1000,
-                                                    escape=lambda s: re.sub(r"([\\*_~`|<>\[\]])", r"\\\1", s))
+                                                    escape=lambda s: re.sub(r"([\\*_~`|<>\[\]])", r"\\\1",
+                                                                            _make_invisible_unicode_visible(s)))
                 if numbered:
                     hint = f"{numbered}\n\n{hint}"
                 view = ClarifyChoiceView(
@@ -5557,10 +5753,31 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
             else:
                 hint = t("platform.discord.prompt.clarify_hint_text")
                 view = None
-            content = self._self_contained_prompt_content(
-                f"❓ **{clarify_title}**", str(question or "").strip(), tail=f"\n\n{hint}",
+            # Fork: the plain-content copy carries the NUMBERED CHOICES, not just
+            # the hint. Buttons and embeds can both fail to render (mobile web,
+            # accessibility clients, notification previews); without the choices in
+            # content the user sees a question with no options. Upstream numbers them
+            # only when a label is too long for a button; then the hint already
+            # carries the list and the fork adds none. Invisible codepoints are
+            # escaped so a prompt can't hide part of itself.
+            # Fork (area 9): the gateway resolves the requester's mention for blocking
+            # clarify prompts into metadata["mention_text"]; prepend it to the SAME
+            # content-first message so the ping carries the question. Only a bare numeric
+            # user mention is accepted, its length is reserved before truncation, and
+            # allowed_mentions is pinned to users only.
+            mention = _clarify_metadata_mention(metadata)
+            reserve = (utf16_len(mention) + 1) if mention else 0
+            content = self._clarify_prompt_content(
+                str(question or "").strip(), [] if numbered else clean_choices, hint, reserve=reserve,
             )
             send_kwargs = {"content": content, "embed": embed}
+            if mention:
+                send_kwargs["content"] = f"{mention}\n{content}"
+                allowed_mentions_cls = getattr(discord, "AllowedMentions", None)
+                if allowed_mentions_cls is not None:
+                    send_kwargs["allowed_mentions"] = allowed_mentions_cls(
+                        users=True, roles=False, everyone=False, replied_user=False,
+                    )
             if view:
                 send_kwargs["view"] = view
             return send_kwargs, view
@@ -5768,7 +5985,7 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         pending_text_injection: Optional[str] = None
         for att in all_attachments:
             content_type = att.content_type or "unknown"
-            if content_type.startswith("image/"):
+            if content_type.startswith("image/") and not _is_svg_attachment(att):
                 media_urls.append(await self._cache_simple_media(
                     att, content_type, "image", {".jpg", ".jpeg", ".png", ".gif", ".webp"}, ".jpg"))
                 media_types.append(content_type)
@@ -5837,7 +6054,7 @@ class DiscordAdapter(DiscordLiveGatesMixin, DiscordCommandSyncMixin, DiscordAuth
         """MessageType from the first attachment's MIME. Any non-media (or untyped) attachment
         is a DOCUMENT regardless of extension — authorization is the gate, not the file type."""
         content_type = att.content_type or ""
-        if content_type.startswith("image/"):
+        if content_type.startswith("image/") and not _is_svg_attachment(att):
             return MessageType.PHOTO
         if content_type.startswith("video/"):
             return MessageType.VIDEO

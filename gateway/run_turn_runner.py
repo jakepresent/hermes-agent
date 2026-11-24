@@ -719,6 +719,11 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             chat_id=ctx._status_chat_id, question=question, choices=choices, clarify_id=clarify_id,
             session_key=session_key, metadata=ctx._status_thread_metadata,
         )
+        # Fork: a clarify prompt BLOCKS the run, so mention the requester immediately when
+        # display.long_turn_mention is on. Card and text fallback share send_kwargs.
+        from gateway.long_turn_mention import clarify_metadata
+        send_kwargs["metadata"] = clarify_metadata(
+            send_kwargs["metadata"], getattr(ctx, "source", None), getattr(ctx, "user_config", None))
 
         def _text_fallback():
             """Schedule the plain-text prompt when the native card cannot render; None = no such path."""

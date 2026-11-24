@@ -17,7 +17,7 @@ from acp.schema import (
 from hermes_cli.gateway_client import GatewayClientError, connect_gateway
 from hermes_constants import get_hermes_home
 from acp_adapter.gateway_reply import GatewayReplyMixin, _text
-from acp_adapter.session import _translate_acp_cwd, _normalize_cwd_for_compare
+from acp_adapter.session import _normalize_cwd_for_compare, _tool_cwd_for_this_host
 
 logger = logging.getLogger(__name__)
 
@@ -281,7 +281,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
         if flags.get("safe_mode") or flags.get("ignore_user_config"):
             flags.update(_bypass_route())
         snapshot = await client.rpc("session.create", request_id=uuid.uuid4().hex,
-            source="acp", cwd=_translate_acp_cwd(cwd),
+            source="acp", cwd=_tool_cwd_for_this_host(cwd),  # fork: remote-host cwd falls back to ~
             editor={"mcp_servers": [s.model_dump(by_alias=True) for s in mcp_servers or []],
                     "edit_approval_policy": "ask"}, **flags)
         session_id = snapshot["session_id"]
@@ -396,12 +396,12 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
 
     @staticmethod
     def _moved(info, cwd):
-        return "cwd" in info and _normalize_cwd_for_compare(info["cwd"]) != _normalize_cwd_for_compare(_translate_acp_cwd(cwd))
+        return "cwd" in info and _normalize_cwd_for_compare(info["cwd"]) != _normalize_cwd_for_compare(_tool_cwd_for_this_host(cwd))
 
     async def _move_workspace(self, client, session_id, cwd):
         """Main rebound a session opened from another folder to that folder; the owner's ``workspace``
         mutation (Move to project) moves execution cwd and TERMINAL_CWD together, idle sessions only."""
-        payload = {'cwd': _translate_acp_cwd(cwd)}
+        payload = {'cwd': _tool_cwd_for_this_host(cwd)}
         self._unacked.pop(session_id, None)
         await self._mutations.apply(client, session_id, 'workspace', payload)
         self._mutations.acknowledge(session_id, 'workspace', payload)
@@ -587,7 +587,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
         as main did. The reply is the full list, read back from the owner."""
         from acp.schema import SetSessionConfigOptionResponse
         from acp_adapter.gateway_session_meta import (
-            REASONING_CONFIG_ID, SERVICE_TIER_CONFIG_ID, SERVICE_TIER_LABELS, current_mode, model_state,
+            REASONING_CONFIG_IDS, SERVICE_TIER_CONFIG_ID, SERVICE_TIER_LABELS, current_mode, model_state,
             reasoning_choices, session_config_options,
         )
         from acp_adapter.modes import EDIT_APPROVAL_POLICY_CONFIG_ID, EDIT_APPROVAL_POLICY_TO_MODE
@@ -600,7 +600,7 @@ class GatewayACPAgent(GatewayReplyMixin, acp.Agent):
             if not isinstance(value, str):
                 raise GatewayClientError("invalid_params")
             await self.set_session_model(model_id=value, session_id=editor_id)
-        elif config_id == REASONING_CONFIG_ID:
+        elif config_id in REASONING_CONFIG_IDS:
             if value not in reasoning_choices():
                 raise GatewayClientError("invalid_params")
             await self._idle_control(session_id, "reasoning", {"effort": None if value == "default" else value},

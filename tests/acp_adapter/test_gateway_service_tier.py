@@ -79,7 +79,7 @@ async def test_older_owner_keeps_existing_pickers_without_a_service_tier_read():
     owner.rpc.side_effect = GatewayRPCError('invalid_params')
     info = {'model': 'gpt-6.1-sol', 'reasoning_effort': 'high'}
     options = await session_config_options(owner, 'session', None, info, 'default')
-    assert {option.id for option in options} == {'edit_approval_policy', 'reasoning_effort'}
+    assert {option.id for option in options} == {'edit_approval_policy', 'thought_level'}  # fork: Aside id
     owner.rpc.side_effect = GatewayRPCError('permission_denied')
     with pytest.raises(GatewayRPCError, match='permission_denied'):
         await session_config_options(owner, 'session', None, info, 'default')

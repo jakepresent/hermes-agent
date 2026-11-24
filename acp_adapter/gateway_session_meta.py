@@ -68,7 +68,11 @@ def session_modes(info: dict | None = None) -> SessionModeState:
         SessionMode(id=mode, name=name, description=description) for mode, (_p, name, description) in MODES.items()])
 
 
-REASONING_CONFIG_ID = "reasoning_effort"
+# Fork: the effort picker's id is ACP's standard ``thought_level`` (upstream: ``reasoning_effort``).
+# Aside's client sets ``thought_level`` by id and skips ids the agent does not advertise; the
+# upstream id stays accepted on writes so editors that saved it keep working.
+REASONING_CONFIG_ID = "thought_level"
+REASONING_CONFIG_IDS = (REASONING_CONFIG_ID, "reasoning_effort")
 SERVICE_TIER_CONFIG_ID = "service_tier"
 SERVICE_TIER_LABELS = {"normal": "Normal", "fast": "Fast", "auto": "Auto", "cold": "Cold", "ultrafast": "Ultrafast"}
 

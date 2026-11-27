@@ -58,6 +58,9 @@ class _Batch:
     # The delegation.auto_resume scheduler's continue: refused instead of run inline when it cannot detach (its
     # caller is not a turn, so a joined result would never reach the parent).
     detached_only: bool = False
+    # Fork: set on a detached unit that waited behind a full pool. A child stopped while it waited (/stop, /new or
+    # shutdown reach it through the registry) is released unrun when its slot comes, instead of started to unwind.
+    skip_stopped_before_start: bool = False
 
     def owner_kwargs(self) -> dict[str, Any]:
         """Steer/stop authority of the originating session, passed to every child run."""
@@ -68,6 +71,11 @@ class _Batch:
 
     def run_child(self, i: int, task: dict[str, Any], child: Any) -> dict[str, Any]:
         from tools.delegate_tool import _run_single_child
+        if self.skip_stopped_before_start:
+            from tools.delegate_tool_prefix_gate import _stop_requested
+            if _stop_requested(child):
+                _release_unstarted_child(self, child)
+                return _fabricated_entry(i, "interrupted", "Stopped before it started; nothing ran", child)
         return _run_single_child(task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
 
 
@@ -278,18 +286,17 @@ _SYNC_FALLBACK_NOTES = {
         "finite chat using -Q, --oneshot, or non-TTY stdio, `hermes -z`, a /bg background task, a cron "
         "job, a Kanban worker, or a stateless HTTP endpoint). The subagent(s) ran SYNCHRONOUSLY and the result is included above."
     ),
-    "at_capacity": (
-        "The background delegation pool was at capacity (delegation.max_concurrent_children), so the subagent(s) ran "
-        "SYNCHRONOUSLY and the result is included above. Raise "
-        "delegation.max_concurrent_children in config.yaml to allow more concurrent background delegations."
+    "not_accepted": (
+        "The background delegation pool did not accept this call ({error}), so the subagent(s) ran SYNCHRONOUSLY and "
+        "the result is included above."
     ),
 }
 
-def _run_sync_with_note(batch: _Batch, reason: str) -> str:
+def _run_sync_with_note(batch: _Batch, reason: str, **details: str) -> str:
     """Inline fallback: run the batch now and explain why it was not detached."""
     result = _execute_and_aggregate(batch)
     if isinstance(result, dict):
-        result["note"] = _SYNC_FALLBACK_NOTES[reason]
+        result["note"] = _SYNC_FALLBACK_NOTES[reason].format(**details)
     return json.dumps(result, ensure_ascii=False)
 
 def _resolve_async_wake_sid(
@@ -399,16 +406,27 @@ _BACKGROUND_NOTES = {
         "Each subagent streams a human-readable transcript of its operations to the file listed above (append-only, "
         "one per task). Read or `tail -f` these paths at any time to watch a child work while it runs."
     ),
+    # Fork: a full pool queues the call instead of running it inline (which held the parent's turn for the
+    # child's whole run, so the user could not talk to the parent).
+    "queued": (
+        "The background pool is full, so {what} QUEUED: it starts automatically when a running subagent finishes, and "
+        "its result re-enters the conversation as a new message like any other. There is nothing to retry or wait for: "
+        "tell the user it is queued, do anything that does not depend on it, then END YOUR TURN."
+    ),
 }
 
-def _dispatched_payload(batch: _Batch, units: list[tuple[_Batch, str]]) -> dict:
+def _dispatched_payload(batch: _Batch, units: list[tuple[_Batch, str]], queued: bool = False) -> dict:
     """Model-facing handle for an accepted background call: one entry per async unit."""
     goals = [t["goal"] for t in batch.task_list]
     n = len(batch.children)  # running children; refused tasks are listed under "refused"
+    if queued:
+        note = _BACKGROUND_NOTES["queued"].format(what="this subagent is" if n == 1 else f"this call's {n} subagents are")
+    else:
+        note = _BACKGROUND_NOTES["one"] if n == 1 else _BACKGROUND_NOTES["many"].format(n=n, k=len(units))
     payload = {
         "status": "dispatched", "mode": "background", "count": n,
         "delegation_id": batch.live_deleg_id or units[0][1], "goals": goals,
-        "note": _BACKGROUND_NOTES["one"] if n == 1 else _BACKGROUND_NOTES["many"].format(n=n, k=len(units)),
+        **({"queued": True} if queued else {}), "note": note,
     }
     if len(units) > 1:
         payload["units"] = [
@@ -452,6 +470,11 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         for c in child_agents:
             _signal_child_stop(c, "Async delegation cancelled")
 
+    def _run_detached():
+        from tools.async_delegation import was_queued
+        unit.skip_stopped_before_start = was_queued(unit.unit_id)  # see the field
+        return _execute_and_aggregate(unit, honor_parent_interrupt=False)
+
     return dispatch_async_delegation_batch(
         # Call-wide goals: completion formatting indexes them by task_index.
         goals=[t["goal"] for t in unit.task_list], context=unit.context,
@@ -459,14 +482,17 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         # creds["model"] is None when delegation.model is blank (children inherit): report what the child runs on.
         role=unit.top_role, model=unit.creds["model"] or next(
             (getattr(c, "model", None) for c in child_agents if getattr(c, "model", None)), None),
-        runner=lambda: _execute_and_aggregate(unit, honor_parent_interrupt=False),
+        runner=_run_detached,
         interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
         task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,
         # Persist locators before starting workers; live_paths omits failed writers and can be compressed.
         task_transcripts={str(i): str(unit.live_writers[i].path) for i, _, _ in unit.children
                           if i < len(unit.live_writers) and unit.live_writers[i] is not None
                           and unit.live_writers[i].path is not None},
-        progress_fn=lambda: _batch_progress_token(child_agents), **routing,
+        progress_fn=lambda: _batch_progress_token(child_agents),
+        # Fork: a full pool queues the call rather than rejecting it into an inline run that holds the parent's
+        # turn. The auto-resume scheduler keeps its refusal (it retries on its own tick).
+        queue_when_full=not unit.detached_only, **routing,
     )
 
 def _restore_parent_cancellation(unit: _Batch) -> None:
@@ -477,9 +503,10 @@ def _restore_parent_cancellation(unit: _Batch) -> None:
 
 def _dispatch_background(batch: _Batch) -> str:
     """Dispatch the call as independent async units (see ``_units_of``) and return the tool result JSON. Every unit
-    of one call shares ONE pool slot (``slot_key``), so grouping never changes capacity accounting. Falls back to
-    running synchronously (with an explanatory ``note``) when the session cannot receive detached completions or the
-    async pool is at capacity."""
+    of one call shares ONE pool slot (``slot_key``), so grouping never changes capacity accounting. A full pool
+    QUEUES the call (it starts when a slot frees); a full queue refuses it with nothing run. Falls back to running
+    synchronously (with an explanatory ``note``) only when the session cannot receive detached completions or the
+    registry did not accept the call for another reason (a scheduler failure)."""
     wake_sid = _resolve_async_wake_sid(
         batch.origin_wake_sid, batch.origin_session_history_delivery,
         oneshot_session=getattr(batch.parent_agent, "_oneshot_session", None) is True,  # agent_is_oneshot's pin
@@ -499,6 +526,7 @@ def _dispatch_background(batch: _Batch) -> str:
     dispatched: list[tuple[_Batch, str]] = []
     inline_results: list[dict] = []
     slot_key: Optional[str] = None
+    queued = False
     for k, unit in enumerate(units):
         # One unit keeps the live-transcript directory's id so the returned delegation_id matches
         # cache/delegation/live/<id>/; several units suffix it (-1, -2, ...) and the call keeps the bare id.
@@ -514,31 +542,41 @@ def _dispatch_background(batch: _Batch) -> str:
         if dispatch.get("status") == "dispatched":
             slot_key = slot_key or dispatch["delegation_id"]
             dispatched.append((unit, dispatch["delegation_id"]))
+            queued = queued or bool(dispatch.get("queued"))
             continue
         _restore_parent_cancellation(unit)
         if not dispatched and batch.detached_only:
             return _refuse_detached_only(batch, f"the background pool is at capacity ({dispatch.get('error', 'rejected')})")
+        if not dispatched and dispatch.get("reason") == "queue_full":
+            logger.info("delegate_task: background pool and queue are full (%s); refusing the call.", dispatch.get("error"))
+            return _refuse_unstarted(batch, (
+                f"Not started: {dispatch.get('error')} Nothing ran. Tell the user, and dispatch it again after a "
+                "running subagent's result re-enters the conversation; do not retry it in this turn."))
         if not dispatched:
             logger.info(
-                "delegate_task: async pool at capacity (%s); running the whole batch synchronously instead.",
+                "delegate_task: background dispatch not accepted (%s); running the whole batch synchronously instead.",
                 dispatch.get("error", "rejected"),
             )
-            return _run_sync_with_note(batch, "at_capacity")
+            return _run_sync_with_note(batch, "not_accepted", error=dispatch.get("error", "rejected"))
         # Later units of an admitted call share its slot and cannot be capacity-rejected; a scheduler failure runs
         # the unit inline so no task is silently dropped.
         logger.warning("delegate_task: unit %d/%d not accepted (%s); running it inline.", k + 1, len(units), dispatch.get("error"))
         inline_results.extend(_execute_and_aggregate(unit)["results"])
-    payload = _dispatched_payload(batch, dispatched)
+    payload = _dispatched_payload(batch, dispatched, queued=queued)
     if inline_results:
         payload["inline_results"] = inline_results
     return json.dumps(payload, ensure_ascii=False)
 
-def _refuse_detached_only(batch: _Batch, why: str) -> str:
-    """A detached-only batch that cannot detach: nothing ran, its children are released."""
+def _refuse_unstarted(batch: _Batch, message: str) -> str:
+    """A batch that could not be admitted and must not run inline: nothing ran, its children are released."""
     from tools.registry import tool_error
     for _, _, child in batch.children:
         _release_unstarted_child(batch, child)
-    return tool_error(f"Not continued: {why}.")
+    return tool_error(message)
+
+def _refuse_detached_only(batch: _Batch, why: str) -> str:
+    """A detached-only batch that cannot detach: nothing ran, its children are released."""
+    return _refuse_unstarted(batch, f"Not continued: {why}.")
 
 
 def _run_batch(batch: _Batch, background: bool) -> str:

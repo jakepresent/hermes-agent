@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import collections
 import contextvars
+import itertools
 import logging
 import os
 import threading
@@ -41,6 +42,12 @@ _executor_lock = threading.Lock()
 _executor_max_workers: int = 0
 
 _records_lock = threading.Lock()
+# Fork: units admitted with ``queue_when_full`` wait here for a pool slot instead of being rejected. Shares the
+# records lock so a waiter's slot check and its claim are one atomic step; notified when a slot frees or a stop lands.
+_slot_cv = threading.Condition(_records_lock)
+_queue_order = itertools.count()
+# Safety net only: every slot release and queued stop notifies the condition.
+_QUEUE_POLL_S = 5.0
 # delegation_id -> record dict; kept for the run plus a short completed tail.
 _records: dict[str, dict[str, Any]] = {}
 # A closed session's token -> the (field, value) selectors a new dispatch is refused for (``refuse_for_session``),
@@ -802,6 +809,62 @@ def _dispatch(**kwargs) -> dict[str, Any]:
         return _dispatch_admitted(**kwargs)
 
 
+def _slot_of(record: dict[str, Any]) -> str:
+    return record.get("slot_key") or record["delegation_id"]
+
+
+def _slot_occupancy_locked() -> tuple[set, list]:
+    """``(started slots, waiting slots in queue order)`` over live units. Caller holds ``_records_lock``. A queued
+    unit whose stop already landed holds no place in the queue: it only settles."""
+    started: set = set()
+    waiting: dict[str, int] = {}
+    for record in _records.values():
+        if record.get("status") not in _ACTIVE_STATES:
+            continue
+        slot = _slot_of(record)
+        if not record.get("_queued"):
+            started.add(slot)
+        elif not record.get("_stop_requested"):
+            waiting[slot] = min(record.get("_queue_seq", 0), waiting.get(slot, record.get("_queue_seq", 0)))
+    return started, [slot for slot, _ in sorted(waiting.items(), key=lambda kv: kv[1]) if slot not in started]
+
+
+def _may_start_locked(record: dict[str, Any]) -> bool:
+    """A queued unit starts when its call's slot is already running, or when it is among the first queued slots
+    that fit in the free capacity (first come, first served). A stopped one proceeds at once to settle."""
+    if record.get("_stop_requested"):
+        return True
+    started, waiting = _slot_occupancy_locked()
+    slot = _slot_of(record)
+    if slot in started:
+        return True
+    free = record.get("_max_async_children", _DEFAULT_MAX_ASYNC_CHILDREN) - len(started)
+    return slot in waiting[:max(free, 0)]
+
+
+def _await_slot(delegation_id: str) -> None:
+    """Block a queued unit's worker until it may start (or was stopped). Returns at once for an unqueued unit."""
+    with _slot_cv:
+        while True:
+            record = _records.get(delegation_id)
+            if record is None or not record.get("_queued") or record.get("status") not in _ACTIVE_STATES:
+                return
+            if _may_start_locked(record):
+                if not record.get("_stop_requested"):
+                    record["_queued"] = False  # it now occupies its slot
+                    logger.info("Queued async delegation %s got a pool slot; starting", delegation_id)
+                _slot_cv.notify_all()  # a sibling unit of the same call may start with it
+                return
+            _slot_cv.wait(_QUEUE_POLL_S)
+
+
+def was_queued(delegation_id: Optional[str]) -> bool:
+    """Whether this unit was admitted behind a full pool (``queue_when_full``), so its runner can release children
+    stopped while it waited instead of starting them. Set before its worker is submitted."""
+    with _records_lock:
+        return bool((_records.get(delegation_id or "") or {}).get("_was_queued"))
+
+
 def _dispatch_admitted(
     *, delegation_id: str, goal: str, goals: Optional[list[str]], context: Optional[str],
     toolsets: Optional[list[str]], role: str, model: Optional[str], session_key: str,
@@ -809,12 +872,15 @@ def _dispatch_admitted(
     origin_session_id: str, interrupt_fn: Optional[Callable[[], None]], max_async_children: int,
     progress_fn: Optional[Callable[[], tuple]], capacity_error: str, slot_key: Optional[str] = None,
     task_indexes: Optional[list[int]] = None,
-    task_transcripts: Optional[dict[str, str]] = None,
+    task_transcripts: Optional[dict[str, str]] = None, queue_when_full: bool = False,
 ) -> dict[str, Any]:
     """Shared dispatch core for single (``goals is None``) and batch units. Capacity check +
     record insert happen under ONE lock hold so concurrent dispatches can't both pass the check
-    and exceed the cap. At capacity the dispatch is REJECTED (never queued) so a runaway model
-    can't pile up unbounded background work. ``slot_key`` names the pool slot the unit occupies
+    and exceed the cap. At capacity the dispatch is REJECTED so a runaway model can't pile up
+    unbounded background work — unless ``queue_when_full`` (fork: model delegations), which admits
+    the unit as QUEUED behind at most one more pool's worth of waiting units; its worker starts it
+    when a slot frees (first come, first served), so a full pool never makes the caller run the work
+    inline. ``slot_key`` names the pool slot the unit occupies
     (default: its own id); the units of one delegate_task call share the first unit's id so
     splitting a call into per-group completions never consumes more capacity than the call did."""
     worker_ledger()  # refuse unbound workers before publishing a live record
@@ -844,11 +910,28 @@ def _dispatch_admitted(
     with _records_lock:
         if any((field, record[field]) in _refused_by for field in _FENCED_FIELDS):
             return {"status": "rejected", "error": "This session was closed (exit or /new): no new background work."}
-        active_slots = {r.get("slot_key") or r["delegation_id"] for r in _records.values() if r.get("status") in _ACTIVE_STATES}
-        if record["slot_key"] not in active_slots and len(active_slots) >= max_async_children:
-            return {"status": "rejected", "error": capacity_error}
+        started, waiting = _slot_occupancy_locked()
+        slot, queued = record["slot_key"], False
+        if slot in started:
+            pass  # another unit of the same call already holds this slot
+        elif slot in waiting:
+            queued = True  # another unit of the same call is queued: start together
+        elif len(started) + len(waiting) >= max_async_children:
+            if not queue_when_full:
+                return {"status": "rejected", "error": capacity_error, "reason": "capacity"}
+            if len(waiting) >= max_async_children:
+                return {"status": "rejected", "reason": "queue_full", "error": (
+                    f"Background delegation pool and its queue are both full ({len(started)} running, "
+                    f"{len(waiting)} queued; delegation.max_concurrent_children={max_async_children}).")}
+            queued = True
+        if queued:
+            record.update(_queued=True, _was_queued=True, _queue_seq=next(_queue_order),
+                          _max_async_children=max_async_children)
         _records[delegation_id] = record
         live_units = sum(1 for r in _records.values() if r.get("status") in _LIVE_STATES)
+    if queued:
+        logger.info("Queued async delegation%s %s behind a full pool (%d running, %d already queued)",
+                    label, delegation_id, len(started), len(waiting))
     _persist_dispatch(record)
     # Units of one call share a slot, so live units can exceed slots: size the pool by units or a
     # unit queues behind a full pool and the stale monitor kills it before its child ever starts.
@@ -862,12 +945,13 @@ def _dispatch_admitted(
     def _worker() -> None:
         result: dict[str, Any] = {}
         status = "error"
-        with _records_lock:
-            rec = _records.get(delegation_id)
-            if rec is not None:
-                # The stall clock starts when the runner starts; a unit queued behind a full pool is not stalled.
-                rec.update(_started=True, _progress_ts=time.time())
         try:
+            _await_slot(delegation_id)  # a queued unit waits here for a free pool slot (or its stop)
+            with _records_lock:
+                rec = _records.get(delegation_id)
+                if rec is not None:
+                    # The stall clock starts when the runner starts; a unit queued behind a full pool is not stalled.
+                    rec.update(_started=True, _progress_ts=time.time())
             result = run_with_notify_lease(lease, runner) or {}
             status = classify(result)
         except Exception as exc:
@@ -898,6 +982,7 @@ def _dispatch_admitted(
         lease.release()
         with _records_lock:
             _records.pop(delegation_id, None)
+            _slot_cv.notify_all()  # its slot (or queue place) is free again
         if remote := worker_ledger():
             remote.unscheduled(delegation_id)
         else:
@@ -906,7 +991,7 @@ def _dispatch_admitted(
         return {"status": "rejected", "error": f"Failed to schedule async delegation{label}: {exc}"}
     if progress_fn is not None:
         _ensure_stale_monitor()
-    return {"status": "dispatched", "delegation_id": delegation_id}
+    return {"status": "dispatched", "delegation_id": delegation_id, **({"queued": True} if queued else {})}
 
 
 def dispatch_async_delegation(
@@ -944,13 +1029,13 @@ def dispatch_async_delegation_batch(
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN, delegation_id: Optional[str] = None,
     progress_fn: Optional[Callable[[], tuple]] = None, slot_key: Optional[str] = None,
     task_indexes: Optional[list[int]] = None,
-    task_transcripts: Optional[dict[str, str]] = None,
+    task_transcripts: Optional[dict[str, str]] = None, queue_when_full: bool = False,
 ) -> dict[str, Any]:
     """Dispatch a fan-out unit (a whole batch, or one ``group`` of a delegate_task call) as ONE
     background unit: ``runner`` runs its tasks and returns the combined ``{"results": [...],
     "total_duration_seconds": N}`` dict. The unit occupies ONE async slot — or joins the slot named
     by ``slot_key`` (in-unit parallelism is bounded separately) — and produces a SINGLE completion
-    event carrying per-task ``results``."""
+    event carrying per-task ``results``. ``queue_when_full``: see ``_dispatch_admitted``."""
     delegation_id = delegation_id or _new_delegation_id()
     # ``goals`` is the whole call (result task_index indexes it); the unit's own goals label the record.
     unit_goals = [goals[i] for i in task_indexes] if task_indexes is not None else list(goals)
@@ -962,14 +1047,14 @@ def dispatch_async_delegation_batch(
         parent_session_id=parent_session_id, runner=runner,
         origin_ui_session_id=origin_ui_session_id, origin_session_id=origin_session_id,
         interrupt_fn=interrupt_fn, max_async_children=max_async_children, progress_fn=progress_fn, slot_key=slot_key,
-        task_indexes=task_indexes, task_transcripts=task_transcripts,
+        task_indexes=task_indexes, task_transcripts=task_transcripts, queue_when_full=queue_when_full,
         capacity_error=(
             f"Async delegation capacity reached ({max_async_children} running). Wait for one to finish "
             "(its result will re-enter the chat), or raise delegation.max_concurrent_children in "
             "config.yaml to allow more concurrent background units."))
     if handle["status"] == "dispatched":
-        logger.info("Dispatched async delegation batch %s (%d task(s), session_key=%s)",
-                    delegation_id, n, session_key or "<cli>")
+        logger.info("Dispatched async delegation batch %s (%d task(s), session_key=%s%s)",
+                    delegation_id, n, session_key or "<cli>", ", queued" if handle.get("queued") else "")
     return handle
 
 
@@ -1002,6 +1087,7 @@ def _finalize(delegation_id: str, result: Any, status: str) -> None:
         record["interrupt_fn"] = None  # drop the closure; child is done
         record["progress_fn"] = None  # stop stale-monitor sampling
         snapshot = dict(record)
+        _slot_cv.notify_all()  # its pool slot is free: a queued unit may start
     lease = snapshot.get("_approval_lease")
     if lease is not None:
         lease.release()
@@ -1292,6 +1378,8 @@ def list_async_delegations() -> list[dict[str, Any]]:
         for r in _records.values():
             item = {k: v for k, v in r.items() if k not in {"interrupt_fn", "progress_fn"} and not k.startswith("_")}
             status = r.get("status")
+            if status in _ACTIVE_STATES and r.get("_queued"):
+                item["queued"] = True  # waiting for a pool slot; nothing has run yet
             if status in _ACTIVE_STATES:
                 if r.get("_progress_ts"):
                     item["seconds_since_progress"] = round(now - r["_progress_ts"], 1)
@@ -1328,6 +1416,13 @@ def _interrupt_records(targets: list[dict[str, Any]], caller: str, reason: str, 
     count = sum(
         _call_interrupt(r.get("interrupt_fn"), "%s: %s interrupt failed: %s", caller, r.get("delegation_id"))
         for r in targets)
+    # A queued unit's children were just signalled; wake its worker so it settles now instead of
+    # waiting for a slot (the runner releases children stopped before they started).
+    with _slot_cv:
+        for record in targets:
+            if record.get("_queued"):
+                record["_stop_requested"] = True
+        _slot_cv.notify_all()
     if count:
         logger.info(msg, count, reason)
     return count

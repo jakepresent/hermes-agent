@@ -1,4 +1,7 @@
-"""A rejected background batch retains synchronous cancellation ownership."""
+"""A rejected background batch retains synchronous cancellation ownership.
+
+Fork: a full pool no longer rejects a model delegation (it is queued; see test_delegate_queue_at_capacity.py), so
+the inline fallback covered here is the scheduler-failure one."""
 
 from __future__ import annotations
 
@@ -123,7 +126,7 @@ def registry_state(tmp_path, monkeypatch):
     async_delegation._reset_for_tests()
 
 
-@pytest.mark.parametrize("rejection", ["capacity", "schedule_failure", "partial_schedule_failure"])
+@pytest.mark.parametrize("rejection", ["schedule_failure", "partial_schedule_failure"])
 @pytest.mark.parametrize("stop_timing", ["running", "during_admission"])
 @pytest.mark.parametrize("stop_kind", ["soft", "hard"])
 def test_rejected_background_child_stops_with_parent(
@@ -145,26 +148,12 @@ def test_rejected_background_child_stops_with_parent(
         batch = _batch(parent, background_child, child, pending_child)
     else:
         batch = _batch(parent, child)
-    occupied = threading.Event()
     release_occupier = threading.Event()
     admission_started = threading.Event()
     continue_admission = threading.Event()
     outcome = Future()
 
-    def occupy_slot():
-        occupied.set()
-        assert release_occupier.wait(30)
-        return {"status": "completed", "summary": "slot released"}
-
-    if rejection == "capacity":
-        accepted = async_delegation.dispatch_async_delegation(
-            goal="occupy the only slot", context=None, toolsets=None, role="leaf",
-            model=child.model, session_key="other-session", runner=occupy_slot,
-            max_async_children=1,
-        )
-        assert accepted["status"] == "dispatched"
-        assert occupied.wait(5)
-    elif rejection == "schedule_failure":
+    if rejection == "schedule_failure":
         class RejectingExecutor:
             def submit(self, *_args, **_kwargs):
                 raise RuntimeError("executor shut down")
@@ -265,9 +254,6 @@ def test_rejected_background_child_stops_with_parent(
                 assert not extra.closed_while_running
             completed_ids = {registry_state.get(timeout=5)["delegation_id"] for _ in accepted_ids}
             assert completed_ids == set(accepted_ids)
-        if rejection == "capacity":
-            completion = registry_state.get(timeout=5)
-            assert completion["delegation_id"] == accepted["delegation_id"]
         assert not worker.is_alive()
 
 

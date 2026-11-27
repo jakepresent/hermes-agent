@@ -362,6 +362,26 @@ The clarify ping has two halves, and both must survive a replay: the gateway res
 
 **Gates:** `tests/gateway/test_stt_echo_filler_strip.py` and `tests/gateway/test_stt_echo_filler_strip_echopath.py`.
 
+### 25. A full delegation pool queues instead of blocking the chat
+
+**Purpose:** With `delegation.max_concurrent_children` background units already running, upstream rejects a new model delegation and runs it inline, which holds the parent's turn for the child's whole run. On Nov 27, 2026 a `continue` issued while five units ran blocked the Discord chat for twelve minutes; follow-ups were only steered into the stuck turn.
+
+**Behavior to preserve:**
+
+- Model delegations (`_dispatch_unit` passes `queue_when_full=True`) are admitted as queued when the pool is full, behind at most one more pool's worth of waiting units. The tool returns at once with `queued: true` and a note telling the model to say so and end its turn.
+- A queued unit's worker waits in `_await_slot` and starts first come, first served when a slot frees (`_finalize` notifies).
+- `/stop`, `/new`, session end and shutdown (`_interrupt_records`) wake a queued unit; its children are released unrun ("Stopped before it started; nothing ran").
+- A full queue refuses the call with a tool error and nothing runs.
+- Callers that do not opt in keep reject-at-capacity: cron's `dispatch_async_delegation` and the auto-resume scheduler's detached-only continue.
+- The inline fallback remains only for non-capacity rejections (scheduler failure, closed session), with a note naming the error.
+- Known limit: `delegate_task(action='stop'|'steer')` by subagent_id cannot reach a child that is still queued (children register when they start); `/stop` can.
+
+**Replay commit:** `92a26822ed`
+
+**Primary paths:** `tools/async_delegation.py` (`_slot_occupancy_locked`, `_may_start_locked`, `_await_slot`, `was_queued`, `_dispatch_admitted`) and `tools/delegate_tool_dispatch.py` (`_dispatch_unit`, `_dispatch_background`, `_Batch.skip_stopped_before_start`, `_refuse_unstarted`).
+
+**Primary gate:** `tests/tools/test_delegate_queue_at_capacity.py` (5 of 5 red on plain v0.23.4; the queue test times out there because the call runs inline). `tests/tools/test_delegate_capacity_interrupt.py` dropped its `capacity` case, which pinned the inline fallback.
+
 ## Intentionally absent
 
 Do not revive these from the old fork unless Jake makes a new product decision:
